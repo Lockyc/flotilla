@@ -1,0 +1,39 @@
+[package]
+name = "flotilla"
+version = "0.1.0"
+edition = "2021"
+description = "A workspace where any tab can head a group of documents, each opened once, restored on relaunch. macOS only."
+license = "MIT"
+repository = "https://github.com/Lockyc/flotilla"
+readme = "../README.md"
+publish = false
+
+[lib]
+name = "flotilla_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+# The shared sidebar chrome, embedded as string consts; build.rs writes them into ../src (the
+# frontendDist Tauri embeds). Pinned by rev — bump in lockstep with the toolchain.
+chrome-core = { git = "https://github.com/Lockyc/chrome-core", rev = "cbb145cc32ffa939f7c4caf3e92bdf871d8d1bfb" }
+# Shared release tooling + build_stamp. build.rs materializes scripts/*.sh (git-ignored) and stamps
+# BUILD_GIT_SHA/BUILD_DATE. default-features=false keeps the build-dep zero-tauri (resolver 2 keeps
+# it separate from the runtime-featured [dependencies] entry below). Pinned by rev.
+shell-core = { git = "https://github.com/Lockyc/shell-core", rev = "2fc995564fa51dee623661b2ad656b4c77e7c340", default-features = false }
+
+[dependencies]
+tauri = { version = "2", features = ["unstable", "devtools"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# updater/process are kept explicit so their capability permissions resolve; plugin *registration*
+# flows through shell_core::register_plugins (runtime feature).
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
+# Same rev as the build-dep above — bump both in lockstep.
+shell-core = { git = "https://github.com/Lockyc/shell-core", rev = "2fc995564fa51dee623661b2ad656b4c77e7c340", features = ["runtime"] }
+flotilla-core = { path = "../crates/flotilla-core" }
+dirs = "5"
+
+# The chrome-core / shell-core [patch] local-dev overrides live in the workspace-root Cargo.toml
+# (../Cargo.toml) — a [patch] must sit in the workspace root, not a member manifest.

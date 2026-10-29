@@ -1,0 +1,15 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "chrome-events",
+  "description": "Let each window's local chrome sidebar listen for config-reload/badge events, drive window-move drag (the sidebar's `data-tauri-drag-region` invokes the capability-gated `plugin:window|start_dragging`), and run in-app updates (check/download/install + relaunch). The chrome is each window's local (App-URL) main webview; content tabs load remote (External) URLs, and this capability has no `remote` block (local-only, the default), so Tauri denies these permissions to remote content by origin regardless of label — the sidebar gets them, remote pages never do.",
+  "windows": ["*"],
+  "webviews": ["*"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "core:window:allow-start-dragging",
+    "core:window:allow-internal-toggle-maximize",
+    "updater:default",
+    "process:allow-restart"
+  ]
+}

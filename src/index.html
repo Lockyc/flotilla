@@ -1,0 +1,20 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>flotilla</title>
+    <link rel="stylesheet" href="chrome-core.css" />
+    <link rel="stylesheet" href="chrome.css" />
+  </head>
+  <body>
+    <!-- This page is the window's MAIN webview, spanning the whole window, so `data-tauri-drag-region`
+         moves the window natively. The sidebar is a fixed-width column; #content-hole is where the
+         Rust-positioned document webviews will sit above this page. -->
+    <div id="app">
+      <aside id="sidebar" data-tauri-drag-region></aside>
+      <div id="content-hole" data-tauri-drag-region></div>
+    </div>
+    <script src="chrome-core.js"></script>
+    <script type="module" src="chrome.js"></script>
+  </body>
+</html>

@@ -1,0 +1,12 @@
+/* Page shell only — the sidebar interior lives in chrome-core (chrome-core.css). */
+
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100vh; overflow: hidden; background: #1e1e1e; }
+
+#app { height: 100vh; display: flex; flex-direction: row; }
+
+/* `width` is the resize-controlled sidebar width, set inline by the controller. */
+#sidebar { width: var(--cc-sidebar-w, 240px); flex: none; }
+
+/* The hole document webviews will cover. */
+#content-hole { flex: 1; position: relative; background: #1e1e1e; }

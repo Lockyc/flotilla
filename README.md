@@ -1,0 +1,15 @@
+# flotilla
+
+![Platform: macOS](https://img.shields.io/badge/platform-macOS-lightgrey) ![Rust](https://img.shields.io/badge/rust-Tauri%20v2-orange) ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
+
+A macOS workspace where any tab can head a group of documents (usually a Google Drive folder). Documents opened from a tab list beneath it, each document is open once, and the session is restored on relaunch.
+
+**Status:** early, in development. The window currently opens an empty workspace.
+
+## Build and run
+
+```sh
+just run      # run the app
+just gate     # format check, clippy, tests
+just build    # release .app bundle (needs `cargo install tauri-cli --version ^2`)
+```

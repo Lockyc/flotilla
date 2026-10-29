@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Active-[patch] guard. Activated per clone via core.hooksPath -> .githooks.
+# A committed path override builds green for you and is unresolvable for every
+# other clone and CI, so block the commit rather than discover it downstream.
+set -euo pipefail
+
+root="$(git rev-parse --show-toplevel)"
+if grep -qE '^\[patch\.' "$root/Cargo.toml"; then
+  echo "✗ active [patch] in Cargo.toml — run 'just chrome-pin' / 'just shell-pin' before committing" >&2
+  exit 1
+fi
