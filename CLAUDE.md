@@ -1,5 +1,9 @@
 ---
 type: architecture
+links:
+  - rel: see-also
+    to: README.md
+    note: README is the user-facing tour; this is the agent-facing architecture doc
 description: Agent orientation for flotilla — layout, shared cores, build and release mechanics.
 ---
 
