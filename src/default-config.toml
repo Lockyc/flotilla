@@ -38,6 +38,7 @@ title = "flotilla"
 # url = "https://drive.google.com/drive/folders/0AExampleFolderRoot"  # its head and Home
 # store = "default"           # optional login store; another store is another account
 # collapsed = false           # optional; true shows the head alone
+# detached = false            # optional; true reopens the head in its own window
 #
 # [[window.group.tab]]
 # title = "Budget"            # the document's name in the sidebar

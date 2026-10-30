@@ -74,12 +74,16 @@ pub fn pop_out_tab(id: TabId, webview: Webview) -> Result<(), String> {
 
 /// Pops tab `id` out (the row control, ⌘⇧O).
 pub fn pop_out(app: &AppHandle, id: &TabId) -> Result<(), String> {
-    {
+    let writes = {
         let state = app.state::<AppState>();
         let mut ws = state.ws.lock().unwrap();
         let created = state.created.lock().unwrap();
-        crate::detach::pop_out(&mut ws, &created, id)?;
-    }
+        let (popped, writes) =
+            crate::write::change(&mut ws, |ws| crate::detach::pop_out(ws, &created, id));
+        popped?;
+        writes
+    };
+    crate::write::commit(app, &writes);
     tabs::changed(app);
     Ok(())
 }
@@ -133,9 +137,11 @@ pub fn toggle_group(
     state: State<AppState>,
 ) -> Result<(), String> {
     require_chrome(&webview)?;
-    state.ws.lock().unwrap().set_collapsed(&head, collapsed);
+    let ((), writes) = crate::write::change(&mut state.ws.lock().unwrap(), |ws| {
+        ws.set_collapsed(&head, collapsed)
+    });
+    crate::write::commit(webview.app_handle(), &writes);
     tabs::push_dto(webview.app_handle());
-    crate::persist::mark_dirty(webview.app_handle());
     Ok(())
 }
 
@@ -229,10 +235,15 @@ pub fn home(app: &AppHandle, id: &TabId) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-/// Applies `op` to the workspace, raises the window of a popped-out tab it activated
-/// ([`crate::detach::apply`]), then brings everything in line with it.
+/// Applies `op` to the workspace, writes it to the config ([`crate::write::change`]), raises the
+/// window of a popped-out tab it activated ([`crate::detach::apply`]), then brings everything in
+/// line with it.
 pub fn mutate(app: &AppHandle, op: impl FnOnce(&mut flotilla_core::model::Workspace)) {
-    let raised = crate::detach::apply(&mut app.state::<AppState>().ws.lock().unwrap(), op);
+    let (raised, writes) =
+        crate::write::change(&mut app.state::<AppState>().ws.lock().unwrap(), |ws| {
+            crate::detach::apply(ws, op)
+        });
+    crate::write::commit(app, &writes);
     if let Some(id) = &raised {
         crate::detach::raise(app, id);
     }

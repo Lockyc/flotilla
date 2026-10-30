@@ -119,10 +119,22 @@ pub fn plan(ws: &Workspace, created: &HashSet<TabId>, failed: &HashSet<TabId>) -
     }
 }
 
-/// Whether a page's reported title replaces the row's. A page reports an empty title while it
-/// loads, which would blank a restored row's saved name.
-pub fn adopt_title(current: &str, reported: &str) -> bool {
-    !reported.trim().is_empty() && current != reported
+/// Whether a page's reported title replaces the tab's stored one: only while the stored title is
+/// still the tab's URL (what a new group or document is written with), so a name is written once
+/// and never follows navigation. A page reports an empty title while it loads.
+pub fn adopt_title(stored: &str, home_url: &str, reported: &str) -> bool {
+    stored == home_url && !reported.trim().is_empty() && reported != stored
+}
+
+/// Gives tab `id` the page's reported title when [`adopt_title`] says so; whether it did.
+pub fn retitled(ws: &mut Workspace, id: &TabId, reported: &str) -> bool {
+    let adopt = ws
+        .find(id)
+        .is_some_and(|(_, _, t)| adopt_title(&t.title, &t.home_url, reported));
+    if adopt {
+        ws.set_title(id, reported.trim());
+    }
+    adopt
 }
 
 /// After any workspace change: bring the webviews, the popped-out windows and the sidebar in line,
@@ -267,21 +279,24 @@ fn intercept(app: &AppHandle, label: &str, url: &Url, o: LinkOrigin) -> bool {
     let Some(id) = tab_id(label) else {
         return false;
     };
-    let (decision, front) = {
+    let (decision, front, writes) = {
         let state = app.state::<AppState>();
         let mut ws = state.ws.lock().unwrap();
         let from_popout = ws.find(&id).is_some_and(|(_, _, t)| t.detached);
         let mut decision = Decision::PassThrough;
-        let raised = crate::detach::apply(&mut ws, |ws| {
-            decision = nav::decide(ws, &id, url, origin(o));
+        let (raised, writes) = crate::write::change(&mut ws, |ws| {
+            crate::detach::apply(ws, |ws| {
+                decision = nav::decide(ws, &id, url, origin(o));
+            })
         });
-        (decision, forward(from_popout, raised))
+        (decision, forward(from_popout, raised), writes)
     };
     match decision {
         Decision::PassThrough => false,
         Decision::Open(_) => {
             let deferred = app.clone();
             let _ = app.run_on_main_thread(move || {
+                crate::write::commit(&deferred, &writes);
                 match &front {
                     Some(Forward::Detached(r)) => crate::detach::raise(&deferred, r),
                     Some(Forward::Main) => bring_main_forward(&deferred),
@@ -325,20 +340,14 @@ fn retitle(app: &AppHandle, label: &str, title: &str) {
     let Some(id) = tab_id(label) else {
         return;
     };
-    let retitled = {
+    let (adopted, writes) = {
         let state = app.state::<AppState>();
         let mut ws = state.ws.lock().unwrap();
-        let adopt = ws
-            .find(&id)
-            .is_some_and(|(_, _, t)| adopt_title(&t.title, title));
-        if adopt {
-            ws.set_title(&id, title);
-        }
-        adopt
+        crate::write::change(&mut ws, |ws| retitled(ws, &id, title))
     };
-    if retitled {
+    if adopted {
+        crate::write::commit(app, &writes);
         push_dto(app);
-        crate::persist::mark_dirty(app);
     }
 }
 
@@ -447,11 +456,31 @@ mod tests {
     }
 
     #[test]
-    fn a_loading_page_keeps_the_saved_title() {
-        assert!(!adopt_title("Budget", ""));
-        assert!(!adopt_title("Budget", "  "));
-        assert!(!adopt_title("Budget", "Budget"));
-        assert!(adopt_title("Budget", "Budget 2026"));
+    fn title_is_adopted_only_while_it_is_the_url() {
+        // A new tab's stored title is its URL: the page's first real title replaces it.
+        assert!(adopt_title(DOC_A, DOC_A, "Budget"));
+        // A loading page reports nothing worth keeping.
+        assert!(!adopt_title(DOC_A, DOC_A, ""));
+        assert!(!adopt_title(DOC_A, DOC_A, "  "));
+        // Once named, the page never renames it.
+        assert!(!adopt_title("Budget", DOC_A, "Budget 2026"));
+    }
+
+    #[test]
+    fn a_renamed_tab_keeps_its_name_after_navigation() {
+        let (mut ws, h, _, b) = ws();
+        let title = |ws: &Workspace, id: &TabId| ws.find(id).unwrap().2.title.clone();
+        assert_eq!(title(&ws, &b), DOC_B);
+        // The page loads: the URL title gives way to the page's.
+        assert!(retitled(&mut ws, &b, "Budget"));
+        // The user renames it; navigating inside it reports other titles, which are ignored.
+        ws.set_title(&b, "Club budget");
+        assert!(!retitled(&mut ws, &b, "Budget – Sheet 2"));
+        assert_eq!(title(&ws, &b), "Club budget");
+        // A head named by its page keeps that name while it browses subfolders.
+        assert!(retitled(&mut ws, &h, "Auction 2026"));
+        assert!(!retitled(&mut ws, &h, "Subfolder"));
+        assert_eq!(title(&ws, &h), "Auction 2026");
     }
 
     #[test]

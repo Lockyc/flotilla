@@ -62,13 +62,14 @@ pub struct ConfigWindow {
     pub groups: Vec<ConfigGroup>,
 }
 
-/// A config `[[window.group]]`: its name, head `url`, store and members.
+/// A config `[[window.group]]`: its name, head `url`, store and members. `detached` is the head's.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ConfigGroup {
     pub name: String,
     pub url: String,
     pub store: String,
     pub collapsed: bool,
+    pub detached: bool,
     pub tabs: Vec<ConfigTab>,
 }
 
@@ -131,10 +132,17 @@ fn rekey(t: &mut Tab, store: &str) {
 }
 
 impl Workspace {
-    /// The windows and groups the config holds, nothing active. An entry whose URL does not
-    /// parse, or whose identity repeats an earlier one, is left out (the config's own checks
-    /// refuse both, so this only guards the model's invariant).
+    /// The windows and groups the config holds, nothing active. Each tab's `home_url` is the
+    /// config's own text, so a write addressing the tab by its `url` finds it. An entry whose URL
+    /// does not parse, or whose identity repeats an earlier one, is left out (the config's own
+    /// checks refuse both, so this only guards the model's invariant); heads are claimed before
+    /// members, so a head is never dropped for a duplicate member.
     pub fn from_config(windows: &[ConfigWindow]) -> Workspace {
+        let configured = |url: &str, title: &str, store: &str, detached: bool| {
+            let mut t = tab(&Url::parse(url).ok()?, title, store, detached);
+            t.home_url = url.to_string();
+            Some(t)
+        };
         let mut seen: Vec<DocKey> = vec![];
         let mut claim = |t: &Tab| {
             let fresh = !seen.contains(&t.key);
@@ -143,33 +151,34 @@ impl Workspace {
             }
             fresh
         };
+        // Heads first, each with the config group it came from.
+        let heads: Vec<Vec<(&ConfigGroup, Tab)>> = windows
+            .iter()
+            .map(|w| {
+                w.groups
+                    .iter()
+                    .filter_map(|g| Some((g, configured(&g.url, &g.name, &g.store, g.detached)?)))
+                    .filter(|(_, head)| claim(head))
+                    .collect()
+            })
+            .collect();
         let windows = windows
             .iter()
-            .map(|w| WindowWs {
+            .zip(heads)
+            .map(|(w, heads)| WindowWs {
                 title: w.title.trim().to_string(),
-                groups: w
-                    .groups
-                    .iter()
-                    .filter_map(|g| {
-                        let head = tab(&Url::parse(&g.url).ok()?, &g.name, &g.store, false);
-                        if !claim(&head) {
-                            return None;
-                        }
-                        let members = g
+                groups: heads
+                    .into_iter()
+                    .map(|(g, head)| Group {
+                        head,
+                        members: g
                             .tabs
                             .iter()
-                            .filter_map(|t| {
-                                let url = Url::parse(&t.url).ok()?;
-                                Some(tab(&url, &t.title, &g.store, t.detached))
-                            })
+                            .filter_map(|t| configured(&t.url, &t.title, &g.store, t.detached))
                             .filter(|t| claim(t))
-                            .collect();
-                        Some(Group {
-                            head,
-                            members,
-                            collapsed: g.collapsed,
-                            store: g.store.clone(),
-                        })
+                            .collect(),
+                        collapsed: g.collapsed,
+                        store: g.store.clone(),
                     })
                     .collect(),
                 active: None,
@@ -182,15 +191,39 @@ impl Workspace {
     }
 
     /// Adopts a reloaded config's windows. Each window keeps its active tab when a window of the
-    /// same title still holds it docked; Recent is the session's and stays.
+    /// same title still holds it docked; when it went (a hand edit), its group's docked head takes
+    /// over, else the nearest following group's docked head, else the nearest preceding one's.
+    /// Recent is the session's and stays.
     pub fn rebase(&mut self, fresh: Workspace) {
         let old = std::mem::replace(&mut self.windows, fresh.windows);
         for w in &mut self.windows {
-            w.active = old
+            let Some(o) = old.iter().find(|o| o.title == w.title) else {
+                w.active = None;
+                continue;
+            };
+            let Some(a) = o.active.clone() else {
+                w.active = None;
+                continue;
+            };
+            if docked_in(w, &a) {
+                w.active = Some(a);
+                continue;
+            }
+            let gi = o
+                .groups
                 .iter()
-                .find(|o| o.title == w.title)
-                .and_then(|o| o.active.clone())
-                .filter(|a| docked_in(w, a));
+                .position(|g| g.head.id == a || g.members.iter().any(|m| m.id == a))
+                .unwrap_or(0);
+            let head = o.groups.get(gi).map(|g| g.head.id.clone());
+            let docked = |g: &&Group| !g.head.detached;
+            let at = gi.min(w.groups.len());
+            w.active = head.filter(|h| docked_in(w, h)).or_else(|| {
+                w.groups[at..]
+                    .iter()
+                    .find(docked)
+                    .or_else(|| w.groups[..at].iter().rev().find(docked))
+                    .map(|g| g.head.id.clone())
+            });
         }
     }
 
@@ -449,8 +482,8 @@ impl Workspace {
         }
     }
 
-    /// Lifts a member into a new group headed by it (same store), placed after its old group in
-    /// the same window.
+    /// Lifts a member into a new group headed by it (same store), at the end of its window, where
+    /// the config appends the new group.
     pub fn make_own_group(&mut self, member: &TabId) {
         let Some((wi, gi)) = self.locate(member) else {
             return;
@@ -461,15 +494,12 @@ impl Workspace {
         };
         let head = groups[gi].members.remove(at);
         let store = groups[gi].store.clone();
-        groups.insert(
-            gi + 1,
-            Group {
-                head,
-                members: vec![],
-                collapsed: false,
-                store,
-            },
-        );
+        groups.push(Group {
+            head,
+            members: vec![],
+            collapsed: false,
+            store,
+        });
         self.activate(member);
     }
 
@@ -645,6 +675,7 @@ mod tests {
             url: url.to_string(),
             store: store.into(),
             collapsed: false,
+            detached: false,
             tabs: tabs
                 .iter()
                 .map(|(t, u)| ConfigTab {
@@ -673,6 +704,58 @@ mod tests {
                 groups: vec![cgroup("Two", &folder(2), "default", &[("Roster", &doc(3))])],
             },
         ]
+    }
+
+    #[test]
+    fn from_config_never_drops_a_head_for_a_duplicate_member() {
+        // Window A lists doc 3 as a member; window B, later, heads a group with it.
+        let mut cfg = two_windows();
+        cfg[0].groups[0].tabs.push(ConfigTab {
+            title: "Dup".into(),
+            url: doc(3).to_string(),
+            detached: false,
+        });
+        cfg[1].groups.push(cgroup("Three", &doc(4), "default", &[]));
+        cfg[1].groups[1].url = doc(3).to_string();
+        cfg[1].groups[0].tabs.clear();
+        let w = Workspace::from_config(&cfg);
+        assert_eq!(w.windows[1].groups[1].head.title, "Three");
+        assert_eq!(w.windows[0].groups[0].members.len(), 2);
+    }
+
+    #[test]
+    fn from_config_keeps_the_configs_url_text_and_head_detached() {
+        let mut cfg = two_windows();
+        cfg[0].groups[0].url = "https://example.com".into();
+        cfg[0].groups[0].detached = true;
+        let w = Workspace::from_config(&cfg);
+        let head = &w.windows[0].groups[0].head;
+        assert_eq!(head.home_url, "https://example.com");
+        assert!(head.detached);
+    }
+
+    #[test]
+    fn rebase_falls_back_to_a_neighbour_when_the_active_tab_goes() {
+        let mut w = Workspace::from_config(&two_windows());
+        let minutes = w.windows[0].groups[0].members[1].id.clone();
+        let one = w.windows[0].groups[0].head.id.clone();
+        w.activate(&minutes);
+        // A hand edit removes Minutes: its group's head takes over.
+        let mut cfg = two_windows();
+        cfg[0].groups[0].tabs.pop();
+        w.rebase(Workspace::from_config(&cfg));
+        assert_eq!(w.windows[0].active, Some(one));
+        // A hand edit removes the whole group: the next group's head takes over.
+        cfg[0]
+            .groups
+            .push(cgroup("Later", &folder(7), "default", &[]));
+        w.rebase(Workspace::from_config(&cfg));
+        cfg[0].groups.remove(0);
+        w.rebase(Workspace::from_config(&cfg));
+        assert_eq!(
+            w.windows[0].active,
+            Some(tab_id(&identity("default", &folder(7))))
+        );
     }
 
     #[test]
@@ -759,11 +842,14 @@ mod tests {
             1,
             "Recent is the session's, not the config's"
         );
-        // A tab that went away leaves its window with nothing active.
+        // A tab that went away hands over to its group's head.
         let mut cfg = two_windows();
         cfg[0].groups[0].tabs.clear();
         w.rebase(Workspace::from_config(&cfg));
-        assert_eq!(w.windows[0].active, None);
+        assert_eq!(
+            w.windows[0].active,
+            Some(w.windows[0].groups[0].head.id.clone())
+        );
     }
 
     #[test]
@@ -952,11 +1038,13 @@ mod tests {
         let mut w = ws();
         let h = id(w.new_group(W, &folder(1), "work").unwrap());
         let d = id(w.open_from(&h, &doc(1)).unwrap());
+        head_of(&mut w, 2);
         w.make_own_group(&d);
-        assert_eq!(groups(&w).len(), 2);
+        assert_eq!(groups(&w).len(), 3);
         assert!(member_ids(&w, &h).is_empty());
-        assert_eq!(groups(&w)[1].head.id, d);
-        assert_eq!(groups(&w)[1].store, "work");
+        // At the end of the window, where the config appends it.
+        assert_eq!(groups(&w)[2].head.id, d);
+        assert_eq!(groups(&w)[2].store, "work");
         assert_eq!(w.open_from(&h, &doc(1)), Some(Opened::Raised(d)));
     }
 
@@ -1190,14 +1278,16 @@ mod tests {
     }
 
     #[test]
-    fn ids_are_not_reused_within_a_session() {
+    fn the_same_document_gets_the_same_id() {
         let mut w = ws();
         let a = head_of(&mut w, 1);
         w.close_group(&a);
+        w.forget_recent(0);
         let b = head_of(&mut w, 2);
-        w.close_tab(&b);
-        let c = head_of(&mut w, 3);
-        assert!(a != b && b != c && a != c);
+        // Closed and opened again, in the same or another workspace: the same id.
+        assert_eq!(head_of(&mut w, 1), a);
+        assert_eq!(head_of(&mut ws(), 1), a);
+        assert_ne!(a, b);
     }
 
     #[test]
@@ -1281,7 +1371,7 @@ mod tests {
         let (mut w, _, a, b, _) = two_groups();
         w.set_detached(&a, true);
         w.make_own_group(&a);
-        assert_eq!(groups(&w)[1].head.id, a);
+        assert_eq!(groups(&w)[2].head.id, a);
         assert_eq!(active(&w), Some(b));
         assert_eq!(w.take_raise(), Some(a));
     }

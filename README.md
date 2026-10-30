@@ -66,11 +66,12 @@ A document is open once across every window: two heads or tabs naming the same d
 | `[[window]]` `colour` | none | `#rgb` / `#rrggbb` accent for the sidebar, the **Window** menu swatch and popped-out windows. |
 | `[[window]]` `width`, `height` | `1500`, `1000` | The window's size on its first open. |
 | `[[window]]` `open_on_start` | `true` | `false` leaves the window closed at launch until opened from the **Window** menu. |
-| `[[window.group]]` `name` | required | The group's name in the sidebar. Unique within its window. |
+| `[[window.group]]` `name` | required | The group's name in the sidebar. Unique within its window. A new group is written named by its URL, then by its page's title once that loads; after that the name stays as written. |
 | `[[window.group]]` `url` | required | The group's head and Home: a Drive folder or a document. |
 | `[[window.group]]` `store` | `"default"` | The login store the group's documents open in; another store is another account. |
 | `[[window.group]]` `collapsed` | `false` | Shows the head alone. |
-| `[[window.group.tab]]` `title` | required | The document's name in the sidebar. |
+| `[[window.group]]` `detached` | `false` | The head is popped out; reopens in its own window. |
+| `[[window.group.tab]]` `title` | required | The document's name in the sidebar, written like a group's `name`. |
 | `[[window.group.tab]]` `url` | required | The document, and its Home. |
 | `[[window.group.tab]]` `detached` | `false` | Popped out; reopens in its own window. |
 | `density` | `"comfortable"` | Chrome sizing: `comfortable` or `compact` (type and spacing scaled down). Hot-reloads. |

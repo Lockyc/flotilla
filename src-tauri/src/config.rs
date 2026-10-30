@@ -67,6 +67,9 @@ pub struct FlotillaGroup {
     /// The sidebar shows the head alone.
     #[serde(default)]
     pub collapsed: bool,
+    /// The head is popped out; reopens in its own window.
+    #[serde(default)]
+    pub detached: bool,
 }
 
 /// A `[[window.group.tab]]`: a document opened from its group.
@@ -131,6 +134,7 @@ impl Config {
                         url: g.extra.url.clone(),
                         store: g.extra.store.clone(),
                         collapsed: g.extra.collapsed,
+                        detached: g.extra.detached,
                         tabs: g
                             .tabs
                             .iter()
@@ -238,7 +242,7 @@ mod tests {
         "open_on_start",
         "group",
     ];
-    const GROUP_KEYS: [&str; 5] = ["name", "url", "store", "collapsed", "tab"];
+    const GROUP_KEYS: [&str; 6] = ["name", "url", "store", "collapsed", "detached", "tab"];
     const TAB_KEYS: [&str; 3] = ["title", "url", "detached"];
 
     const FOLDER: &str = "https://drive.google.com/drive/folders/0AExampleFolderRoot";
@@ -298,7 +302,7 @@ mod tests {
              [[window]]\ntitle = \"Rotary\"\ncolour = \"#17458F\"\nwidth = 1200\nheight = 800\n\
              open_on_start = false\n\
              [[window.group]]\nname = \"Bulletins\"\nurl = \"{FOLDER}\"\nstore = \"club\"\n\
-             collapsed = true\n\
+             collapsed = true\ndetached = true\n\
              [[window.group.tab]]\ntitle = \"Budget\"\nurl = \"{SHEET}\"\ndetached = true\n"
         ))
         .unwrap();
@@ -318,6 +322,7 @@ mod tests {
                 url: FOLDER.into(),
                 store: "club".into(),
                 collapsed: true,
+                detached: true,
             }
         );
         assert_eq!(
@@ -353,6 +358,7 @@ mod tests {
                     url: FOLDER.into(),
                     store: DEFAULT_STORE.into(),
                     collapsed: true,
+                    detached: false,
                     tabs: vec![ConfigTab {
                         title: "Budget".into(),
                         url: SHEET.into(),

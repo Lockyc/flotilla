@@ -9,6 +9,7 @@ mod persist;
 mod sidebar;
 mod state;
 mod tabs;
+mod write;
 
 use serde::Serialize;
 use tauri::{Emitter, Manager, TitleBarStyle, WebviewUrl};
@@ -67,6 +68,14 @@ fn apply_config(app: &tauri::AppHandle, cfg: config::Config) {
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || tabs::changed(&handle));
     emit_to_main_chrome(app, "config-reloaded", ());
+}
+
+/// Reads the config file again and applies it, or shows why it could not be read.
+fn reload_config(app: &tauri::AppHandle) {
+    match config::load(&config::config_path()) {
+        Ok(cfg) => apply_config(app, cfg),
+        Err(msg) => tabs::notice(app, msg),
+    }
 }
 
 /// Watches the config file: a clean reload is applied (and reformatted when `format_on_save`), a

@@ -111,14 +111,16 @@ pub fn reconcile(app: &AppHandle) {
     let mut failed = false;
     for t in &plan.open {
         if let Err(e) = open(app, t) {
-            state.ws.lock().unwrap().set_detached(&t.id, false);
+            let ((), writes) = crate::write::change(&mut state.ws.lock().unwrap(), |ws| {
+                ws.set_detached(&t.id, false)
+            });
+            crate::write::commit(app, &writes);
             tabs::notice(app, format!("Couldn't pop out {}: {e}", t.home_url));
             failed = true;
         }
     }
     if failed {
         tabs::push_dto(app);
-        crate::persist::mark_dirty(app);
     }
 }
 
@@ -164,15 +166,19 @@ fn redock(app: &AppHandle, id: &TabId) {
     if QUITTING.load(Ordering::SeqCst) {
         return;
     }
-    {
+    let writes = {
         let state = app.state::<AppState>();
         let mut ws = state.ws.lock().unwrap();
         if !ws.find(id).is_some_and(|(_, _, t)| t.detached) {
             return;
         }
-        ws.set_detached(id, false);
-        ws.activate(id);
-    }
+        crate::write::change(&mut ws, |ws| {
+            ws.set_detached(id, false);
+            ws.activate(id);
+        })
+        .1
+    };
+    crate::write::commit(app, &writes);
     tabs::changed(app);
 }
 
