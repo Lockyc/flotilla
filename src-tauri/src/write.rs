@@ -669,7 +669,7 @@ impl Gate {
 }
 
 /// Runs `op` on the workspace and writes what it changed to the config, holding the gate across
-/// both ([`through_with`]). A failed write reloads the workspace from the file; its views are
+/// both ([`through_with`]). A failed write undoes `op` and reloads the windows from the file; its views are
 /// brought in line after the gate is released. The caller holds neither the gate nor `ws`, and
 /// does its own view work afterwards as for any change.
 pub fn through<R>(app: &AppHandle, op: impl FnOnce(&mut Workspace) -> R) -> R {
@@ -722,9 +722,10 @@ fn written<R>(
 
 /// [`through`]'s sequence, over its parts: under `gate`, `run` on `ws` (a change and the writes
 /// it implies: [`change`] or [`change_rekey`]), its writes to the config at `path` (seeding the
-/// starter config first when there is none), and on a failed write `reload(error)`, which must
-/// do no view work, then `rescue` on the reloaded `ws` and `run`'s result; then, released,
-/// `views()` if a write failed.
+/// starter config first when there is none), and on a failed write `ws` put back as it was before
+/// `run` (what only the session keeps, Incoming and Recent, is not lost with the write), then
+/// `reload(error)`, which must do no view work, then `rescue` on the reloaded `ws` and `run`'s
+/// result; then, released, `views()` if a write failed.
 pub(crate) fn through_with<R>(
     gate: &Gate,
     ws: &std::sync::Mutex<Workspace>,
@@ -736,7 +737,10 @@ pub(crate) fn through_with<R>(
 ) -> R {
     let (r, failed) = {
         let _held = gate.hold();
-        let (mut r, writes) = run(&mut ws.lock().unwrap());
+        let (before, (mut r, writes)) = {
+            let mut ws = ws.lock().unwrap();
+            (ws.clone(), run(&mut ws))
+        };
         let written = if writes.is_empty() {
             Ok(())
         } else {
@@ -749,6 +753,7 @@ pub(crate) fn through_with<R>(
         };
         let failed = written.is_err();
         if let Err(e) = written {
+            *ws.lock().unwrap() = before;
             reload(e);
             rescue(&mut ws.lock().unwrap(), &mut r);
         }
@@ -1160,6 +1165,11 @@ mod tests {
             },
         );
         assert!(reloaded.get() && rescued && viewed.get());
+        // The failed change is undone even with no reload behind it (a file that doesn't parse).
+        {
+            let w = ws.lock().unwrap();
+            assert!(!w.find(&id_of(&w, F2)).unwrap().1.collapsed);
+        }
         // A commit that lands does no view work of its own: the caller's follows it.
         through_with(
             &gate,
