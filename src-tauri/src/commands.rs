@@ -2,9 +2,10 @@
 //! touch webviews directly; each locks `ws` only to change or read it. A chrome acts on the
 //! workspace window its own window shows.
 
+use crate::config::DEFAULT_STORE;
 use crate::state::AppState;
 use crate::tabs;
-use flotilla_core::model::{Opened, TabId};
+use flotilla_core::model::{Handed, Opened, TabId};
 use flotilla_core::nav::parse_group_url;
 use serde::Deserialize;
 use shell_core::compositing::{layout_webviews, HoleRect};
@@ -33,8 +34,9 @@ pub fn get_workspace(
     let ws = state.ws.lock().unwrap();
     let created = state.created.lock().unwrap();
     let none = Default::default();
-    Ok(crate::sidebar::sidebar_dto(
-        tabs::window(&ws, &title),
+    Ok(crate::sidebar::window_dto(
+        &ws,
+        &title,
         created.get(webview.label()).unwrap_or(&none),
     ))
 }
@@ -149,45 +151,130 @@ pub fn toggle_group(head: TabId, collapsed: bool, webview: Webview) -> Result<()
 pub fn new_group(url: String, webview: Webview) -> Result<(), String> {
     let window = require_chrome(&webview)?;
     let url = parse_group_url(&url)?;
-    open_group(webview.app_handle(), &window, &url, true);
+    show_from(webview.app_handle(), &window, true, |ws| {
+        ws.new_group(&window, &url, DEFAULT_STORE).map(opened_id)
+    });
     Ok(())
 }
 
-/// Opens `url` as a new group in the window titled `window`, or raises the tab already showing it;
-/// `window` is in front unless `in_front` is false ([`show_from`]).
-fn open_group(app: &AppHandle, window: &str, url: &Url, in_front: bool) {
-    show_from(app, window, in_front, |ws| {
-        ws.new_group(window, url, crate::config::DEFAULT_STORE)
-            .map(|o| match o {
-                Opened::Added(id) | Opened::Raised(id) => id,
-            })
-    });
+/// The tab an open shows, whether it added it or raised it.
+pub(crate) fn opened_id(o: Opened) -> TabId {
+    match o {
+        Opened::Added(id) | Opened::Raised(id) => id,
+    }
 }
 
 /// Links handed over before `setup` has built the workspace: macOS delivers the link a cold launch
 /// was opened with ahead of it. `open_early_links` opens them once the state exists.
 static EARLY_LINKS: std::sync::Mutex<Vec<Url>> = std::sync::Mutex::new(Vec::new());
 
-/// A link another app handed flotilla (it was opened with flotilla): opened as a group the same way
-/// a pasted one is, in the window the menu bar acts on (else the first window, reopened), and that
-/// window brought forward. A link flotilla can't head a group with shows its reason in the sidebar.
+/// What a handed URL asks for: a bare link (`open -a flotilla <url>`), or a
+/// `flotilla://open?window=…&group=…&url=…` request aiming its `url` at a window and group.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Handoff {
+    pub window: Option<String>,
+    pub group: Option<String>,
+    pub link: String,
+    /// Why there is nothing to open: a request with no `url`, whose own text is then the link.
+    pub problem: Option<String>,
+}
+
+pub fn handoff(url: &Url) -> Handoff {
+    let Some(req) = shell_core::windows::open_request(url, "flotilla") else {
+        return Handoff {
+            window: None,
+            group: None,
+            link: url.to_string(),
+            problem: None,
+        };
+    };
+    let link = req.param("url").filter(|l| !l.trim().is_empty());
+    Handoff {
+        group: req.param("group").map(str::to_string),
+        problem: link.is_none().then(|| format!("No link in {url}")),
+        link: link.map_or_else(|| url.to_string(), str::to_string),
+        window: req.window,
+    }
+}
+
+/// The window a handed link goes to: the one titled `requested`, else the one titled
+/// `last_focused`, else the first. `None` with no windows at all.
+pub fn target_window(
+    ws: &flotilla_core::model::Workspace,
+    requested: Option<&str>,
+    last_focused: Option<&str>,
+) -> Option<String> {
+    let find = |t: Option<&str>| {
+        let t = t?.trim();
+        ws.windows.iter().find(|w| w.title.trim() == t)
+    };
+    find(requested)
+        .or_else(|| find(last_focused))
+        .or(ws.windows.first())
+        .map(|w| w.title.clone())
+}
+
+/// The window to bring forward once a link handed to window `target` was `handed`, raising the
+/// pop-out of `raised`: a tab's own window (or pop-out), else the window its row waits in.
+pub fn handed_front(
+    ws: &flotilla_core::model::Workspace,
+    target: &str,
+    handed: Option<&Handed>,
+    raised: Option<TabId>,
+) -> Option<tabs::Forward> {
+    match handed? {
+        Handed::Raised(id) | Handed::Grouped(id) | Handed::Joined(id) => {
+            tabs::front_for(ws, true, target, Some(id), raised)
+        }
+        Handed::Queued(item) | Handed::AlreadyQueued(item) => {
+            let holder = ws
+                .windows
+                .iter()
+                .find(|w| w.incoming.iter().any(|i| &i.id == item))
+                .map_or(target, |w| &w.title);
+            Some(tabs::Forward::Window(holder.to_string()))
+        }
+    }
+}
+
+/// A link another app handed flotilla (`open -a flotilla <url>`, or a link router's
+/// `flotilla://open?…`): taken by the window it names, else the last focused one, else the first
+/// ([`target_window`]), reopened if closed. That window decides what the link does
+/// (`Workspace::receive`), and the window showing the result comes forward ([`handed_front`]).
 pub fn open_handed(app: &AppHandle, url: &Url) {
     if app.try_state::<AppState>().is_none() {
         EARLY_LINKS.lock().unwrap().push(url.clone());
         return;
     }
-    let url = match parse_group_url(url.as_str()) {
-        Ok(url) => url,
-        Err(e) => return tabs::notice(app, e),
+    let h = handoff(url);
+    let set = app.state::<WindowSet>();
+    let last = set
+        .last_focused()
+        .and_then(|label| tabs::title_of_label(app, &label));
+    let state = app.state::<AppState>();
+    let target = target_window(
+        &state.ws.lock().unwrap(),
+        h.window.as_deref(),
+        last.as_deref(),
+    );
+    let Some(window) = target else {
+        return tabs::notice(app, format!("No window to open {} in.", h.link));
     };
-    let window = crate::menu::focused(app).map(|(_, t)| t).or_else(|| {
-        let state = app.state::<AppState>();
-        let ws = state.ws.lock().unwrap();
-        ws.windows.first().map(|w| w.title.clone())
-    });
-    if let Some(window) = window {
-        open_group(app, &window, &url, false);
+    if let Some(entry) = set.entry_for_title(&window).filter(|e| !e.open) {
+        set.open_or_focus(app, &entry.id);
     }
+    let front = crate::write::through(app, |ws| {
+        let mut handed = None;
+        let raised = crate::detach::apply(ws, |ws| {
+            handed = match &h.problem {
+                Some(problem) => ws.reject(&window, &h.link, problem.clone()),
+                None => ws.receive(&window, h.group.as_deref(), &h.link, DEFAULT_STORE),
+            }
+        });
+        handed_front(ws, &window, handed.as_ref(), raised)
+    });
+    tabs::bring(app, front.as_ref());
+    tabs::changed(app);
 }
 
 /// Opens the links handed over before setup; run at its end.
@@ -195,6 +282,56 @@ pub fn open_early_links(app: &AppHandle) {
     for url in std::mem::take(&mut *EARLY_LINKS.lock().unwrap()) {
         open_handed(app, &url);
     }
+}
+
+/// An Incoming row's action, in the calling window: Add to its active tab's group, Add to group…
+/// (a menu of its groups at the chrome's `(x, y)`), New group, or Dismiss
+/// ([`crate::sidebar::incoming_dto`]).
+#[tauri::command]
+pub fn incoming_action(
+    id: String,
+    action: String,
+    x: f64,
+    y: f64,
+    webview: Webview,
+    state: State<AppState>,
+) -> Result<(), String> {
+    use crate::sidebar::{ADD, ADD_ACTIVE, DISMISS, NEW};
+    let window = require_chrome(&webview)?;
+    let app = webview.app_handle();
+    let (active_head, groups) = {
+        let ws = state.ws.lock().unwrap();
+        let w = tabs::window(&ws, &window)
+            .filter(|w| w.incoming.iter().any(|i| i.id == id))
+            .ok_or("unknown item")?;
+        let groups: Vec<(TabId, String)> = w
+            .groups
+            .iter()
+            .map(|g| (g.head.id.clone(), g.head.title.clone()))
+            .collect();
+        (ws.active_group(&window).map(|g| g.head.id.clone()), groups)
+    };
+    match action.as_str() {
+        ADD_ACTIVE => {
+            let head = active_head.ok_or("No group is open")?;
+            show_from(app, &window, true, |ws| {
+                ws.add_incoming(&id, &head).map(opened_id)
+            });
+        }
+        ADD => {
+            let menu = crate::menu::incoming_menu(app, &id, &groups).map_err(|e| e.to_string())?;
+            webview
+                .window()
+                .popup_menu_at(&menu, tauri::LogicalPosition::new(x, y))
+                .map_err(|e| e.to_string())?;
+        }
+        NEW => show_from(app, &window, true, |ws| {
+            ws.incoming_as_group(&id, DEFAULT_STORE).map(opened_id)
+        }),
+        DISMISS => mutate(app, |ws| ws.dismiss_incoming(&id)),
+        _ => return Err(format!("unknown action {action}")),
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -526,6 +663,115 @@ mod tests {
     use super::*;
 
     const TAB: &str = "t-0123456789abcdef";
+
+    use crate::tabs::Forward;
+    use flotilla_core::model::{ConfigWindow, Handed, Workspace};
+
+    fn two_windows() -> Workspace {
+        let window = |t: &str| ConfigWindow {
+            title: t.into(),
+            groups: vec![],
+        };
+        Workspace::from_config(&[window("Rotary"), window("Work")])
+    }
+
+    fn parse(s: &str) -> Handoff {
+        handoff(&Url::parse(s).unwrap())
+    }
+
+    const DOC: &str = "https://docs.google.com/document/d/A/edit?usp=sharing&x=1+b#heading=h.1";
+
+    #[test]
+    fn a_handed_link_is_read_whole_or_from_its_open_request() {
+        assert_eq!(
+            parse(DOC),
+            Handoff {
+                window: None,
+                group: None,
+                link: DOC.into(),
+                problem: None,
+            }
+        );
+        assert_eq!(
+            parse(
+                "flotilla://open?window=Rotary%20Club&group=Bulletins&url=https%3A%2F%2Fdocs.google.com\
+                 %2Fdocument%2Fd%2FA%2Fedit%3Fusp%3Dsharing%26x%3D1%2Bb%23heading%3Dh.1"
+            ),
+            Handoff {
+                window: Some("Rotary Club".into()),
+                group: Some("Bulletins".into()),
+                link: DOC.into(),
+                problem: None,
+            }
+        );
+        // No link to place: queued as rejected, under its own text.
+        for bare in [
+            "flotilla://open?window=Rotary",
+            "flotilla://open?window=Rotary&url=%20",
+        ] {
+            let h = parse(bare);
+            assert_eq!(h.window.as_deref(), Some("Rotary"));
+            assert_eq!(h.link, bare);
+            assert_eq!(h.problem, Some(format!("No link in {bare}")));
+        }
+        // Any other flotilla:// URL is just a link, which `receive` rejects.
+        assert_eq!(parse("flotilla://elsewhere").link, "flotilla://elsewhere");
+        assert_eq!(parse("flotilla://elsewhere").problem, None);
+    }
+
+    #[test]
+    fn a_handed_link_goes_to_the_named_window_else_the_last_focused_else_the_first() {
+        let ws = two_windows();
+        let to = |req: Option<&str>, last: Option<&str>| target_window(&ws, req, last);
+        assert_eq!(to(Some(" Work "), Some("Rotary")).as_deref(), Some("Work"));
+        assert_eq!(to(Some("Gone"), Some("Work")).as_deref(), Some("Work"));
+        assert_eq!(to(None, Some("Work")).as_deref(), Some("Work"));
+        assert_eq!(to(None, None).as_deref(), Some("Rotary"));
+        assert_eq!(to(None, Some("Gone")).as_deref(), Some("Rotary"));
+        assert_eq!(
+            target_window(&Workspace::default(), Some("Work"), None),
+            None
+        );
+    }
+
+    #[test]
+    fn the_window_showing_a_handed_link_comes_forward() {
+        let mut ws = two_windows();
+        let folder = Url::parse("https://drive.google.com/drive/folders/f1").unwrap();
+        let Some(flotilla_core::model::Opened::Added(h)) = ws.new_group("Work", &folder, "default")
+        else {
+            panic!()
+        };
+        let window = |t: &str| Some(Forward::Window(t.into()));
+        // Queued here, or waiting already in another window: that window.
+        let doc = "https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrSt01/edit";
+        let Some(Handed::Queued(q)) = ws.receive("Work", None, doc, "default") else {
+            panic!()
+        };
+        assert_eq!(
+            handed_front(&ws, "Rotary", Some(&Handed::Queued("x".into())), None),
+            window("Rotary")
+        );
+        assert_eq!(
+            handed_front(&ws, "Rotary", Some(&Handed::AlreadyQueued(q)), None),
+            window("Work")
+        );
+        // Raised, grouped or joined: the tab's own window.
+        assert_eq!(
+            handed_front(&ws, "Rotary", Some(&Handed::Raised(h.clone())), None),
+            window("Work")
+        );
+        assert_eq!(
+            handed_front(
+                &ws,
+                "Rotary",
+                Some(&Handed::Raised(h.clone())),
+                Some(h.clone())
+            ),
+            Some(Forward::Detached(h))
+        );
+        assert_eq!(handed_front(&ws, "Rotary", None, None), None);
+    }
 
     #[test]
     fn only_a_window_own_page_reports_its_hole() {

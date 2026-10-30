@@ -1,7 +1,7 @@
 //! flotilla's Tauri shell: one OS window per config `[[window]]` (shell-core's `WindowSet`), each
 //! with a sidebar listing that window's groups and a content hole showing its active tab's webview.
 //! The workspace is built from the config and written back to it; the session (each window's
-//! active tab and Recent) is loaded at setup and saved as it changes.
+//! active tab and Incoming queue, and Recent) is loaded at setup and saved as it changes.
 
 mod commands;
 mod config;
@@ -331,6 +331,7 @@ pub fn run() {
             commands::row_menu,
             commands::rename_tab,
             commands::banner_menu,
+            commands::incoming_action,
             commands::set_hole_rect,
             commands::shell_home_create_config,
             commands::shell_home_edit_config,

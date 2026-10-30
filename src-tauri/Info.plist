@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- flotilla:// — `flotilla://open?window=<title>&group=<name>&url=<link>` (commands::open_handed). Tauri merges this file into the bundle's Info.plist. -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>au.lsjc.flotilla</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>flotilla</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

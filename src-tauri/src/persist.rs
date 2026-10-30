@@ -1,8 +1,9 @@
-//! Saving the session: debounced after each change, and once more at exit.
+//! Saving the session, and `windows.json` with it: debounced after each change, and once more at
+//! exit.
 
 use flotilla_core::model::Workspace;
 use flotilla_core::session::{self, Loaded};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -48,17 +49,29 @@ impl Persist {
         self.generation.load(Ordering::SeqCst) == ticket
     }
 
-    /// Writes the workspace `snapshot` returns, taken inside the writer lock. A no-op (and no
-    /// snapshot) when this run does not persist.
-    pub fn save(&self, snapshot: impl FnOnce() -> Workspace) -> std::io::Result<()> {
+    /// Writes the session of the workspace `snapshot` returns, then `windows.json` beside it from
+    /// that workspace and the config windows' colours ([`session::windows_manifest`]), both taken
+    /// inside the writer lock. A no-op (and no snapshot) when this run does not persist.
+    pub fn save(
+        &self,
+        snapshot: impl FnOnce() -> (Workspace, Vec<(String, Option<String>)>),
+    ) -> std::io::Result<()> {
         let Some(path) = &self.path else {
             return Ok(());
         };
         // Snapshot under the writer lock: a writer that waited here then writes the state as of
         // now, never one older than what the writer before it wrote.
         let _w = self.writing.lock().unwrap();
-        session::save(path, &snapshot())
+        let (ws, colours) = snapshot();
+        session::save(path, &ws)?;
+        let manifest = session::windows_manifest(&ws, &colours);
+        session::write_atomic(&manifest_path(path), manifest.as_bytes())
     }
+}
+
+/// `windows.json`, beside the session file.
+fn manifest_path(session: &Path) -> PathBuf {
+    session.with_file_name("windows.json")
 }
 
 /// The error-bar text for what `session::load` found, if the user needs telling.
@@ -104,7 +117,11 @@ pub fn mark_dirty(app: &AppHandle) {
 /// in the error bar.
 pub fn save_now(app: &AppHandle) {
     let state = app.state::<crate::state::AppState>();
-    if let Err(e) = state.persist.save(|| state.ws.lock().unwrap().clone()) {
+    let snapshot = || {
+        let ws = state.ws.lock().unwrap().clone();
+        (ws, state.config.lock().unwrap().colours())
+    };
+    if let Err(e) = state.persist.save(snapshot) {
         crate::tabs::notice(app, format!("Couldn't save the session: {e}"));
     }
 }
@@ -140,8 +157,19 @@ mod tests {
         let path = dir.path().join("session.json");
         let p = Persist::new(Some(path.clone()));
         let ws = sample();
-        p.save(|| ws.clone()).unwrap();
+        p.save(|| (ws.clone(), vec![])).unwrap();
         assert_eq!(session::load(&path), Loaded::Restored(Session::of(&ws)));
+    }
+
+    #[test]
+    fn save_writes_the_windows_manifest_beside_the_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = Persist::new(Some(dir.path().join("session.json")));
+        let ws = sample();
+        let colours = vec![("W".to_string(), Some("#17458f".to_string()))];
+        p.save(|| (ws.clone(), colours.clone())).unwrap();
+        let written = std::fs::read_to_string(dir.path().join("windows.json")).unwrap();
+        assert_eq!(written, session::windows_manifest(&ws, &colours));
     }
 
     /// The snapshot is taken inside the writer lock, so a write that waited on another can never
@@ -152,7 +180,7 @@ mod tests {
         let p = Persist::new(Some(dir.path().join("session.json")));
         p.save(|| {
             assert!(p.writing.try_lock().is_err());
-            sample()
+            (sample(), vec![])
         })
         .unwrap();
     }

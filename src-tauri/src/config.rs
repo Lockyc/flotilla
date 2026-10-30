@@ -116,6 +116,14 @@ impl Config {
             .and_then(|w| w.colour.clone())
     }
 
+    /// Each window's title and accent, in file order: what `windows.json` reads its colours from.
+    pub fn colours(&self) -> Vec<(String, Option<String>)> {
+        self.windows
+            .iter()
+            .map(|w| (w.title.clone(), w.colour.clone()))
+            .collect()
+    }
+
     /// The windows as the workspace model reads them.
     pub fn workspace_windows(&self) -> Vec<ConfigWindow> {
         self.windows

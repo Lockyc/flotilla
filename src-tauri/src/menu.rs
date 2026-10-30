@@ -60,14 +60,17 @@ pub enum Action {
     /// Reopen `recent[i]`.
     Reopen(usize),
     ClearRecent,
+    /// Add to group…'s item: open Incoming item `.0` into the group headed by `.1`.
+    AddIncoming(String, TabId),
 }
 
 const PREFIX: &str = "flotilla:";
 
-/// The menu item id for `a`: `flotilla:<verb>[:<arg>][@<tab>]`. Tab ids (`t-<n>`) contain neither
-/// `:` nor `@`.
+/// The menu item id for `a`: `flotilla:<verb>[:<arg>][@<tab>]`. Tab ids (`t-<n>`) and Incoming
+/// item ids (`in-<n>`, in the tab's place) contain neither `:` nor `@`.
 pub fn id(a: &Action) -> String {
     let (verb, tab) = match a {
+        Action::AddIncoming(item, head) => (format!("add_incoming:{head}"), Some(item)),
         Action::NewGroup => ("new_group".into(), None),
         Action::Home(t) => ("home".into(), t.as_ref()),
         Action::Rename(t) => ("rename".into(), t.as_ref()),
@@ -107,6 +110,7 @@ pub fn action(id: &str) -> Option<Action> {
         ("close_group", None, t) => Action::CloseGroup(t),
         ("recent", Some(i), None) => Action::Reopen(i.parse().ok()?),
         ("clear_recent", None, None) => Action::ClearRecent,
+        ("add_incoming", Some(head), Some(item)) => Action::AddIncoming(item, head.to_string()),
         _ => return None,
     })
 }
@@ -277,6 +281,21 @@ fn refs(items: &[MenuItemKind<Wry>]) -> Vec<&dyn IsMenuItem<Wry>> {
 pub fn row_menu(app: &AppHandle, ms: &MenuState, tab: &TabId) -> tauri::Result<Menu<Wry>> {
     let items = group_items(app, ms, Some(tab), None)?;
     MenuBuilder::new(app).items(&refs(&items)).build()
+}
+
+/// An Incoming row's Add to group… menu for item `item`: each of its window's `groups` (head id,
+/// name), in sidebar order.
+pub fn incoming_menu(
+    app: &AppHandle,
+    item: &str,
+    groups: &[(TabId, String)],
+) -> tauri::Result<Menu<Wry>> {
+    let mut menu = MenuBuilder::new(app);
+    for (head, name) in groups {
+        let a = Action::AddIncoming(item.to_string(), head.clone());
+        menu = menu.item(&MenuItemBuilder::with_id(id(&a), name).build(app)?);
+    }
+    menu.build()
 }
 
 /// What the menu bar is built from: the Group menu's state and the Window menu's rows (label,
@@ -493,6 +512,15 @@ pub fn handle(app: &AppHandle, menu_id: &str) -> bool {
             }
         }
         Action::ClearRecent => mutate(app, |ws| ws.recent.clear()),
+        Action::AddIncoming(item, head) => {
+            let window =
+                crate::tabs::window_title_of(&app.state::<AppState>().ws.lock().unwrap(), &head);
+            if let Some(window) = window {
+                commands::show_from(app, &window, true, |ws| {
+                    ws.add_incoming(&item, &head).map(commands::opened_id)
+                });
+            }
+        }
     }
     true
 }
@@ -566,10 +594,16 @@ mod tests {
             Action::CloseGroup(t()),
             Action::Reopen(2),
             Action::ClearRecent,
+            Action::AddIncoming("in-00ff".into(), "t-1".into()),
         ] {
             assert_eq!(action(&id(&a)), Some(a.clone()), "{}", id(&a));
         }
         assert_eq!(id(&Action::Home(t())), "flotilla:home@t-3");
+        assert_eq!(
+            id(&Action::AddIncoming("in-00ff".into(), "t-1".into())),
+            "flotilla:add_incoming:t-1@in-00ff"
+        );
+        assert_eq!(action("flotilla:add_incoming:t-1"), None);
         assert_eq!(action("shell:close_tab"), None);
         assert_eq!(action("flotilla:recent:x"), None);
         assert_eq!(action("flotilla:nope"), None);

@@ -318,7 +318,7 @@ pub fn push_dto(app: &AppHandle) {
             let ws = state.ws.lock().unwrap();
             let created = state.created.lock().unwrap();
             let none = HashSet::new();
-            crate::sidebar::sidebar_dto(window(&ws, &title), created.get(&label).unwrap_or(&none))
+            crate::sidebar::window_dto(&ws, &title, created.get(&label).unwrap_or(&none))
         };
         let _ = app.emit_to(label.as_str(), "workspace", dto);
     }
