@@ -73,6 +73,7 @@ fn load_state(app: &tauri::App) -> state::AppState {
         )),
         created: Default::default(),
         failed: Default::default(),
+        menu: Default::default(),
         persist,
         notice,
     }
@@ -127,10 +128,9 @@ pub fn run() {
                     shell_core::web::content::close_window_pages(&closing);
                 }
             });
-            // Restore lazily: only the active tab's webview is created now.
+            // Restore lazily: only the active tab's webview is created now. Builds the menu bar.
             tabs::sync(app.handle());
 
-            app.set_menu(menu::build_app_menu(app.handle())?)?;
             let cfg_path = config_path();
             // Row context menus' events arrive here too.
             app.on_menu_event(move |app, event| {

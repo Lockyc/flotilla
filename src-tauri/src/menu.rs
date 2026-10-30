@@ -99,7 +99,7 @@ pub fn action(id: &str) -> Option<Action> {
     })
 }
 
-const NO_TAB: &str = "No tab open";
+const NO_TAB: &str = "No tab selected";
 const IS_HEAD: &str = "Already a group's head";
 const NO_OTHER_GROUPS: &str = "No other groups";
 const NOTHING_CLOSED: &str = "Nothing closed yet";
@@ -227,12 +227,7 @@ pub fn row_menu(app: &AppHandle, ms: &MenuState, tab: &TabId) -> tauri::Result<M
 
 /// The menu bar: the shell-core spine's App, Config and Window menus around flotilla's Edit, Tab
 /// and Group menus, the Group menu acting on the active tab.
-pub fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
-    let state = app.state::<AppState>();
-    let ms = {
-        let ws = state.ws.lock().unwrap();
-        menu_state_for(&ws, ws.active.as_ref())
-    };
+fn build_app_menu(app: &AppHandle, ms: &MenuState) -> tauri::Result<Menu<Wry>> {
     let path = crate::config_path();
     let windows = [shell_core::menu::WindowEntry {
         id: MAIN_WINDOW.into(),
@@ -281,7 +276,7 @@ pub fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
         .items(&jump_refs)
         .build()?;
 
-    let group = group_items(app, &ms, None, Some(&spine.close_tab))?;
+    let group = group_items(app, ms, None, Some(&spine.close_tab))?;
     let group_menu: Submenu<Wry> = SubmenuBuilder::new(app, "Group")
         .items(&refs(&group))
         .build()?;
@@ -298,10 +293,32 @@ pub fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
         .build()
 }
 
-/// Rebuilds the menu bar from the workspace as it is now.
+/// Whether the menu bar must be rebuilt to show `next`; records `next` as built when so. Every DTO
+/// push asks, retitles included, and most change nothing the menu shows.
+pub fn needs_rebuild(last: &mut Option<MenuState>, next: MenuState) -> bool {
+    if last.as_ref() == Some(&next) {
+        return false;
+    }
+    *last = Some(next);
+    true
+}
+
+/// Rebuilds the menu bar from the workspace as it is now, if that changes it.
 pub fn refresh(app: &AppHandle) {
-    if let Ok(menu) = build_app_menu(app) {
-        let _ = app.set_menu(menu);
+    let state = app.state::<AppState>();
+    let ms = {
+        let ws = state.ws.lock().unwrap();
+        menu_state_for(&ws, ws.active.as_ref())
+    };
+    if !needs_rebuild(&mut state.menu.lock().unwrap(), ms.clone()) {
+        return;
+    }
+    match build_app_menu(app, &ms) {
+        Ok(menu) => {
+            let _ = app.set_menu(menu);
+        }
+        // Not built: the next push tries again.
+        Err(_) => *state.menu.lock().unwrap() = None,
     }
 }
 
@@ -500,12 +517,25 @@ mod tests {
             menu_state_for(&ws, None),
             menu_state_for(&ws, Some(&"t-99".to_string())),
         ] {
-            assert_eq!(s.home, off("Home — No tab open"));
-            assert_eq!(s.make_own_group, off("Make Own Group — No tab open"));
-            assert_eq!(s.move_to, off("Move to Group — No tab open"));
-            assert_eq!(s.close_tab, off("Close Tab — No tab open"));
-            assert_eq!(s.close_group, off("Close Group — No tab open"));
+            assert_eq!(s.home, off("Home — No tab selected"));
+            assert_eq!(s.make_own_group, off("Make Own Group — No tab selected"));
+            assert_eq!(s.move_to, off("Move to Group — No tab selected"));
+            assert_eq!(s.close_tab, off("Close Tab — No tab selected"));
+            assert_eq!(s.close_group, off("Close Group — No tab selected"));
             assert_eq!(s.recent, on("Recent"));
         }
+    }
+
+    #[test]
+    fn the_menu_bar_is_rebuilt_only_when_its_state_changes() {
+        let (mut ws, h, m) = one_group();
+        let mut last = None;
+        assert!(needs_rebuild(&mut last, menu_state_for(&ws, Some(&h))));
+        // A push that changes nothing the menu shows (a member's retitle) rebuilds nothing.
+        ws.set_title(&m, "Budget");
+        assert!(!needs_rebuild(&mut last, menu_state_for(&ws, Some(&h))));
+        // Selecting the member enables Make Own Group: rebuilt.
+        assert!(needs_rebuild(&mut last, menu_state_for(&ws, Some(&m))));
+        assert_eq!(last, Some(menu_state_for(&ws, Some(&m))));
     }
 }
