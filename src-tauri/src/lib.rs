@@ -247,6 +247,7 @@ pub fn run() {
             // menu bar); every popped-out tab reopens in its own window.
             tabs::sync(app.handle());
             detach::reconcile(app.handle());
+            commands::open_early_links(app.handle());
 
             let nav_handle = app.handle().clone();
             shell_core::mouse_nav::install(move || tabs::focused_webview(&nav_handle));

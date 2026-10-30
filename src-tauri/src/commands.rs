@@ -154,10 +154,18 @@ pub fn new_group(url: String, webview: Webview) -> Result<(), String> {
     Ok(())
 }
 
+/// Links handed over before `setup` has built the workspace: macOS delivers the link a cold launch
+/// was opened with ahead of it. `open_early_links` opens them once the state exists.
+static EARLY_LINKS: std::sync::Mutex<Vec<Url>> = std::sync::Mutex::new(Vec::new());
+
 /// A link another app handed flotilla (it was opened with flotilla): opened as a group the same way
 /// a pasted one is, and the main window brought forward. A link flotilla can't head a group with
 /// shows its reason in the sidebar.
 pub fn open_handed(app: &AppHandle, url: &Url) {
+    if app.try_state::<AppState>().is_none() {
+        EARLY_LINKS.lock().unwrap().push(url.clone());
+        return;
+    }
     match parse_group_url(url.as_str()) {
         Ok(url) => {
             mutate(app, |ws| {
@@ -166,6 +174,13 @@ pub fn open_handed(app: &AppHandle, url: &Url) {
             tabs::bring_main_forward(app);
         }
         Err(e) => tabs::notice(app, e),
+    }
+}
+
+/// Opens the links handed over before setup; run at its end.
+pub fn open_early_links(app: &AppHandle) {
+    for url in std::mem::take(&mut *EARLY_LINKS.lock().unwrap()) {
+        open_handed(app, &url);
     }
 }
 
