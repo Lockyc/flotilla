@@ -48,12 +48,14 @@ impl Persist {
     }
 
     /// Writes `ws` now. A no-op when this run does not persist.
-    pub fn save(&self, ws: &Workspace) -> std::io::Result<()> {
+    pub fn save(&self, snapshot: impl FnOnce() -> Workspace) -> std::io::Result<()> {
         let Some(path) = &self.path else {
             return Ok(());
         };
+        // Snapshot under the writer lock: a writer that waited here then writes the state as of
+        // now, never one older than what the writer before it wrote.
         let _w = self.writing.lock().unwrap();
-        session::save(path, ws)
+        session::save(path, &snapshot())
     }
 }
 
@@ -100,8 +102,7 @@ pub fn mark_dirty(app: &AppHandle) {
 /// in the error bar.
 pub fn save_now(app: &AppHandle) {
     let state = app.state::<crate::state::AppState>();
-    let ws = state.ws.lock().unwrap().clone();
-    if let Err(e) = state.persist.save(&ws) {
+    if let Err(e) = state.persist.save(|| state.ws.lock().unwrap().clone()) {
         let _ = app.emit_to(
             crate::MAIN_WINDOW,
             "notice",
@@ -140,15 +141,29 @@ mod tests {
         let path = dir.path().join("session.json");
         let p = Persist::new(Some(path.clone()));
         let ws = sample();
-        p.save(&ws).unwrap();
+        p.save(|| ws.clone()).unwrap();
         assert_eq!(session::load(&path), Loaded::Restored(ws));
+    }
+
+    /// The snapshot is taken inside the writer lock, so a write that waited on another can never
+    /// land an older snapshot after a newer one.
+    #[test]
+    fn the_snapshot_is_taken_while_holding_the_writer_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = Persist::new(Some(dir.path().join("session.json")));
+        p.save(|| {
+            assert!(p.writing.try_lock().is_err());
+            sample()
+        })
+        .unwrap();
     }
 
     #[test]
     fn an_unpersistable_run_never_writes() {
         let p = Persist::new(None);
         assert_eq!(p.schedule(), None);
-        p.save(&sample()).unwrap();
+        p.save(|| panic!("an unpersistable run must not even snapshot"))
+            .unwrap();
     }
 
     #[test]
