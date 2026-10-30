@@ -120,10 +120,16 @@ pub fn plan(ws: &Workspace, created: &HashSet<TabId>, failed: &HashSet<TabId>) -
 }
 
 /// Whether a page's reported title replaces the tab's stored one: only while the stored title is
-/// still the tab's URL (what a new group or document is written with), so a name is written once
-/// and never follows navigation. A page reports an empty title while it loads.
+/// still the tab's URL (what a new group or document is written with), alone or suffixed unique in
+/// its window ("<url> 2"), so a name is written once and never follows navigation. A page
+/// reports an empty title while it loads.
 pub fn adopt_title(stored: &str, home_url: &str, reported: &str) -> bool {
-    stored == home_url && !reported.trim().is_empty() && reported != stored
+    let named_by_url = stored == home_url
+        || stored
+            .strip_prefix(home_url)
+            .and_then(|rest| rest.strip_prefix(' '))
+            .is_some_and(|n| n.parse::<u32>().is_ok());
+    named_by_url && !reported.trim().is_empty() && reported != stored
 }
 
 /// Gives tab `id` the page's reported title when [`adopt_title`] says so; whether it did.
@@ -273,30 +279,26 @@ fn origin(o: LinkOrigin) -> Origin {
     }
 }
 
-/// shell-core's `intercept`: runs inside WebKit's policy callback, so it only decides. On `Open` the
-/// workspace already holds the new or raised tab; showing it is deferred to the main loop.
+/// shell-core's `intercept`: runs inside WebKit's policy callback, so it only decides and writes the
+/// decision through to the config (under the gate, so no reload lands between the two). On `Open`
+/// the workspace already holds the new or raised tab; showing it is deferred to the main loop.
 fn intercept(app: &AppHandle, label: &str, url: &Url, o: LinkOrigin) -> bool {
     let Some(id) = tab_id(label) else {
         return false;
     };
-    let (decision, front, writes) = {
-        let state = app.state::<AppState>();
-        let mut ws = state.ws.lock().unwrap();
+    let (decision, front) = crate::write::through(app, |ws| {
         let from_popout = ws.find(&id).is_some_and(|(_, _, t)| t.detached);
         let mut decision = Decision::PassThrough;
-        let (raised, writes) = crate::write::change(&mut ws, |ws| {
-            crate::detach::apply(ws, |ws| {
-                decision = nav::decide(ws, &id, url, origin(o));
-            })
+        let raised = crate::detach::apply(ws, |ws| {
+            decision = nav::decide(ws, &id, url, origin(o));
         });
-        (decision, forward(from_popout, raised), writes)
-    };
+        (decision, forward(from_popout, raised))
+    });
     match decision {
         Decision::PassThrough => false,
         Decision::Open(_) => {
             let deferred = app.clone();
             let _ = app.run_on_main_thread(move || {
-                crate::write::commit(&deferred, &writes);
                 match &front {
                     Some(Forward::Detached(r)) => crate::detach::raise(&deferred, r),
                     Some(Forward::Main) => bring_main_forward(&deferred),
@@ -340,13 +342,7 @@ fn retitle(app: &AppHandle, label: &str, title: &str) {
     let Some(id) = tab_id(label) else {
         return;
     };
-    let (adopted, writes) = {
-        let state = app.state::<AppState>();
-        let mut ws = state.ws.lock().unwrap();
-        crate::write::change(&mut ws, |ws| retitled(ws, &id, title))
-    };
-    if adopted {
-        crate::write::commit(app, &writes);
+    if crate::write::through(app, |ws| retitled(ws, &id, title)) {
         push_dto(app);
     }
 }
@@ -464,6 +460,9 @@ mod tests {
         assert!(!adopt_title(DOC_A, DOC_A, "  "));
         // Once named, the page never renames it.
         assert!(!adopt_title("Budget", DOC_A, "Budget 2026"));
+        // A URL name suffixed unique in its window is still the URL.
+        assert!(adopt_title(&format!("{DOC_A} 2"), DOC_A, "Budget"));
+        assert!(!adopt_title(&format!("{DOC_A} two"), DOC_A, "Budget"));
     }
 
     #[test]

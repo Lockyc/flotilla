@@ -11,9 +11,11 @@ use std::sync::Mutex;
 /// `close`, show/hide): lock, copy or decide, drop, then act. WebKit runs `intercept` on the main
 /// thread from inside those calls' callbacks, and it locks `ws`.
 ///
-/// Lock order: `ws`, then `created`, then `failed`; and `Persist`'s writer lock before `ws` (the
-/// session snapshot is taken inside it). `menu` and `notice` are each taken alone.
+/// Lock order: `gate`, then `ws`, then `created`, then `failed`; and `Persist`'s writer lock before
+/// `ws` (the session snapshot is taken inside it). `menu` and `notice` are each taken alone.
 pub struct AppState {
+    /// Serialises config writes and reloads (`crate::write::Gate`).
+    pub gate: crate::write::Gate,
     pub ws: Mutex<Workspace>,
     /// The chrome's last-reported content hole, where new content webviews are placed.
     pub hole: Mutex<HoleRect>,

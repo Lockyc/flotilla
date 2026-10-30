@@ -74,16 +74,11 @@ pub fn pop_out_tab(id: TabId, webview: Webview) -> Result<(), String> {
 
 /// Pops tab `id` out (the row control, ⌘⇧O).
 pub fn pop_out(app: &AppHandle, id: &TabId) -> Result<(), String> {
-    let writes = {
+    crate::write::through(app, |ws| {
         let state = app.state::<AppState>();
-        let mut ws = state.ws.lock().unwrap();
         let created = state.created.lock().unwrap();
-        let (popped, writes) =
-            crate::write::change(&mut ws, |ws| crate::detach::pop_out(ws, &created, id));
-        popped?;
-        writes
-    };
-    crate::write::commit(app, &writes);
+        crate::detach::pop_out(ws, &created, id)
+    })?;
     tabs::changed(app);
     Ok(())
 }
@@ -130,17 +125,11 @@ pub fn unload_tab(id: TabId, webview: Webview, state: State<AppState>) -> Result
 }
 
 #[tauri::command]
-pub fn toggle_group(
-    head: TabId,
-    collapsed: bool,
-    webview: Webview,
-    state: State<AppState>,
-) -> Result<(), String> {
+pub fn toggle_group(head: TabId, collapsed: bool, webview: Webview) -> Result<(), String> {
     require_chrome(&webview)?;
-    let ((), writes) = crate::write::change(&mut state.ws.lock().unwrap(), |ws| {
+    crate::write::through(webview.app_handle(), |ws| {
         ws.set_collapsed(&head, collapsed)
     });
-    crate::write::commit(webview.app_handle(), &writes);
     tabs::push_dto(webview.app_handle());
     Ok(())
 }
@@ -235,15 +224,11 @@ pub fn home(app: &AppHandle, id: &TabId) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-/// Applies `op` to the workspace, writes it to the config ([`crate::write::change`]), raises the
+/// Applies `op` to the workspace, writes it to the config ([`crate::write::through`]), raises the
 /// window of a popped-out tab it activated ([`crate::detach::apply`]), then brings everything in
 /// line with it.
 pub fn mutate(app: &AppHandle, op: impl FnOnce(&mut flotilla_core::model::Workspace)) {
-    let (raised, writes) =
-        crate::write::change(&mut app.state::<AppState>().ws.lock().unwrap(), |ws| {
-            crate::detach::apply(ws, op)
-        });
-    crate::write::commit(app, &writes);
+    let raised = crate::write::through(app, |ws| crate::detach::apply(ws, op));
     if let Some(id) = &raised {
         crate::detach::raise(app, id);
     }

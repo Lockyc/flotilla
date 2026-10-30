@@ -54,48 +54,57 @@ fn window_identity(state: tauri::State<state::AppState>) -> WindowIdentity {
 /// Applies a reloaded config: remembers it, rebases the workspace on its windows, themes every
 /// window, retitles the main window, brings the webviews, sidebar and menu bar (its Window entry
 /// and tab shortcuts) in line, and has the chrome re-read its identity. `allow_insecure` is not
-/// applied here; it is read once at launch.
-fn apply_config(app: &tauri::AppHandle, cfg: config::Config) {
-    app.set_theme(cfg.dark_mode.then_some(tauri::Theme::Dark));
-    if let Some(w) = app.get_webview_window(MAIN_WINDOW) {
-        let _ = w.set_title(&cfg.window_title());
-    }
+/// applied here; it is read once at launch. The callers hold the write gate, so every window call
+/// is left to the main loop: nothing here waits on the main thread, which may be waiting on the
+/// gate.
+pub(crate) fn apply_config(app: &tauri::AppHandle, cfg: config::Config) {
+    let (theme, title) = (
+        cfg.dark_mode.then_some(tauri::Theme::Dark),
+        cfg.window_title(),
+    );
     let state = app.state::<state::AppState>();
     let fresh = flotilla_core::model::Workspace::from_config(&cfg.workspace_windows());
     state.ws.lock().unwrap().rebase(fresh);
     *state.config.lock().unwrap() = cfg;
     *state.menu.lock().unwrap() = None;
     let handle = app.clone();
-    let _ = app.run_on_main_thread(move || tabs::changed(&handle));
-    emit_to_main_chrome(app, "config-reloaded", ());
-}
-
-/// Reads the config file again and applies it, or shows why it could not be read.
-fn reload_config(app: &tauri::AppHandle) {
-    match config::load(&config::config_path()) {
-        Ok(cfg) => apply_config(app, cfg),
-        Err(msg) => tabs::notice(app, msg),
-    }
+    let _ = app.run_on_main_thread(move || {
+        handle.set_theme(theme);
+        if let Some(w) = handle.get_webview_window(MAIN_WINDOW) {
+            let _ = w.set_title(&title);
+        }
+        tabs::changed(&handle);
+        emit_to_main_chrome(&handle, "config-reloaded", ());
+    });
 }
 
 /// Watches the config file: a clean reload is applied (and reformatted when `format_on_save`), a
-/// broken one keeps the last good config and shows its error in the sidebar.
+/// broken one keeps the last good config and shows its error in the sidebar. Each reload runs
+/// under the write gate and reads the file again there (`write::Gate::reload`).
 fn watch_config(app: tauri::AppHandle, path: std::path::PathBuf) {
-    let fmt_path = path.clone();
-    shell_core::watch::watch_config(path, move |src| match config::parse(src) {
-        Ok(cfg) => {
-            // Returning the formatted bytes makes the watcher swallow the echo of our own write.
-            let formatted = cfg
-                .format_on_save
-                .then(|| config_core::format_str(src))
-                .filter(|f| f != src && config_core::format_file(&fmt_path).is_ok());
-            apply_config(&app, cfg);
-            formatted
-        }
-        Err(msg) => {
-            tabs::notice(&app, msg);
-            None
-        }
+    let read_path = path.clone();
+    shell_core::watch::watch_config(path, move |delivered| {
+        let state = app.state::<state::AppState>();
+        let held = state.gate.reload(&read_path, |read| {
+            let src = read.unwrap_or_else(|_| delivered.to_string());
+            match config::parse(&src) {
+                Ok(cfg) => {
+                    let formatted = cfg
+                        .format_on_save
+                        .then(|| config_core::format_str(&src))
+                        .filter(|f| *f != src && config_core::format_file(&read_path).is_ok());
+                    apply_config(&app, cfg);
+                    formatted.unwrap_or(src)
+                }
+                Err(msg) => {
+                    tabs::notice(&app, msg);
+                    src
+                }
+            }
+        });
+        // What the app now holds, when it is not what the watcher read: a reformat, or a file
+        // read again whole. Either way its echo is swallowed.
+        (held != delivered).then_some(held)
     });
 }
 
@@ -133,6 +142,7 @@ fn load_state(
         ws.restore(s.active, s.recent);
     }
     state::AppState {
+        gate: Default::default(),
         ws: std::sync::Mutex::new(ws),
         hole: std::sync::Mutex::new(shell_core::compositing::initial_hole(
             FIRST_RUN_SIZE.0,
@@ -277,7 +287,12 @@ pub fn run() {
                 // muda flips a check item's tick on click: a failed write rebuilds to undo it; a
                 // saved one reloads the config, which rebuilds anyway.
                 if id == shell_core::menu::ids::TAB_DIGIT_CYCLE {
-                    if let Err(e) = config::toggle_tab_digit_keys(&cfg_path) {
+                    let toggled = {
+                        let state = app.state::<state::AppState>();
+                        let _held = state.gate.hold();
+                        config::toggle_tab_digit_keys(&cfg_path)
+                    };
+                    if let Err(e) = toggled {
                         tabs::notice(app, e);
                         *app.state::<state::AppState>().menu.lock().unwrap() = None;
                         menu::refresh(app);

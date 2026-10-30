@@ -1,14 +1,14 @@
-//! Write-through: every workspace change lands in the config file. [`change`] runs a model
-//! operation and derives the config edits it implies ([`plan`], a diff of the workspace before and
-//! after), [`commit`] applies them through config-core's `edit`. The file's reload then echoes the
-//! change back, and `Workspace::rebase` finds nothing to change.
+//! Write-through: every workspace change lands in the config file. [`through`] runs a model
+//! operation, derives the config edits it implies ([`change`]: [`plan`], a diff of the workspace
+//! before and after) and applies them through config-core's `edit`, all under the [`Gate`]. The
+//! file's reload then echoes the change back, and `Workspace::rebase` finds nothing to change.
 
 use crate::config::DEFAULT_STORE;
 use config_core::toml_edit::Value;
 use config_core::{add_group, add_tab, move_tab, remove, set_field, At, EditError};
 use flotilla_core::model::{Group, Tab, Workspace};
 use std::path::Path;
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
 /// A `[[window.group.tab]]` as written.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -180,8 +180,9 @@ fn locs(ws: &Workspace) -> Vec<Loc<'_>> {
         .collect()
 }
 
-/// The config writes that take the file from `before` to `after`, in an order each can apply in:
-/// new groups, then moved and added documents, then field changes, removals, and renames last (so
+/// The config writes that take the file from `before` to `after`, in an order each can apply in
+/// and every file state between them is a valid config: removals first (so nothing added is ever
+/// listed twice), then new groups, moved and added documents, field changes, and renames last (so
 /// every earlier write still finds a group by its old name).
 pub fn plan(before: &Workspace, after: &Workspace) -> Vec<Write> {
     let (b, a) = (locs(before), locs(after));
@@ -332,21 +333,13 @@ pub fn plan(before: &Workspace, after: &Workspace) -> Vec<Write> {
         }
     }
 
-    groups
+    removes
         .into_iter()
+        .chain(groups)
         .chain(docs)
         .chain(fields)
-        .chain(removes)
         .chain(renames)
         .collect()
-}
-
-fn group_at<'a>(window: &'a str, group: &'a str) -> At<'a> {
-    At {
-        window,
-        group: Some(group),
-        tab: None,
-    }
 }
 
 /// The group's head (`url: None`) or the document at `url`.
@@ -363,7 +356,7 @@ fn flag(on: bool) -> Option<Value> {
     on.then(|| Value::from(true))
 }
 
-fn doc_fields(d: &Doc) -> Vec<(&str, Value)> {
+fn doc_fields(d: &Doc) -> Vec<(&'static str, Value)> {
     let mut f = vec![
         ("title", Value::from(d.title.as_str())),
         ("url", Value::from(d.url.as_str())),
@@ -372,13 +365,13 @@ fn doc_fields(d: &Doc) -> Vec<(&str, Value)> {
     f
 }
 
-fn group_fields<'a>(
-    name: &'a str,
-    url: &'a str,
-    store: &'a str,
+fn group_fields(
+    name: &str,
+    url: &str,
+    store: &str,
     collapsed: bool,
     detached: bool,
-) -> Vec<(&'a str, Value)> {
+) -> Vec<(&'static str, Value)> {
     let mut f = vec![("name", Value::from(name)), ("url", Value::from(url))];
     if store != DEFAULT_STORE {
         f.push(("store", Value::from(store)));
@@ -388,9 +381,92 @@ fn group_fields<'a>(
     f
 }
 
-/// Applies one write to the config at `path` through config-core's edits.
-pub fn apply(path: &Path, w: &Write) -> Result<(), EditError> {
-    match w {
+/// One config-core edit: one atomic rewrite of the file.
+pub(crate) enum Step {
+    AddGroup {
+        window: String,
+        fields: Vec<(&'static str, Value)>,
+    },
+    AddTab {
+        window: String,
+        group: String,
+        fields: Vec<(&'static str, Value)>,
+    },
+    /// The document at `url`, else the whole group.
+    Remove {
+        window: String,
+        group: String,
+        url: Option<String>,
+    },
+    /// `key` on the document at `url`, else on the group; `None` removes it.
+    Set {
+        window: String,
+        group: String,
+        url: Option<String>,
+        key: &'static str,
+        value: Option<Value>,
+    },
+    Move {
+        window: String,
+        group: String,
+        url: String,
+        to_window: String,
+        to_group: String,
+    },
+}
+
+impl Step {
+    pub(crate) fn run(&self, path: &Path) -> Result<(), EditError> {
+        match self {
+            Step::AddGroup { window, fields } => add_group(path, window, fields),
+            Step::AddTab {
+                window,
+                group,
+                fields,
+            } => add_tab(path, window, Some(group), fields),
+            Step::Remove { window, group, url } => {
+                remove(path, tab_at(window, group, url.as_deref()))
+            }
+            Step::Set {
+                window,
+                group,
+                url,
+                key,
+                value,
+            } => set_field(
+                path,
+                tab_at(window, group, url.as_deref()),
+                key,
+                value.clone(),
+            ),
+            Step::Move {
+                window,
+                group,
+                url,
+                to_window,
+                to_group,
+            } => move_tab(
+                path,
+                tab_at(window, group, Some(url)),
+                to_window,
+                Some(to_group),
+            ),
+        }
+    }
+}
+
+/// The edits that make `w`, in an order where every file state between them is a valid config:
+/// Make Own Group removes the document before adding the group it heads, so the document is
+/// never listed twice.
+pub(crate) fn steps(w: &Write) -> Vec<Step> {
+    let set = |window: &str, group: &str, url: Option<&str>, key, value| Step::Set {
+        window: window.into(),
+        group: group.into(),
+        url: url.map(Into::into),
+        key,
+        value,
+    };
+    match w.clone() {
         Write::NewGroup {
             window,
             name,
@@ -399,50 +475,61 @@ pub fn apply(path: &Path, w: &Write) -> Result<(), EditError> {
             collapsed,
             detached,
             docs,
-        } => {
-            add_group(
-                path,
-                window,
-                &group_fields(name, url, store, *collapsed, *detached),
-            )?;
-            for d in docs {
-                add_tab(path, window, Some(name), &doc_fields(d))?;
-            }
-            Ok(())
-        }
-        Write::AddDoc { window, group, doc } => {
-            add_tab(path, window, Some(group), &doc_fields(doc))
-        }
-        Write::RemoveDoc { window, group, url } => remove(path, tab_at(window, group, Some(url))),
-        Write::RemoveGroup { window, group } => remove(path, group_at(window, group)),
+        } => std::iter::once(Step::AddGroup {
+            window: window.clone(),
+            fields: group_fields(&name, &url, &store, collapsed, detached),
+        })
+        .chain(docs.iter().map(|d| Step::AddTab {
+            window: window.clone(),
+            group: name.clone(),
+            fields: doc_fields(d),
+        }))
+        .collect(),
+        Write::AddDoc { window, group, doc } => vec![Step::AddTab {
+            window,
+            group,
+            fields: doc_fields(&doc),
+        }],
+        Write::RemoveDoc { window, group, url } => vec![Step::Remove {
+            window,
+            group,
+            url: Some(url),
+        }],
+        Write::RemoveGroup { window, group } => vec![Step::Remove {
+            window,
+            group,
+            url: None,
+        }],
         Write::SetDetached {
             window,
             group,
             url,
             detached,
-        } => set_field(
-            path,
-            tab_at(window, group, url.as_deref()),
+        } => vec![set(
+            &window,
+            &group,
+            url.as_deref(),
             "detached",
-            flag(*detached),
-        ),
+            flag(detached),
+        )],
         Write::SetCollapsed {
             window,
             group,
             collapsed,
-        } => set_field(path, group_at(window, group), "collapsed", flag(*collapsed)),
+        } => vec![set(&window, &group, None, "collapsed", flag(collapsed))],
         Write::MoveDoc {
             window,
             group,
             url,
             to_window,
             to_group,
-        } => move_tab(
-            path,
-            tab_at(window, group, Some(url)),
+        } => vec![Step::Move {
+            window,
+            group,
+            url,
             to_window,
-            Some(to_group),
-        ),
+            to_group,
+        }],
         Write::MakeOwnGroup {
             window,
             group,
@@ -450,52 +537,89 @@ pub fn apply(path: &Path, w: &Write) -> Result<(), EditError> {
             to_window,
             name,
             store,
-        } => {
-            add_group(
-                path,
-                to_window,
-                &group_fields(name, &doc.url, store, false, doc.detached),
-            )?;
-            remove(path, tab_at(window, group, Some(&doc.url)))
-        }
+        } => vec![
+            Step::Remove {
+                window,
+                group,
+                url: Some(doc.url.clone()),
+            },
+            Step::AddGroup {
+                window: to_window,
+                fields: group_fields(&name, &doc.url, &store, false, doc.detached),
+            },
+        ],
         Write::SetTitle {
             window,
             group,
             url,
             title,
-        } => set_field(
-            path,
-            tab_at(window, group, Some(url)),
+        } => vec![set(
+            &window,
+            &group,
+            Some(&url),
             "title",
-            Some(Value::from(title.as_str())),
-        ),
+            Some(Value::from(title)),
+        )],
         Write::SetName {
             window,
             group,
             name,
-        } => set_field(
-            path,
-            group_at(window, group),
-            "name",
-            Some(Value::from(name.as_str())),
-        ),
+        } => vec![set(&window, &group, None, "name", Some(Value::from(name)))],
         Write::SetUrl {
             window,
             group,
             url,
             new_url,
-        } => set_field(
-            path,
-            tab_at(window, group, url.as_deref()),
+        } => vec![set(
+            &window,
+            &group,
+            url.as_deref(),
             "url",
-            Some(Value::from(new_url.as_str())),
-        ),
+            Some(Value::from(new_url)),
+        )],
     }
 }
 
+/// Applies one write to the config at `path` through config-core's edits ([`steps`]).
+pub fn apply(path: &Path, w: &Write) -> Result<(), EditError> {
+    steps(w).iter().try_for_each(|s| s.run(path))
+}
+
+/// Serialises the app's config writes against its reloads. Held across a change and its writes
+/// ([`through`]) and across each reload ([`Gate::reload`]), so a reload never reads a commit half
+/// written, and a format-on-save rewrite never lands between two of a commit's edits. Taken
+/// before `ws`.
+#[derive(Default)]
+pub struct Gate(std::sync::Mutex<()>);
+
+impl Gate {
+    pub fn hold(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Runs `apply` on the config file's contents, read and applied under the gate: whatever the
+    /// watcher read before a commit finished is read again, whole, and nothing writes the file
+    /// until `apply` (a format-on-save rewrite included) is done.
+    pub fn reload<R>(&self, path: &Path, apply: impl FnOnce(std::io::Result<String>) -> R) -> R {
+        let _held = self.hold();
+        apply(std::fs::read_to_string(path))
+    }
+}
+
+/// Runs `op` on the workspace and writes what it changed to the config, holding the gate across
+/// both. The caller holds neither the gate nor `ws`.
+pub fn through<R>(app: &AppHandle, op: impl FnOnce(&mut Workspace) -> R) -> R {
+    let state = app.state::<crate::state::AppState>();
+    let _held = state.gate.hold();
+    let (r, writes) = change(&mut state.ws.lock().unwrap(), op);
+    commit(app, &writes);
+    r
+}
+
 /// Applies `writes` to the config file, seeding the starter config first when there is none. A
-/// write that fails stops the rest, shows why, and reloads the workspace from the file.
-pub fn commit(app: &AppHandle, writes: &[Write]) {
+/// write that fails stops the rest, shows why, and reloads the workspace from the file. The
+/// caller holds the gate.
+fn commit(app: &AppHandle, writes: &[Write]) {
     if writes.is_empty() {
         return;
     }
@@ -508,7 +632,10 @@ pub fn commit(app: &AppHandle, writes: &[Write]) {
     });
     if let Err(e) = done {
         crate::tabs::notice(app, format!("Couldn't save to the config: {e}"));
-        crate::reload_config(app);
+        match crate::config::load(&path) {
+            Ok(cfg) => crate::apply_config(app, cfg),
+            Err(msg) => crate::tabs::notice(app, msg),
+        }
     }
 }
 
@@ -565,7 +692,12 @@ mod tests {
         let mut ws = load(&path);
         let ((), writes) = change(&mut ws, op);
         for w in &writes {
-            apply(&path, w).unwrap_or_else(|e| panic!("{w:?}: {e}"));
+            // Every file state between two edits is a valid config: open-once holds throughout.
+            for s in steps(w) {
+                s.run(&path).unwrap_or_else(|e| panic!("{w:?}: {e}"));
+                let src = std::fs::read_to_string(&path).unwrap();
+                crate::config::parse(&src).unwrap_or_else(|e| panic!("mid-{w:?}: {e}"));
+            }
         }
         let mut echoed = ws.clone();
         echoed.rebase(load(&path));
@@ -650,10 +782,10 @@ mod tests {
             ws.close_group(&id_of(ws, F1));
             ws.reopen_recent("B", 0).unwrap();
         });
+        assert!(matches!(&w[0], Write::RemoveGroup { window, .. } if window == "A"));
         assert!(
-            matches!(&w[0], Write::NewGroup { window, docs, .. } if window == "B" && docs.len() == 2)
+            matches!(&w[1], Write::NewGroup { window, docs, .. } if window == "B" && docs.len() == 2)
         );
-        assert!(matches!(&w[1], Write::RemoveGroup { window, .. } if window == "A"));
         assert_eq!(w.len(), 2);
         let mut closed = load_source();
         closed.close_group(&id_of(&closed, F1));
@@ -710,6 +842,60 @@ mod tests {
         assert_eq!(g.head.home_url, sub);
         assert_eq!(g.members[0].home_url, D3);
         assert_eq!(g.members.len(), 2);
+    }
+
+    /// A reload that arrives while a commit is between its edits waits for the gate, then reads
+    /// the file whole.
+    #[test]
+    fn a_reload_mid_commit_sees_the_whole_commit() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, source()).unwrap();
+        let gate = std::sync::Arc::new(Gate::default());
+        let (first_done, wait_first) = mpsc::channel();
+        let (go_on, wait_go) = mpsc::channel::<()>();
+        let writer = {
+            let (gate, path) = (gate.clone(), path.clone());
+            std::thread::spawn(move || {
+                let _held = gate.hold();
+                let w = Write::NewGroup {
+                    window: "A".into(),
+                    name: D3.into(),
+                    url: D3.into(),
+                    store: DEFAULT_STORE.into(),
+                    collapsed: false,
+                    detached: false,
+                    docs: vec![],
+                };
+                apply(&path, &w).unwrap();
+                first_done.send(()).unwrap();
+                wait_go.recv().unwrap();
+                apply(
+                    &path,
+                    &Write::SetName {
+                        window: "A".into(),
+                        group: D3.into(),
+                        name: "Third".into(),
+                    },
+                )
+                .unwrap();
+            })
+        };
+        wait_first.recv().unwrap();
+        let (seen, got) = mpsc::channel();
+        let reader = {
+            let (gate, path) = (gate.clone(), path.clone());
+            std::thread::spawn(move || seen.send(gate.reload(&path, Result::unwrap)).unwrap())
+        };
+        // The commit is half done: the reload is held back.
+        assert!(got.recv_timeout(Duration::from_millis(150)).is_err());
+        go_on.send(()).unwrap();
+        let src = got.recv_timeout(Duration::from_secs(5)).unwrap();
+        writer.join().unwrap();
+        reader.join().unwrap();
+        assert!(src.contains("name = \"Third\""), "{src}");
     }
 
     #[test]

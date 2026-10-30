@@ -111,10 +111,7 @@ pub fn reconcile(app: &AppHandle) {
     let mut failed = false;
     for t in &plan.open {
         if let Err(e) = open(app, t) {
-            let ((), writes) = crate::write::change(&mut state.ws.lock().unwrap(), |ws| {
-                ws.set_detached(&t.id, false)
-            });
-            crate::write::commit(app, &writes);
+            crate::write::through(app, |ws| ws.set_detached(&t.id, false));
             tabs::notice(app, format!("Couldn't pop out {}: {e}", t.home_url));
             failed = true;
         }
@@ -166,20 +163,17 @@ fn redock(app: &AppHandle, id: &TabId) {
     if QUITTING.load(Ordering::SeqCst) {
         return;
     }
-    let writes = {
-        let state = app.state::<AppState>();
-        let mut ws = state.ws.lock().unwrap();
+    let docked = crate::write::through(app, |ws| {
         if !ws.find(id).is_some_and(|(_, _, t)| t.detached) {
-            return;
+            return false;
         }
-        crate::write::change(&mut ws, |ws| {
-            ws.set_detached(id, false);
-            ws.activate(id);
-        })
-        .1
-    };
-    crate::write::commit(app, &writes);
-    tabs::changed(app);
+        ws.set_detached(id, false);
+        ws.activate(id);
+        true
+    });
+    if docked {
+        tabs::changed(app);
+    }
 }
 
 /// Brings tab `id`'s detached window to the front.
