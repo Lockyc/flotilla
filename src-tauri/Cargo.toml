@@ -36,7 +36,7 @@ flotilla-core = { path = "../crates/flotilla-core" }
 dirs = "5"
 toml = "0.8"
 # House-style formatter, starter-config seeding and path resolution, shared with curator, warden and lector. Pinned by rev, same as curator.
-config-core = { git = "https://github.com/Lockyc/config-core", rev = "923badf1124ef44001b71a53dc73cdd0cb574e9a" }
+config-core = { git = "https://github.com/Lockyc/config-core", rev = "23cd86aa7bccc2b7021fd339627e4dce4006e364" }
 url = "2"
 
 [dev-dependencies]
