@@ -22,5 +22,17 @@ html, body { margin: 0; height: 100vh; overflow: hidden; background: #1e1e1e; }
 }
 #new-group:focus { outline: none; border-color: rgba(10, 132, 255, 0.8); }
 
+/* No groups: the list says so. chrome-core repaints `.cc-main` on every update and search, and a
+   search with no match fills it with its own line, so this follows the list without any JS. */
+#sidebar .cc-main:empty::before {
+  content: "No groups yet — paste a folder link above.";
+  display: block;
+  margin: 0 6px;
+  padding: var(--cc-row-pad);
+  font-size: var(--cc-row-font);
+  color: #6b7280;
+  font-style: italic;
+}
+
 /* The hole the document webviews cover. */
 #content-hole { flex: 1; position: relative; background: #1e1e1e; }
