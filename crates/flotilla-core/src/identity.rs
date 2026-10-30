@@ -22,8 +22,9 @@ pub trait Recogniser {
 ///
 /// Ports `fileID`/`validFileID` of Manicule's `GoogleLink.swift`, its Swift counterpart; flotilla's
 /// core is Rust and cannot link a Swift package, so the rule exists in both. Unlike Manicule,
-/// folders and `open?id=` are not documents here, and neither are published pages (`/d/e/…`) or
-/// embed shapes, which arrive as iframe navigations inside a document.
+/// folders and `open?id=` are not documents here, and only a view-shaped tail after the id (none,
+/// `edit`, `view`, `viewform`) is: published pages (`/d/e/…`) and embed shapes arrive as iframe
+/// navigations inside a document, and `export`, `copy` and the like are actions on it.
 pub struct Google;
 
 impl Recogniser for Google {
@@ -50,15 +51,12 @@ impl Recogniser for Google {
         let ["d", id, after @ ..] = rest else {
             return None;
         };
-        if *id == "e"
-            || matches!(
-                after.first(),
-                Some(&("preview" | "pubhtml" | "htmlembed" | "embed" | "htmlview"))
-            )
-        {
-            return None;
-        }
-        valid_file_id(id).then(|| id.to_string())
+        let viewed = match after {
+            [] | [""] => true,
+            [tail] | [tail, ""] => matches!(*tail, "edit" | "view" | "viewform"),
+            _ => false,
+        };
+        (viewed && valid_file_id(id)).then(|| id.to_string())
     }
 }
 
@@ -135,6 +133,10 @@ mod tests {
             format!("https://docs.google.com/presentation/d/{ID}/edit"),
             format!("https://docs.google.com/forms/d/{ID}/edit"),
             format!("https://drive.google.com/file/d/{ID}/view"),
+            format!("https://docs.google.com/forms/d/{ID}/viewform"),
+            format!("https://docs.google.com/document/d/{ID}"),
+            format!("https://docs.google.com/document/d/{ID}/"),
+            format!("https://docs.google.com/document/d/{ID}/edit/"),
         ] {
             let k = key("default", &u).unwrap_or_else(|| panic!("no key for {u}"));
             assert_eq!(k.id, ID, "{u}");
@@ -158,6 +160,14 @@ mod tests {
             format!("https://docs.google.com/document/d/{ID}/htmlembed"),
             format!("https://docs.google.com/document/d/{ID}/embed"),
             format!("https://docs.google.com/presentation/d/{ID}/htmlview"),
+            // Downloads and copies are actions on the document, not the document.
+            format!("https://docs.google.com/document/d/{ID}/export?format=pdf"),
+            format!("https://docs.google.com/spreadsheets/d/{ID}/export?format=xlsx"),
+            format!("https://docs.google.com/document/d/{ID}/copy"),
+            format!("https://docs.google.com/presentation/d/{ID}/copy?copyComments=true"),
+            format!("https://docs.google.com/document/u/0/d/{ID}/export?format=docx"),
+            format!("https://docs.google.com/document/d/{ID}/mobilebasic"),
+            format!("https://docs.google.com/document/d/{ID}/edit/extra"),
             "https://docs.google.com/document/d/ABC123/edit".into(),
             "https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQ/edit".into(),
             "https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrS!Uv/edit".into(),
