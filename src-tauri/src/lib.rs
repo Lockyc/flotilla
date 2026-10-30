@@ -267,11 +267,9 @@ pub fn run() {
                 // muda flips a check item's tick on click: a failed write rebuilds to undo it; a
                 // saved one reloads the config, which rebuilds anyway.
                 if id == shell_core::menu::ids::TAB_DIGIT_CYCLE {
-                    let state = app.state::<state::AppState>();
-                    let next = state.config.lock().unwrap().tab_digit_keys.toggled();
-                    if let Err(e) = config::write_tab_digit_keys(&cfg_path, next) {
+                    if let Err(e) = config::toggle_tab_digit_keys(&cfg_path) {
                         tabs::notice(app, e);
-                        *state.menu.lock().unwrap() = None;
+                        *app.state::<state::AppState>().menu.lock().unwrap() = None;
                         menu::refresh(app);
                     }
                     return;
