@@ -11,6 +11,17 @@ use serde::{Deserialize, Serialize};
 use shell_core::tabs::pick_live_neighbour;
 use url::Url;
 
+/// A tab's identity within its group's login `store`: the document it opens, else (a head that is
+/// not a document) its `head_key`. The one rule every operation compares by, so a document is the
+/// same identity whether it heads a group or is a member, and the same URL in two stores is two.
+fn identity(store: &str, url: &Url) -> DocKey {
+    doc_key(store, url).unwrap_or_else(|| DocKey {
+        store: store.to_string(),
+        provider: "head".to_string(),
+        id: head_key(url),
+    })
+}
+
 /// Closed groups kept in `Workspace::recent`; the oldest is dropped past this.
 pub const RECENT_CAP: usize = 20;
 
@@ -22,8 +33,9 @@ pub struct Tab {
     pub id: TabId,
     pub home_url: String,
     pub title: String,
-    /// The document this tab shows; `None` for a head that is not a document.
-    pub key: Option<DocKey>,
+    /// What this tab is, scoped by its group's store: the document it shows, or for a head that
+    /// is not a document, its `head_key`. Open-once compares these.
+    pub key: DocKey,
     /// Popped out into its own window. Still open for the one-copy rule.
     pub detached: bool,
 }
@@ -60,7 +72,7 @@ impl Workspace {
             id: format!("t-{}", self.next_id),
             home_url: url.to_string(),
             title: url.to_string(),
-            key: doc_key(store, url),
+            key: identity(store, url),
             detached: false,
         }
     }
@@ -71,23 +83,9 @@ impl Workspace {
             .flat_map(|g| std::iter::once(&g.head).chain(g.members.iter()))
     }
 
-    /// The open tab (head or member, detached or not) showing `key`.
+    /// The open tab (head or member, detached or not) with identity `key`.
     fn open_doc(&self, key: &DocKey) -> Option<TabId> {
-        self.tabs()
-            .find(|t| t.key.as_ref() == Some(key))
-            .map(|t| t.id.clone())
-    }
-
-    /// The open head whose `head_key` is `hk`.
-    fn open_head(&self, hk: &str) -> Option<TabId> {
-        self.groups
-            .iter()
-            .find(|g| {
-                Url::parse(&g.head.home_url)
-                    .map(|u| head_key(&u) == hk)
-                    .unwrap_or(false)
-            })
-            .map(|g| g.head.id.clone())
+        self.tabs().find(|t| &t.key == key).map(|t| t.id.clone())
     }
 
     fn group_index(&self, id: &TabId) -> Option<usize> {
@@ -113,13 +111,10 @@ impl Workspace {
         Opened::Raised(id)
     }
 
-    /// Opens `url` as a new group head in `store`. Raises instead when an open head has the same
-    /// `head_key`, or an open tab already shows the same document.
+    /// Opens `url` as a new group head in `store`. Raises instead when a tab with the same
+    /// identity (`identity`) is already open.
     pub fn new_group(&mut self, url: &Url, store: &str) -> Opened {
-        if let Some(id) = self.open_head(&head_key(url)) {
-            return self.raise(id);
-        }
-        if let Some(id) = doc_key(store, url).and_then(|k| self.open_doc(&k)) {
+        if let Some(id) = self.open_doc(&identity(store, url)) {
             return self.raise(id);
         }
         let head = self.mint(url, store);
@@ -151,9 +146,9 @@ impl Workspace {
     }
 
     /// Closes a tab. Closing a head closes its group (`close_group` then picks the neighbouring
-    /// group's head, the only-tab case). Closing the active member activates the neighbour
-    /// `shell_core::tabs::pick_live_neighbour` picks over the group's order `[head, members...]`
-    /// with every tab eligible (the model tracks no load state): the previous tab, else the next.
+    /// group's head). Closing the active member activates, via `activate`, the tab
+    /// `shell_core::tabs::pick_live_neighbour` picks over `[head, members...]` with every tab
+    /// eligible: always the previous tab, since the head at index 0 is always eligible.
     pub fn close_tab(&mut self, id: &TabId) {
         let Some(gi) = self.group_index(id) else {
             return;
@@ -171,7 +166,9 @@ impl Workspace {
         });
         g.members.remove(at);
         if self.active.as_ref() == Some(id) {
-            self.active = neighbour;
+            if let Some(n) = neighbour {
+                self.activate(&n);
+            }
         }
     }
 
@@ -198,38 +195,47 @@ impl Workspace {
     }
 
     /// Restores `recent[index]` as a group and activates its head. Members whose document is now
-    /// open elsewhere are left where they are. If the head itself is now open elsewhere (same
-    /// `head_key`, or its document is open), that tab is raised and returned instead, nothing is
-    /// restored, and the entry leaves Recent.
+    /// open elsewhere are left where they are.
+    ///
+    /// If the head's identity is now open elsewhere, nothing is duplicated and that tab is raised
+    /// and returned: when it is a head, the entry's other members join its group and the entry
+    /// leaves Recent; when it is a member, the entry stays in Recent untouched.
     pub fn reopen_recent(&mut self, index: usize) -> Option<TabId> {
-        if index >= self.recent.len() {
-            return None;
+        let entry = self.recent.get(index)?;
+        if let Some(occupant) = self.open_doc(&entry.head.key) {
+            let gi = self.group_index(&occupant)?;
+            if self.groups[gi].head.id != occupant {
+                self.raise(occupant.clone());
+                return Some(occupant);
+            }
+            let entry = self.recent.remove(index);
+            let members = self.restorable(entry.members, &[entry.head.key]);
+            self.groups[gi].members.extend(members);
+            self.raise(occupant.clone());
+            return Some(occupant);
         }
         let mut group = self.recent.remove(index);
-        let occupied = Url::parse(&group.head.home_url)
-            .ok()
-            .and_then(|u| self.open_head(&head_key(&u)))
-            .or_else(|| group.head.key.as_ref().and_then(|k| self.open_doc(k)));
-        if let Some(id) = occupied {
-            self.raise(id.clone());
-            return Some(id);
-        }
-        let mut seen: Vec<DocKey> = group.head.key.iter().cloned().collect();
-        group.members.retain(|m| match &m.key {
-            Some(k) if seen.contains(k) || self.open_doc(k).is_some() => false,
-            Some(k) => {
-                seen.push(k.clone());
-                true
-            }
-            None => true,
-        });
-        for t in std::iter::once(&mut group.head).chain(group.members.iter_mut()) {
-            t.detached = false;
-        }
+        group.members = self.restorable(group.members, &[group.head.key.clone()]);
+        group.head.detached = false;
         let id = group.head.id.clone();
         self.groups.push(group);
         self.activate(&id);
         Some(id)
+    }
+
+    /// `members` minus those whose identity is open now or repeats, with `detached` cleared.
+    fn restorable(&self, members: Vec<Tab>, taken: &[DocKey]) -> Vec<Tab> {
+        let mut seen = taken.to_vec();
+        let mut out = vec![];
+        for mut m in members {
+            if seen.contains(&m.key) || self.open_doc(&m.key).is_some() {
+                continue;
+            }
+            seen.push(m.key.clone());
+            m.detached = false;
+            out.push(m);
+        }
+        out
     }
 
     pub fn forget_recent(&mut self, index: usize) {
@@ -280,15 +286,19 @@ impl Workspace {
         let mut tab = self.groups[from].members[at].clone();
         if self.groups[from].store != self.groups[to].store {
             let store = self.groups[to].store.clone();
-            tab.key = Url::parse(&tab.home_url)
-                .ok()
-                .and_then(|u| doc_key(&store, &u));
-            if tab.key.as_ref().is_some_and(|k| self.open_doc(k).is_some()) {
+            let Ok(url) = Url::parse(&tab.home_url) else {
+                return;
+            };
+            tab.key = identity(&store, &url);
+            if self.open_doc(&tab.key).is_some() {
                 return;
             }
         }
         self.groups[from].members.remove(at);
         self.groups[to].members.push(tab);
+        if self.active.as_ref() == Some(member) {
+            self.activate(member);
+        }
     }
 
     fn tab_mut(&mut self, id: &TabId) -> Option<&mut Tab> {
@@ -586,5 +596,144 @@ mod tests {
         let mut back = back;
         let n = head_of(&mut back, 2);
         assert_ne!(n, h);
+    }
+
+    #[test]
+    fn identity_is_scoped_by_store_not_by_role() {
+        let mut w = Workspace::default();
+        let h1 = id(w.new_group(&doc(1), "default"));
+        let work = id(w.new_group(&folder(2), "work"));
+        // same doc, other store: a second tab is allowed
+        let m = id(w.open_from(&work, &doc(1)).unwrap());
+        assert_ne!(m, h1);
+        w.make_own_group(&m);
+        assert_eq!(w.groups.len(), 3);
+        // same doc, same store: raised, whether the tab is a head or a member
+        assert_eq!(w.new_group(&doc(1), "work"), Opened::Raised(m));
+        assert_eq!(w.new_group(&doc(1), "default"), Opened::Raised(h1.clone()));
+        assert_eq!(w.new_group(&folder(2), "work"), Opened::Raised(work));
+        // the same folder in another store is its own head
+        assert!(matches!(
+            w.new_group(&folder(2), "default"),
+            Opened::Added(_)
+        ));
+    }
+
+    #[test]
+    fn reopen_recent_with_head_open_elsewhere_merges_members_into_it() {
+        let mut w = Workspace::default();
+        let h1 = head_of(&mut w, 1);
+        w.open_from(&h1, &doc(1)).unwrap();
+        w.open_from(&h1, &doc(2)).unwrap();
+        w.close_group(&h1);
+        let h2 = head_of(&mut w, 1);
+        let shared = id(w.open_from(&h2, &doc(1)).unwrap());
+        assert_eq!(w.reopen_recent(0), Some(h2.clone()));
+        assert!(w.recent.is_empty());
+        let members = member_ids(&w, &h2);
+        assert_eq!(members.len(), 2);
+        assert_eq!(members[0], shared);
+        assert_eq!(w.active, Some(h2));
+    }
+
+    #[test]
+    fn reopen_recent_with_head_open_as_a_member_leaves_the_entry() {
+        let mut w = Workspace::default();
+        let h1 = id(w.new_group(&doc(5), "default"));
+        let kept = id(w.open_from(&h1, &doc(1)).unwrap());
+        w.close_group(&h1);
+        let h2 = head_of(&mut w, 2);
+        let m = id(w.open_from(&h2, &doc(5)).unwrap());
+        assert_eq!(w.reopen_recent(0), Some(m.clone()));
+        assert_eq!(w.recent.len(), 1);
+        assert_eq!(w.recent[0].members[0].id, kept);
+        assert_eq!(w.groups.len(), 1);
+        assert_eq!(w.active, Some(m));
+    }
+
+    #[test]
+    fn closing_the_active_member_of_a_collapsed_group_expands_it() {
+        let mut w = Workspace::default();
+        let h = head_of(&mut w, 1);
+        let a = id(w.open_from(&h, &doc(1)).unwrap());
+        let b = id(w.open_from(&h, &doc(2)).unwrap());
+        w.set_collapsed(&h, true);
+        w.close_tab(&b);
+        assert_eq!(w.active, Some(a));
+        assert!(!w.group_of(&h).unwrap().collapsed);
+    }
+
+    #[test]
+    fn moving_the_active_member_into_a_collapsed_group_expands_it() {
+        let mut w = Workspace::default();
+        let h1 = head_of(&mut w, 1);
+        let h2 = head_of(&mut w, 2);
+        let d = id(w.open_from(&h1, &doc(1)).unwrap());
+        w.set_collapsed(&h2, true);
+        w.move_to_group(&d, &h2);
+        assert_eq!(w.active, Some(d));
+        assert!(!w.group_of(&h2).unwrap().collapsed);
+    }
+
+    #[test]
+    fn moving_onto_its_own_group_is_a_no_op() {
+        let mut w = Workspace::default();
+        let h = head_of(&mut w, 1);
+        let a = id(w.open_from(&h, &doc(1)).unwrap());
+        let b = id(w.open_from(&h, &doc(2)).unwrap());
+        w.move_to_group(&a, &h);
+        w.move_to_group(&a, &b);
+        assert_eq!(member_ids(&w, &h), vec![a, b]);
+    }
+
+    #[test]
+    fn make_own_group_of_a_head_is_a_no_op() {
+        let mut w = Workspace::default();
+        let h = head_of(&mut w, 1);
+        w.open_from(&h, &doc(1)).unwrap();
+        let before = w.clone();
+        w.make_own_group(&h);
+        assert_eq!(w, before);
+    }
+
+    #[test]
+    fn moving_across_stores_rekeys_or_refuses_on_collision() {
+        let mut w = Workspace::default();
+        let h1 = head_of(&mut w, 1);
+        let work = id(w.new_group(&folder(2), "work"));
+        let d = id(w.open_from(&h1, &doc(1)).unwrap());
+        w.move_to_group(&d, &work);
+        assert_eq!(w.find(&d).unwrap().1.key.store, "work");
+        assert_eq!(member_ids(&w, &work), vec![d.clone()]);
+        // doc 2 is open in both stores: moving the default copy into work collides
+        let e = id(w.open_from(&h1, &doc(2)).unwrap());
+        let e2 = id(w.open_from(&work, &doc(2)).unwrap());
+        w.move_to_group(&e, &work);
+        assert_eq!(member_ids(&w, &h1), vec![e]);
+        assert_eq!(member_ids(&w, &work), vec![d, e2]);
+    }
+
+    #[test]
+    fn closing_the_active_group_activates_the_neighbouring_head() {
+        let mut w = Workspace::default();
+        let h1 = head_of(&mut w, 1);
+        let h2 = head_of(&mut w, 2);
+        let h3 = head_of(&mut w, 3);
+        w.activate(&h2);
+        w.close_group(&h2);
+        assert_eq!(w.active, Some(h3.clone()));
+        w.close_group(&h3);
+        assert_eq!(w.active, Some(h1));
+    }
+
+    #[test]
+    fn ids_are_not_reused_within_a_session() {
+        let mut w = Workspace::default();
+        let a = head_of(&mut w, 1);
+        w.close_group(&a);
+        let b = head_of(&mut w, 2);
+        w.close_tab(&b);
+        let c = head_of(&mut w, 3);
+        assert!(a != b && b != c && a != c);
     }
 }
