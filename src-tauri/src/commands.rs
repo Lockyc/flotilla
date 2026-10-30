@@ -1,22 +1,24 @@
 //! The commands the chrome sidebar invokes. Sync commands, so they run on the main thread and may
-//! touch webviews directly; each locks `ws` only to change or read it.
+//! touch webviews directly; each locks `ws` only to change or read it. A chrome acts on the
+//! workspace window its own window shows.
 
 use crate::state::AppState;
 use crate::tabs;
-use crate::MAIN_WINDOW;
 use flotilla_core::model::TabId;
 use serde::Deserialize;
 use shell_core::compositing::{layout_webviews, HoleRect};
+use shell_core::windows::WindowSet;
 use tauri::{AppHandle, Manager, State, Url, Webview};
 
 /// Content webviews load remote origins, which Tauri already refuses app commands to; this keeps
-/// the commands to the main window's own chrome page regardless.
-fn require_chrome(webview: &Webview) -> Result<(), String> {
-    if webview.label() == MAIN_WINDOW {
-        Ok(())
-    } else {
-        Err("forbidden: not the chrome".into())
+/// the commands to a window's own chrome page regardless. The title of the window it chromes.
+fn require_chrome(webview: &Webview) -> Result<String, String> {
+    let label = webview.label();
+    if label != webview.window().label() {
+        return Err("forbidden: not the chrome".into());
     }
+    tabs::title_of_label(webview.app_handle(), label)
+        .ok_or_else(|| "forbidden: not the chrome".into())
 }
 
 /// The URL a typed or pasted new-group address names. Only web pages can head a group.
@@ -31,17 +33,20 @@ pub fn parse_group_url(input: &str) -> Result<Url, String> {
     }
 }
 
-/// The sidebar DTO, for the chrome's first paint (later ones arrive as `workspace` events).
+/// The calling window's sidebar DTO, for the chrome's first paint (later ones arrive as
+/// `workspace` events).
 #[tauri::command]
 pub fn get_workspace(
     webview: Webview,
     state: State<AppState>,
 ) -> Result<serde_json::Value, String> {
-    require_chrome(&webview)?;
+    let title = require_chrome(&webview)?;
     let ws = state.ws.lock().unwrap();
+    let created = state.created.lock().unwrap();
+    let none = Default::default();
     Ok(crate::sidebar::sidebar_dto(
-        tabs::shown(&ws),
-        &state.created.lock().unwrap(),
+        tabs::window(&ws, &title),
+        created.get(webview.label()).unwrap_or(&none),
     ))
 }
 
@@ -72,12 +77,20 @@ pub fn pop_out_tab(id: TabId, webview: Webview) -> Result<(), String> {
     pop_out(webview.app_handle(), &id)
 }
 
+/// The label of the OS window showing the workspace window that holds tab `id`.
+fn window_label_of(app: &AppHandle, id: &TabId) -> Option<String> {
+    let title = tabs::window_title_of(&app.state::<AppState>().ws.lock().unwrap(), id)?;
+    app.state::<WindowSet>().label_for_title(&title)
+}
+
 /// Pops tab `id` out (the row control, ⌘⇧O).
 pub fn pop_out(app: &AppHandle, id: &TabId) -> Result<(), String> {
+    let label = window_label_of(app, id).unwrap_or_default();
     crate::write::through(app, |ws| {
         let state = app.state::<AppState>();
         let created = state.created.lock().unwrap();
-        crate::detach::pop_out(ws, &created, id)
+        let none = Default::default();
+        crate::detach::pop_out(ws, created.get(&label).unwrap_or(&none), id)
     })?;
     tabs::changed(app);
     Ok(())
@@ -99,14 +112,16 @@ pub fn unload_tab(id: TabId, webview: Webview, state: State<AppState>) -> Result
     if state.ws.lock().unwrap().find(&id).is_none() {
         return Err("unknown tab".into());
     }
-    if let Some(wv) = tabs::own_webview(&webview.window(), &id) {
+    let window = webview.window();
+    if let Some(wv) = tabs::own_webview(&window, &id) {
         shell_core::web::content::close_content_webview(&wv);
     }
     let active_moved = {
         let mut ws = state.ws.lock().unwrap();
         let mut created = state.created.lock().unwrap();
+        let created = created.entry(window.label().to_string()).or_default();
         let was_active = ws.is_active(&id);
-        let next = tabs::after_unload(&ws, &created, &id);
+        let next = tabs::after_unload(&ws, created, &id);
         created.remove(&id);
         if was_active {
             ws.deactivate(&id);
@@ -134,17 +149,13 @@ pub fn toggle_group(head: TabId, collapsed: bool, webview: Webview) -> Result<()
     Ok(())
 }
 
-/// Opens `url` as a new group in the shown window (or raises the tab already showing it). The
-/// error is for the sidebar's error bar.
+/// Opens `url` as a new group in the calling window (or raises the tab already showing it, in
+/// whichever window). The error is for the sidebar's error bar.
 #[tauri::command]
 pub fn new_group(url: String, webview: Webview) -> Result<(), String> {
-    require_chrome(&webview)?;
+    let window = require_chrome(&webview)?;
     let url = parse_group_url(&url)?;
-    let app = webview.app_handle();
-    let window = tabs::shown(&app.state::<AppState>().ws.lock().unwrap())
-        .map(|w| w.title.clone())
-        .ok_or("The config has no window to open a group in.")?;
-    mutate(app, |ws| {
+    mutate(webview.app_handle(), |ws| {
         ws.new_group(&window, &url, crate::config::DEFAULT_STORE);
     });
     Ok(())
@@ -200,28 +211,51 @@ pub fn row_menu(
         .map_err(|e| e.to_string())
 }
 
+/// The banner's context menu (chrome-core's `onBannerMenu`) at the chrome's `(x, y)`: Edit
+/// Window… and Delete Window… for the calling window. Its items arrive as menu events, which the
+/// `WindowSet` handles.
+#[tauri::command]
+pub fn banner_menu(x: f64, y: f64, webview: Webview) -> Result<(), String> {
+    require_chrome(&webview)?;
+    let app = webview.app_handle();
+    app.state::<WindowSet>()
+        .banner_menu(app, webview.window().label(), x, y)
+        .map_err(|e| e.to_string())
+}
+
+/// The webview showing tab `id`, in whichever window hosts it.
+fn webview_of(app: &AppHandle, id: &TabId) -> Option<Webview> {
+    app.webviews()
+        .into_iter()
+        .find(|(l, _)| tabs::tab_of(l).is_some_and(|(_, t)| t == *id))
+        .map(|(_, wv)| wv)
+}
+
 /// Returns tab `id` to the URL it opened with. A tab with no webview is already there, unless it
-/// is the active tab and its webview failed to build: Home is then a fresh attempt at it.
+/// is its window's active tab and its webview failed to build: Home is then a fresh attempt at it.
 pub fn home(app: &AppHandle, id: &TabId) -> Result<(), String> {
     let state = app.state::<AppState>();
     let (home, retry) = {
         let ws = state.ws.lock().unwrap();
         let home = ws.find(id).ok_or("unknown tab")?.2.home_url.clone();
-        let retry = ws.is_active(id)
-            && !state.created.lock().unwrap().contains(id)
-            && state.failed.lock().unwrap().remove(id);
+        let created = state
+            .created
+            .lock()
+            .unwrap()
+            .values()
+            .any(|c| c.contains(id));
+        let retry = ws.is_active(id) && !created && state.failed.lock().unwrap().remove(id);
         (home, retry)
     };
     if retry {
         tabs::changed(app);
         return Ok(());
     }
-    let Some(window) = app.get_window(MAIN_WINDOW) else {
+    let Some(wv) = webview_of(app, id) else {
         return Ok(());
     };
     let url = Url::parse(&home).map_err(|e| e.to_string())?;
-    shell_core::web::content::navigate_to(&window, &tabs::label(id), &url)
-        .map_err(|e| e.to_string())
+    shell_core::web::content::navigate_to(&wv.window(), wv.label(), &url).map_err(|e| e.to_string())
 }
 
 /// Applies `op` to the workspace, writes it to the config ([`crate::write::through`]), raises the
@@ -244,36 +278,39 @@ pub struct RectArg {
     pub height: f64,
 }
 
-/// Who reports a content hole: the main window's chrome, or a popped-out window's banner page (its
+/// Who reports a content hole: a window's chrome, or a popped-out window's banner page (its
 /// window's own webview, under a detached label). `None` for anyone else.
 #[derive(Debug, PartialEq, Eq)]
 pub enum HoleCaller {
-    Main,
+    Window,
     Detached,
 }
 
-pub fn hole_caller(webview: &str, window: &str) -> Option<HoleCaller> {
+/// `listed`: whether `window` is one of the `WindowSet`'s windows.
+pub fn hole_caller(webview: &str, window: &str, listed: bool) -> Option<HoleCaller> {
     if webview != window {
         None
-    } else if webview == MAIN_WINDOW {
-        Some(HoleCaller::Main)
     } else if shell_core::detach::is_detached_label(webview) {
         Some(HoleCaller::Detached)
+    } else if listed {
+        Some(HoleCaller::Window)
     } else {
         None
     }
 }
 
-/// Moves the calling window's content webviews to fill the hole it measured. The main window's
-/// hole is also stored: new webviews are created into it.
+/// Moves the calling window's content webviews to fill the hole it measured. A window's hole is
+/// also stored: its new webviews are created into it.
 #[tauri::command]
 pub fn set_hole_rect(
     rect: RectArg,
     webview: Webview,
     state: State<AppState>,
 ) -> Result<(), String> {
+    let window = webview.window();
+    let listed = tabs::title_of_label(webview.app_handle(), window.label()).is_some();
     let caller =
-        hole_caller(webview.label(), webview.window().label()).ok_or("forbidden: not a chrome")?;
+        hole_caller(webview.label(), window.label(), listed).ok_or("forbidden: not a chrome")?;
     if ![rect.x, rect.y, rect.width, rect.height]
         .iter()
         .all(|v| v.is_finite())
@@ -286,35 +323,80 @@ pub fn set_hole_rect(
         width: rect.width,
         height: rect.height,
     };
-    if caller == HoleCaller::Main {
-        *state.hole.lock().unwrap() = hole;
+    if caller == HoleCaller::Window {
+        state
+            .hole
+            .lock()
+            .unwrap()
+            .insert(window.label().to_string(), hole);
     }
-    layout_webviews(&webview.window(), hole);
+    layout_webviews(&window, hole);
     Ok(())
 }
 
-/// ⌘W: closes the active tab (a head closes its group).
-pub fn close_active_tab(app: &AppHandle) {
+/// ⌘W in the window titled `title`: closes its active tab (a head closes its group).
+pub fn close_active_tab(app: &AppHandle, title: &str) {
     mutate(app, |ws| {
-        if let Some(id) = tabs::shown_active(ws) {
+        if let Some(id) = tabs::active_in(ws, title) {
             ws.close_tab(&id);
         }
     });
+}
+
+/// The home surface's "Create a starter config" button: seeds the starter config and applies it,
+/// which opens its window.
+#[tauri::command]
+pub fn shell_home_create_config(app: AppHandle) -> Result<(), String> {
+    let path = crate::config::config_path();
+    let state = app.state::<AppState>();
+    {
+        let _held = state.gate.hold();
+        if !crate::config::create_starter(&path)? {
+            return Err(format!(
+                "{} already exists — left untouched",
+                path.display()
+            ));
+        }
+        crate::reload_model(&app, crate::config::load(&path)?);
+    }
+    crate::refresh_views(&app);
+    Ok(())
+}
+
+/// The home surface's "Edit Config" button (a broken config): the spine's own Edit Config.
+#[tauri::command]
+pub fn shell_home_edit_config() {
+    let path = crate::config::config_path();
+    shell_core::menu::handle_spine_event(shell_core::menu::ids::EDIT_CONFIG, &path);
+}
+
+/// The home surface's per-window button: open the window, or focus it if it is open.
+#[tauri::command]
+pub fn shell_home_open_window(id: String, app: AppHandle) {
+    app.state::<WindowSet>().open_or_focus(&app, &id);
+    tabs::changed(&app);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    const TAB: &str = "t-0123456789abcdef";
+
     #[test]
     fn only_a_window_own_page_reports_its_hole() {
-        assert_eq!(hole_caller("main", "main"), Some(HoleCaller::Main));
-        let d = crate::detach::window_label("t-3");
-        assert_eq!(hole_caller(&d, &d), Some(HoleCaller::Detached));
+        assert_eq!(
+            hole_caller("rotary", "rotary", true),
+            Some(HoleCaller::Window)
+        );
+        let d = crate::detach::window_label(TAB);
+        assert_eq!(hole_caller(&d, &d, false), Some(HoleCaller::Detached));
         // A content webview, in either window.
-        assert_eq!(hole_caller("main:t-3", "main"), None);
-        assert_eq!(hole_caller("main:t-3", &d), None);
-        assert_eq!(hole_caller("other", "other"), None);
+        let content = tabs::label("rotary", TAB);
+        assert_eq!(hole_caller(&content, "rotary", true), None);
+        assert_eq!(hole_caller(&tabs::label(&d, TAB), &d, false), None);
+        // A window the set does not list (the home surface, the window form).
+        assert_eq!(hole_caller("other", "other", false), None);
     }
 
     #[test]

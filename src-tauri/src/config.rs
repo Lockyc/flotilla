@@ -108,16 +108,12 @@ impl Default for Config {
 }
 
 impl Config {
-    /// The main window's title: the first `[[window]]`'s, or the app's when there is none.
-    pub fn window_title(&self) -> String {
+    /// The accent of the window titled `title`, `None` when neutral (or no such window).
+    pub fn colour_of(&self, title: &str) -> Option<String> {
         self.windows
-            .first()
-            .map_or_else(|| "flotilla".into(), |w| w.title.trim().to_string())
-    }
-
-    /// The main window's accent (the first `[[window]]`'s), `None` when neutral.
-    pub fn accent(&self) -> Option<String> {
-        self.windows.first().and_then(|w| w.colour.clone())
+            .iter()
+            .find(|w| w.title.trim() == title.trim())
+            .and_then(|w| w.colour.clone())
     }
 
     /// The windows as the workspace model reads them.
@@ -337,7 +333,10 @@ mod tests {
 
     #[test]
     fn the_starter_window_is_the_default_and_a_file_without_windows_has_none() {
-        assert_eq!(Config::default().window_title(), STARTER_WINDOW);
+        assert_eq!(Config::default().windows[0].title, STARTER_WINDOW);
+        let cfg = parse("[[window]]\ntitle = \"Rotary\"\ncolour = \"#17458F\"\n").unwrap();
+        assert_eq!(cfg.colour_of(" Rotary ").as_deref(), Some("#17458f"));
+        assert_eq!(cfg.colour_of("Other"), None);
         assert!(parse("dark_mode = true\n").unwrap().windows.is_empty());
     }
 
@@ -452,10 +451,7 @@ mod tests {
     fn a_mistyped_key_is_an_error_and_a_missing_file_is_the_default() {
         assert!(parse("densty = \"compact\"").is_err());
         let unnamed = Config::default();
-        assert_eq!(
-            (unnamed.window_title().as_str(), unnamed.accent()),
-            ("flotilla", None)
-        );
+        assert_eq!(unnamed.colour_of(STARTER_WINDOW), None);
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(
             load(&dir.path().join("none.toml")).unwrap(),

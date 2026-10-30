@@ -1,32 +1,38 @@
 //! Popped-out tabs: each `detached` tab lives in its own shell-core detached window, labelled from
 //! the tab id ([`window_label`]) so shell-core's geometry keeps its size and position across
 //! launches. The workspace's `detached` flags decide which windows exist ([`plan`]); [`reconcile`]
-//! brings the windows in line after every change, and at launch reopens every popped-out tab.
+//! brings the windows in line after every change, and at launch reopens every popped-out tab. A
+//! popped-out tab stays in its workspace window, so its origin is that window's title: it returns
+//! to whichever window holds that title when it docks, under whatever label it has then.
 
 use crate::state::AppState;
 use crate::tabs::{self, Target};
+use flotilla_core::identity::is_tab_id;
 use flotilla_core::model::{TabId, Workspace};
 use shell_core::detach::{detach_token, detached_label, open_detached, wire_return, DetachSpec};
+use shell_core::windows::WindowSet;
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{AppHandle, Manager};
 
 /// A popped-out window's size the first time its tab pops out; geometry restores it after.
 const FIRST_SIZE: (f64, f64) = (1100.0, 800.0);
 
-/// The detached window for tab `id`. The token is the tab's content-webview label (curator's
-/// scheme), stable because tab ids are persisted and never reused.
+/// The detached window for tab `id`. The token is the tab id: the FNV of its document key, so the
+/// same document pops out under the same label (and geometry) whichever window it is in.
 pub fn window_label(id: &str) -> String {
-    detached_label(&tabs::label(id))
+    detached_label(id)
 }
 
 /// The tab a detached window's label belongs to.
 pub fn tab_of(window_label: &str) -> Option<TabId> {
-    tabs::tab_id(detach_token(window_label)?)
+    detach_token(window_label)
+        .filter(|t| is_tab_id(t))
+        .map(str::to_string)
 }
 
-/// Marks tab `id` popped out. If it was the active tab, the nearest live visible tab takes over
-/// the main window ([`tabs::after_unload`]), else nothing is shown there.
+/// Marks tab `id` popped out. If it was its window's active tab, the nearest live visible tab
+/// (`created`: the webviews in that window) takes over ([`tabs::after_unload`]), else nothing is
+/// shown there.
 pub fn pop_out(ws: &mut Workspace, created: &HashSet<TabId>, id: &TabId) -> Result<(), String> {
     match ws.find(id) {
         None => return Err("unknown tab".into()),
@@ -83,25 +89,25 @@ pub fn plan(ws: &Workspace, open: &HashSet<TabId>) -> WindowPlan {
     WindowPlan { open, close }
 }
 
-/// Set once the app is going down (⌘Q, or the main window closing). Every detached window's
-/// `Destroyed` follows, and docking their tabs then would save them as docked.
-static QUITTING: AtomicBool = AtomicBool::new(false);
-
-pub fn mark_quitting() {
-    QUITTING.store(true, Ordering::SeqCst);
-}
-
 /// The tabs whose detached window exists.
 fn open_windows(app: &AppHandle) -> HashSet<TabId> {
     app.windows().keys().filter_map(|l| tab_of(l)).collect()
 }
 
-/// Opens and closes detached windows to match the workspace ([`plan`]). Main thread only; `ws` is
+/// Opens and closes detached windows to match the workspace ([`plan`]), and tells the
+/// `WindowSet` how many there are (they keep the home surface away). Main thread only; `ws` is
 /// locked only to compute the plan. A window that cannot open docks its tab again.
 pub fn reconcile(app: &AppHandle) {
     let open_now = open_windows(app);
     let state = app.state::<AppState>();
-    let plan = plan(&state.ws.lock().unwrap(), &open_now);
+    let (plan, out) = {
+        let ws = state.ws.lock().unwrap();
+        (
+            plan(&ws, &open_now),
+            ws.tabs().filter(|t| t.detached).count(),
+        )
+    };
+    app.state::<WindowSet>().set_detached_count(app, out);
     for id in &plan.close {
         // Its CloseRequested handler ends the page; `Destroyed` then finds no tab to dock.
         if let Some(w) = app.get_window(&window_label(id)) {
@@ -125,12 +131,12 @@ pub fn reconcile(app: &AppHandle) {
 /// when the window closes.
 fn open(app: &AppHandle, t: &Target) -> Result<(), String> {
     let state = app.state::<AppState>();
-    let title = {
+    let (title, window) = {
         let ws = state.ws.lock().unwrap();
-        ws.find(&t.id).map(|(_, _, tab)| tab.title.clone())
-    }
-    .unwrap_or_default();
-    let colour = state.config.lock().unwrap().accent();
+        let tab = ws.find(&t.id).map(|(_, _, tab)| tab.title.clone());
+        (tab.unwrap_or_default(), tabs::window_title_of(&ws, &t.id))
+    };
+    let colour = window.and_then(|w| state.config.lock().unwrap().colour_of(&w));
     let spec = DetachSpec {
         title,
         colour,
@@ -139,7 +145,7 @@ fn open(app: &AppHandle, t: &Target) -> Result<(), String> {
         panes: vec![],
         pane_band: None,
     };
-    let label = open_detached(app, &tabs::label(&t.id), &spec, "flotilla", |win, size| {
+    let label = open_detached(app, &t.id, &spec, "flotilla", |win, size| {
         tabs::create(
             &win.as_ref().window(),
             t,
@@ -157,11 +163,20 @@ fn open(app: &AppHandle, t: &Target) -> Result<(), String> {
     Ok(())
 }
 
-/// Tab `id`'s window has closed: the tab returns to its group in the main window, as the active
-/// tab. Nothing to do if the tab was closed (or docked) first, or the app is quitting.
+/// Tab `id`'s window has closed: the tab returns to its group in its workspace window, as that
+/// window's active tab, reopening the window (found by its title) if it was closed meanwhile.
+/// Nothing to do if the tab was closed (or docked) first, or the app is quitting.
 fn redock(app: &AppHandle, id: &TabId) {
-    if QUITTING.load(Ordering::SeqCst) {
+    let set = app.state::<WindowSet>();
+    if set.is_quitting() {
         return;
+    }
+    let home = tabs::window_title_of(&app.state::<AppState>().ws.lock().unwrap(), id);
+    let closed = home
+        .and_then(|title| set.label_for_title(&title))
+        .filter(|label| app.get_window(label).is_none());
+    if let Some(label) = closed {
+        set.open_or_focus(app, &label);
     }
     let docked = crate::write::through(app, |ws| {
         if !ws.find(id).is_some_and(|(_, _, t)| t.detached) {
@@ -230,15 +245,21 @@ mod tests {
 
     #[test]
     fn window_labels_are_stable_per_tab_and_round_trip() {
-        assert_eq!(window_label("t-3"), "shell-detach:main:t-3");
-        assert_eq!(tab_of(&window_label("t-3")).as_deref(), Some("t-3"));
-        assert_eq!(tab_of("main"), None);
-        assert_eq!(tab_of("main:t-3"), None);
-        assert_eq!(tab_of("shell-detach:other:t-3"), None);
+        const TAB: &str = "t-0123456789abcdef";
+        assert_eq!(window_label(TAB), format!("shell-detach:{TAB}"));
+        assert_eq!(tab_of(&window_label(TAB)).as_deref(), Some(TAB));
+        assert_eq!(tab_of("rotary"), None);
+        assert_eq!(tab_of(&format!("rotary:{TAB}")), None);
+        assert_eq!(tab_of("shell-detach:other"), None);
+        // The tab's webview inside its pop-out is a child of the pop-out's label.
+        assert_eq!(
+            tabs::tab_of(&tabs::label(&window_label(TAB), TAB)),
+            Some((window_label(TAB).as_str(), TAB.to_string()))
+        );
     }
 
     #[test]
-    fn popping_out_the_active_tab_hands_the_main_window_to_a_live_neighbour() {
+    fn popping_out_the_active_tab_hands_its_window_to_a_live_neighbour() {
         let (mut ws, h, _, b) = ws();
         pop_out(&mut ws, &set(&[&h, &b]), &b).unwrap();
         assert!(ws.find(&b).unwrap().2.detached);
@@ -246,7 +267,7 @@ mod tests {
     }
 
     #[test]
-    fn popping_out_the_last_live_tab_leaves_the_main_window_blank() {
+    fn popping_out_the_last_live_tab_leaves_its_window_blank() {
         let (mut ws, _, _, b) = ws();
         pop_out(&mut ws, &set(&[&b]), &b).unwrap();
         assert_eq!(ws.windows[0].active, None);
@@ -269,7 +290,7 @@ mod tests {
     }
 
     #[test]
-    fn selecting_a_popped_out_row_raises_its_window_and_keeps_the_main_tab() {
+    fn selecting_a_popped_out_row_raises_its_window_and_keeps_the_active_tab() {
         let (mut ws, _, a, b) = ws();
         ws.set_detached(&a, true);
         assert_eq!(apply(&mut ws, |ws| ws.activate(&a)), Some(a));

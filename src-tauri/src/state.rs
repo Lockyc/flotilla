@@ -1,32 +1,36 @@
 //! The shell's managed state.
 
-use crate::menu::MenuState;
+use crate::menu::MenuKey;
 use crate::persist::Persist;
 use flotilla_core::model::{TabId, Workspace};
 use shell_core::compositing::HoleRect;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 /// Lock discipline: `ws` is never held while calling a webview API (`add_child`, `navigate`,
 /// `close`, show/hide): lock, copy or decide, drop, then act. WebKit runs `intercept` on the main
-/// thread from inside those calls' callbacks, and it locks `ws`.
+/// thread from inside those calls' callbacks, and it locks `ws`. Nor is any of these locks (or the
+/// gate) held across a `WindowSet` call that reaches the host (`materialize`, `apply`,
+/// `open_or_focus`, `rename`, `delete`): the host takes them.
 ///
 /// Lock order: `gate`, then `ws`, then `created`, then `failed`; and `Persist`'s writer lock before
-/// `ws` (the session snapshot is taken inside it). `menu` and `notice` are each taken alone.
+/// `ws` (the session snapshot is taken inside it). `hole`, `menu` and `notice` are each taken
+/// alone.
 pub struct AppState {
     /// Serialises config writes and reloads (`crate::write::Gate`).
     pub gate: crate::write::Gate,
     pub ws: Mutex<Workspace>,
-    /// The chrome's last-reported content hole, where new content webviews are placed.
-    pub hole: Mutex<HoleRect>,
-    /// Tabs whose content webview exists in the main window. Restored tabs start absent and are
-    /// created when first shown.
-    pub created: Mutex<HashSet<TabId>>,
+    /// Each open window's last-reported content hole, by window label: where its new content
+    /// webviews are placed.
+    pub hole: Mutex<HashMap<String, HoleRect>>,
+    /// The tabs whose content webview exists in each open window, by window label. Restored tabs
+    /// start absent and are created when first shown.
+    pub created: Mutex<HashMap<String, HashSet<TabId>>>,
     /// Tabs whose webview could not be created; not retried (or re-announced) until the tab is
     /// next selected, or sent Home while active.
     pub failed: Mutex<HashSet<TabId>>,
     /// What the menu bar was last built from (`menu::refresh`).
-    pub menu: Mutex<Option<MenuState>>,
+    pub menu: Mutex<Option<MenuKey>>,
     /// The app-wide config in force (the last good one).
     pub config: Mutex<crate::config::Config>,
     pub persist: Persist,

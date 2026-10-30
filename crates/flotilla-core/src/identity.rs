@@ -170,6 +170,12 @@ pub fn tab_id(key: &DocKey) -> String {
     format!("t-{:016x}", fnv1a(bytes.as_bytes()))
 }
 
+/// Whether `s` has a [`tab_id`]'s shape.
+pub fn is_tab_id(s: &str) -> bool {
+    s.strip_prefix("t-")
+        .is_some_and(|h| h.len() == 16 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
 const NOISE_PARAMS: &[&str] = &["usp", "pli", "authuser", "ouid", "resourcekey"];
 
 /// A URL normalised for comparing heads: lowercase host without `www.`, no fragment, no trailing
@@ -306,6 +312,8 @@ mod tests {
             )
         );
         assert_eq!(id.len(), 18);
+        assert!(is_tab_id(&id));
+        assert!(!is_tab_id("t-3") && !is_tab_id("-interim") && !is_tab_id("t-0123456789abcdeg"));
         let other = DocKey {
             store: "work".into(),
             ..k

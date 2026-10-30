@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
 
 /// How long after the last change the session is written.
 pub const DEBOUNCE: Duration = Duration::from_millis(500);
@@ -105,11 +105,7 @@ pub fn mark_dirty(app: &AppHandle) {
 pub fn save_now(app: &AppHandle) {
     let state = app.state::<crate::state::AppState>();
     if let Err(e) = state.persist.save(|| state.ws.lock().unwrap().clone()) {
-        let _ = app.emit_to(
-            crate::MAIN_WINDOW,
-            "notice",
-            format!("Couldn't save the session: {e}"),
-        );
+        crate::tabs::notice(app, format!("Couldn't save the session: {e}"));
     }
 }
 

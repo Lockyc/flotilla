@@ -125,6 +125,10 @@ async function mountChrome() {
       onContextMenu(id, { x, y }) {
         invoke("row_menu", { id, x, y }).catch((err) => sb.setError(String(err)));
       },
+      // Right-click on the window's title row: Edit Window… / Delete Window….
+      onBannerMenu({ x, y }) {
+        invoke("banner_menu", { x, y }).catch((err) => sb.setError(String(err)));
+      },
       onToggleGroup(group, collapsed) {
         invoke("toggle_group", { head: group, collapsed }).catch(() => {});
       },

@@ -1,5 +1,7 @@
-//! flotilla's Tauri shell: one window whose sidebar lists the workspace's groups and whose content
-//! hole shows the active tab's webview. The session is loaded at setup and saved as it changes.
+//! flotilla's Tauri shell: one OS window per config `[[window]]` (shell-core's `WindowSet`), each
+//! with a sidebar listing that window's groups and a content hole showing its active tab's webview.
+//! The workspace is built from the config and written back to it; the session (each window's
+//! active tab and Recent) is loaded at setup and saved as it changes.
 
 mod commands;
 mod config;
@@ -9,21 +11,18 @@ mod persist;
 mod sidebar;
 mod state;
 mod tabs;
+mod windows;
 mod write;
 
 use serde::Serialize;
-use tauri::{Emitter, Manager, TitleBarStyle, WebviewUrl};
-
-/// The single workspace window's label.
-pub(crate) const MAIN_WINDOW: &str = "main";
-
-/// First-run window size; shell-core's geometry plugin restores the saved bounds afterwards.
-const FIRST_RUN_SIZE: (f64, f64) = (1400.0, 900.0);
+use shell_core::windows::WindowSet;
+use tauri::{Emitter, Manager};
 
 /// Sidebar width the chrome starts at when none is saved.
 const DEFAULT_SIDEBAR_W: u32 = 240;
 
-/// What the chrome asks for at mount: title, density, drag and update gates.
+/// What the chrome asks for at mount: its window's title and accent, density, drag and update
+/// gates.
 #[derive(Serialize)]
 struct WindowIdentity {
     title: String,
@@ -35,15 +34,16 @@ struct WindowIdentity {
 }
 
 #[tauri::command]
-fn window_identity(state: tauri::State<state::AppState>) -> WindowIdentity {
+fn window_identity(
+    webview: tauri::Webview,
+    state: tauri::State<state::AppState>,
+) -> WindowIdentity {
+    let title =
+        tabs::title_of_label(webview.app_handle(), webview.window().label()).unwrap_or_default();
     let cfg = state.config.lock().unwrap();
     WindowIdentity {
-        title: cfg
-            .windows
-            .first()
-            .map(|w| w.title.trim().to_string())
-            .unwrap_or_default(),
-        colour: cfg.accent(),
+        colour: cfg.colour_of(&title),
+        title,
         default_width: DEFAULT_SIDEBAR_W,
         density: cfg.density.as_str(),
         sidebar_drag: true,
@@ -66,7 +66,7 @@ pub(crate) fn reload_model(app: &tauri::AppHandle, cfg: config::Config) {
     let fresh = flotilla_core::model::Workspace::from_config(&cfg.workspace_windows());
     state.ws.lock().unwrap().rebase(fresh);
     *state.config.lock().unwrap() = cfg;
-    *state.menu.lock().unwrap() = None;
+    menu::invalidate(app);
 }
 
 /// Queues `task` for a later turn of the main loop. `run_on_main_thread` called on the main thread
@@ -87,31 +87,27 @@ fn from_another_thread<T: Send + 'static>(post: impl FnOnce(T) + Send + 'static,
     std::thread::spawn(move || post(task));
 }
 
-/// Brings the views in line with the config in force: themes every window, retitles the main
-/// window, brings the webviews, sidebar and menu bar (its Window entry and tab shortcuts) in line,
-/// and has the chrome re-read its identity. Queued for the main loop ([`defer`]), so it is safe
-/// from any caller.
+/// Brings the views in line with the config in force: the `WindowSet` opens, closes, retitles and
+/// recolours windows to match it; every window is themed; the webviews, sidebars and menu bar
+/// follow the workspace; and each chrome re-reads its identity. Queued for the main loop
+/// ([`defer`]), so it is safe from any caller.
 pub(crate) fn refresh_views(app: &tauri::AppHandle) {
     let handle = app.clone();
     defer(app, move || {
-        let (theme, title) = {
-            let cfg = handle
-                .state::<state::AppState>()
-                .config
-                .lock()
-                .unwrap()
-                .clone();
+        let (theme, decls) = {
+            let state = handle.state::<state::AppState>();
+            let cfg = state.config.lock().unwrap();
             (
                 cfg.dark_mode.then_some(tauri::Theme::Dark),
-                cfg.window_title(),
+                windows::decls(&cfg),
             )
         };
+        handle.state::<WindowSet>().apply(&handle, decls);
         handle.set_theme(theme);
-        if let Some(w) = handle.get_webview_window(MAIN_WINDOW) {
-            let _ = w.set_title(&title);
-        }
         tabs::changed(&handle);
-        emit_to_main_chrome(&handle, "config-reloaded", ());
+        for (label, _) in tabs::open_windows(&handle) {
+            let _ = handle.emit_to(label.as_str(), "config-reloaded", ());
+        }
     });
 }
 
@@ -181,10 +177,7 @@ fn load_state(
     state::AppState {
         gate: Default::default(),
         ws: std::sync::Mutex::new(ws),
-        hole: std::sync::Mutex::new(shell_core::compositing::initial_hole(
-            FIRST_RUN_SIZE.0,
-            FIRST_RUN_SIZE.1,
-        )),
+        hole: Default::default(),
         created: Default::default(),
         failed: Default::default(),
         menu: Default::default(),
@@ -201,50 +194,77 @@ struct NavTab {
     from: Option<flotilla_core::model::TabId>,
 }
 
-/// Runs a spine command where `shell_core::menu::route` sent it. Only the main window has a
-/// sidebar, so every sidebar command goes to its chrome.
+/// The label of the window a popped-out window's tab belongs to: the window holding its title.
+fn origin_of(app: &tauri::AppHandle, detached: &str) -> Option<String> {
+    let id = detach::tab_of(detached)?;
+    let title = tabs::window_title_of(&app.state::<state::AppState>().ws.lock().unwrap(), &id)?;
+    app.state::<WindowSet>().label_for_title(&title)
+}
+
+/// Runs a spine command in the window `shell_core::menu::route` chose (a pop-out's commands go to
+/// the window its tab is in). The chrome is that window's main webview, so its label is the
+/// chrome's.
 fn on_spine_action(app: &tauri::AppHandle, routed: shell_core::menu::Routed) {
     use shell_core::menu::{SpineAction, TabNavAction};
+    let target = routed.target.as_str();
     if routed.from_detached.is_some() {
-        tabs::bring_main_forward(app);
+        app.state::<WindowSet>().open_or_focus(app, target);
     }
     let from = routed.from_detached.as_deref().and_then(detach::tab_of);
+    let emit = |event: &str| {
+        let _ = app.emit_to(target, event, ());
+    };
+    let title = || tabs::title_of_label(app, target);
     match routed.action {
         SpineAction::Nav(TabNavAction::Next) => {
-            emit_to_main_chrome(app, "nav-tab", NavTab { dir: 1, from })
+            let _ = app.emit_to(target, "nav-tab", NavTab { dir: 1, from });
         }
         SpineAction::Nav(TabNavAction::Prev) => {
-            emit_to_main_chrome(app, "nav-tab", NavTab { dir: -1, from })
+            let _ = app.emit_to(target, "nav-tab", NavTab { dir: -1, from });
         }
-        SpineAction::Nav(TabNavAction::Jump(n)) => emit_to_main_chrome(app, "jump-tab", n),
-        SpineAction::CloseTab => commands::close_active_tab(app),
+        SpineAction::Nav(TabNavAction::Jump(n)) => {
+            let _ = app.emit_to(target, "jump-tab", n);
+        }
+        SpineAction::CloseTab => {
+            if let Some(title) = title() {
+                commands::close_active_tab(app, &title);
+            }
+        }
         SpineAction::DockPoppedOut => {
-            if let Some(id) = detach::tab_of(&routed.target) {
+            if let Some(id) = detach::tab_of(target) {
                 detach::pop_in(app, &id);
             }
         }
         SpineAction::PopOutTab => {
-            let active = tabs::shown_active(&app.state::<state::AppState>().ws.lock().unwrap());
+            let active = title().and_then(|t| {
+                tabs::active_in(&app.state::<state::AppState>().ws.lock().unwrap(), &t)
+            });
             if let Some(id) = active {
                 if let Err(e) = commands::pop_out(app, &id) {
                     tabs::notice(app, e);
                 }
             }
         }
-        SpineAction::FindInSidebar => emit_to_main_chrome(app, "find-in-sidebar", ()),
-        SpineAction::CheckUpdates => emit_to_main_chrome(app, "check-update", ()),
-        // Closing a pop-out docks its tab; the workspace window itself stays (flotilla has no
-        // other surface to fall back to).
-        SpineAction::CloseWindow => {
-            if let Some(id) = detach::tab_of(&routed.target) {
-                detach::pop_in(app, &id);
+        // ⌘⇧F: the content webview may hold first responder, so make the chrome the key view
+        // before it focuses its field.
+        SpineAction::FindInSidebar => {
+            if let Some(chrome) = app.get_webview(target) {
+                let _ = chrome.set_focus();
             }
+            emit("find-in-sidebar");
         }
+        SpineAction::CheckUpdates => emit("check-update"),
+        // A pop-out's close docks its tab; a window's goes through the `WindowSet`'s
+        // `CloseRequested` like the red button.
+        SpineAction::CloseWindow => match detach::tab_of(target) {
+            Some(id) => detach::pop_in(app, &id),
+            None => {
+                if let Some(w) = app.get_window(target) {
+                    let _ = w.close();
+                }
+            }
+        },
     }
-}
-
-fn emit_to_main_chrome<S: Serialize + Clone>(app: &tauri::AppHandle, event: &str, payload: S) {
-    let _ = app.emit_to(MAIN_WINDOW, event, payload);
 }
 
 pub fn run() {
@@ -264,7 +284,11 @@ pub fn run() {
             commands::pop_out_tab,
             commands::pop_in_tab,
             commands::row_menu,
+            commands::banner_menu,
             commands::set_hole_rect,
+            commands::shell_home_create_config,
+            commands::shell_home_edit_config,
+            commands::shell_home_open_window,
         ])
         .setup(|app| {
             let cfg_path = config::config_path();
@@ -274,41 +298,30 @@ pub fn run() {
             };
             shell_core::web::insecure::set_allowlist(cfg.allow_insecure.clone());
             app.set_theme(cfg.dark_mode.then_some(tauri::Theme::Dark));
-            let window_title = cfg.window_title();
-            app.manage(load_state(app, cfg, config_error));
+            let decls = windows::decls(&cfg);
+            app.manage(load_state(app, cfg, config_error.clone()));
+            // Closing the last window quits, popped-out windows and all; they reopen at launch.
+            app.manage(
+                WindowSet::new("flotilla", cfg_path.clone(), windows::FlotillaHost)
+                    .quit_on_last_close(true),
+            );
             watch_config(app.handle().clone(), cfg_path.clone());
 
-            // The sidebar chrome is the window's main webview; overlay title bar with the traffic
-            // lights floating over chrome-core's `#cc-titlebar` strip.
-            let window = tauri::WebviewWindowBuilder::new(
-                app,
-                MAIN_WINDOW,
-                WebviewUrl::App("index.html".into()),
-            )
-            .title(window_title)
-            .inner_size(FIRST_RUN_SIZE.0, FIRST_RUN_SIZE.1)
-            .hidden_title(true)
-            .title_bar_style(TitleBarStyle::Overlay)
-            .build()?;
-            // Closing the workspace window quits, popped-out windows and all; they reopen at
-            // launch.
-            let closing = window.as_ref().window();
-            shell_core::web::content::wire_close_pages(&closing);
-            let app_handle = app.handle().clone();
-            window.on_window_event(move |event| match event {
-                tauri::WindowEvent::CloseRequested { .. } => detach::mark_quitting(),
-                tauri::WindowEvent::Destroyed => app_handle.exit(0),
-                _ => {}
-            });
-            // Restore lazily: only the active tab's webview is created now (this also builds the
-            // menu bar); every popped-out tab reopens in its own window.
-            tabs::sync(app.handle());
-            detach::reconcile(app.handle());
+            let handle = app.handle();
+            let set = app.state::<WindowSet>();
+            match config_error {
+                Some(e) => set.set_load_error(handle, Some(e)),
+                None => set.materialize(handle, decls),
+            }
+            // Restore lazily: only each window's active tab gets a webview now (this also builds
+            // the menu bar); every popped-out tab reopens in its own window.
+            tabs::sync(handle);
+            detach::reconcile(handle);
 
-            let nav_handle = app.handle().clone();
+            let nav_handle = handle.clone();
             shell_core::mouse_nav::install(move || tabs::focused_webview(&nav_handle));
 
-            // Row context menus' events arrive here too.
+            // Row and banner context menus' events arrive here too.
             app.on_menu_event(move |app, event| {
                 let id = event.id().as_ref();
                 // Edit Config on a missing file seeds the starter config first, so there is
@@ -317,6 +330,10 @@ pub fn run() {
                     if let Err(e) = config::create_starter(&cfg_path) {
                         tabs::notice(app, e);
                     }
+                }
+                // New Window…, and the banner's Edit Window… / Delete Window….
+                if app.state::<WindowSet>().handle_menu(app, id) {
+                    return;
                 }
                 if shell_core::menu::handle_spine_event(id, &cfg_path) || menu::handle(app, id) {
                     return;
@@ -331,24 +348,24 @@ pub fn run() {
                     };
                     if let Err(e) = toggled {
                         tabs::notice(app, e);
-                        *app.state::<state::AppState>().menu.lock().unwrap() = None;
+                        menu::invalidate(app);
                         menu::refresh(app);
                     }
                     return;
                 }
-                // Window ▸ <the main window>: the only window the spine lists.
-                if shell_core::menu::selected_window(id) == Some(MAIN_WINDOW) {
-                    tabs::bring_main_forward(app);
-                    *app.state::<state::AppState>().menu.lock().unwrap() = None;
-                    menu::refresh(app);
+                // Window ▸ <a window>: focus it, or reopen it.
+                if let Some(label) = shell_core::menu::selected_window(id) {
+                    app.state::<WindowSet>().open_or_focus(app, label);
+                    menu::invalidate(app);
+                    tabs::changed(app);
                     return;
                 }
                 let focused = app
                     .get_focused_window()
-                    .map_or_else(|| MAIN_WINDOW.to_string(), |w| w.label().to_string());
-                // Every popped-out tab came from the one main window.
-                let origin_of = |l: &str| detach::tab_of(l).map(|_| MAIN_WINDOW.to_string());
-                if let Some(routed) = shell_core::menu::route(id, &focused, origin_of) {
+                    .map(|w| w.label().to_string())
+                    .or_else(|| menu::focused(app).map(|(label, _)| label))
+                    .unwrap_or_default();
+                if let Some(routed) = shell_core::menu::route(id, &focused, |l| origin_of(app, l)) {
                     on_spine_action(app, routed);
                 }
             });
@@ -358,7 +375,7 @@ pub fn run() {
         .expect("error while building flotilla")
         .run(|app, event| {
             if let tauri::RunEvent::ExitRequested { .. } = event {
-                detach::mark_quitting();
+                app.state::<WindowSet>().mark_quitting();
                 for window in app.windows().values() {
                     shell_core::web::content::close_window_pages(window);
                 }

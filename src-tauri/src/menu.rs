@@ -4,8 +4,9 @@
 
 use crate::commands::{self, mutate};
 use crate::state::AppState;
-use crate::MAIN_WINDOW;
 use flotilla_core::model::{TabId, Workspace};
+use shell_core::menu::WindowEntry;
+use shell_core::windows::WindowSet;
 use tauri::menu::{
     IsMenuItem, Menu, MenuBuilder, MenuItem, MenuItemBuilder, MenuItemKind, PredefinedMenuItem,
     Submenu, SubmenuBuilder,
@@ -121,18 +122,28 @@ fn any_detached(ws: &Workspace) -> bool {
     ws.tabs().any(|t| t.detached)
 }
 
-/// The Group menu for `tab` (the active tab for the menu bar, the clicked row for its context
-/// menu). A tab that is not open counts as none. A member moves to the other groups of its window.
+/// The Group menu for `tab` (the focused window's active tab for the menu bar, the clicked row for
+/// its context menu). A tab that is not open counts as none. A member moves to any other group:
+/// its own window's by name, another window's as "name — window".
 pub fn menu_state_for(ws: &Workspace, tab: Option<&TabId>) -> MenuState {
     let found = tab.and_then(|id| ws.find(id));
     let no_tab = found.is_none().then_some(NO_TAB);
     let is_head = found.is_some_and(|(_, g, t)| g.head.id == t.id);
     let move_targets: Vec<(TabId, String)> = match found {
-        Some((wi, own, _)) if !is_head => ws.windows[wi]
-            .groups
+        Some((wi, own, _)) if !is_head => ws
+            .windows
             .iter()
-            .filter(|g| g.head.id != own.head.id)
-            .map(|g| (g.head.id.clone(), g.head.title.clone()))
+            .enumerate()
+            .flat_map(|(i, w)| w.groups.iter().map(move |g| (i, w, g)))
+            .filter(|(_, _, g)| g.head.id != own.head.id)
+            .map(|(i, w, g)| {
+                let name = if i == wi {
+                    g.head.title.clone()
+                } else {
+                    format!("{} — {}", g.head.title, w.title)
+                };
+                (g.head.id.clone(), name)
+            })
             .collect(),
         _ => vec![],
     };
@@ -231,28 +242,33 @@ pub fn row_menu(app: &AppHandle, ms: &MenuState, tab: &TabId) -> tauri::Result<M
     MenuBuilder::new(app).items(&refs(&items)).build()
 }
 
-/// The menu bar: shell-core's App, Edit, Tab, Config and Window menus around flotilla's Group menu,
-/// which acts on the active tab.
-fn build_app_menu(app: &AppHandle, ms: &MenuState) -> tauri::Result<Menu<Wry>> {
-    let (title, colour, cycle_digits) = {
-        let cfg = app.state::<AppState>().config.lock().unwrap().clone();
-        (
-            cfg.window_title(),
-            cfg.accent(),
-            cfg.tab_digit_keys.is_cycle(),
-        )
-    };
-    let windows = [shell_core::menu::WindowEntry {
-        id: MAIN_WINDOW.into(),
-        title,
-        open: true,
-        colour,
-    }];
+/// What the menu bar is built from: the Group menu's state and the Window menu's rows (label,
+/// title, open).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MenuKey {
+    pub group: MenuState,
+    pub windows: Vec<(String, String, bool)>,
+}
+
+/// The menu bar: shell-core's App, Edit, Tab, Config and Window menus (every configured window, open
+/// or closed) around flotilla's Group menu, which acts on the focused window's active tab.
+fn build_app_menu(
+    app: &AppHandle,
+    ms: &MenuState,
+    windows: &[WindowEntry],
+) -> tauri::Result<Menu<Wry>> {
+    let cycle_digits = app
+        .state::<AppState>()
+        .config
+        .lock()
+        .unwrap()
+        .tab_digit_keys
+        .is_cycle();
     let spine = shell_core::menu::build_spine(
         app,
         shell_core::menu::SpineConfig {
             app_name: "flotilla",
-            windows: &windows,
+            windows,
         },
         env!("CARGO_PKG_VERSION"),
         env!("BUILD_GIT_SHA"),
@@ -279,7 +295,7 @@ fn build_app_menu(app: &AppHandle, ms: &MenuState) -> tauri::Result<Menu<Wry>> {
 
 /// Whether the menu bar must be rebuilt to show `next`; records `next` as built when so. Every DTO
 /// push asks, retitles included, and most change nothing the menu shows.
-pub fn needs_rebuild(last: &mut Option<MenuState>, next: MenuState) -> bool {
+pub fn needs_rebuild<T: PartialEq>(last: &mut Option<T>, next: T) -> bool {
     if last.as_ref() == Some(&next) {
         return false;
     }
@@ -287,22 +303,55 @@ pub fn needs_rebuild(last: &mut Option<MenuState>, next: MenuState) -> bool {
     true
 }
 
-/// Rebuilds the menu bar from the workspace as it is now, if that changes it.
+/// Forgets what the menu bar was built from, so the next [`refresh`] rebuilds it.
+pub fn invalidate(app: &AppHandle) {
+    *app.state::<AppState>().menu.lock().unwrap() = None;
+}
+
+/// The workspace window the menu bar acts on, as (label, title): the focused window, or for a
+/// focused pop-out the window its tab is in, else the first open window.
+pub fn focused(app: &AppHandle) -> Option<(String, String)> {
+    let open = crate::tabs::open_windows(app);
+    let focused = app.get_focused_window().map(|w| w.label().to_string());
+    let from_popout = focused
+        .as_deref()
+        .and_then(crate::detach::tab_of)
+        .and_then(|id| {
+            crate::tabs::window_title_of(&app.state::<AppState>().ws.lock().unwrap(), &id)
+        });
+    open.iter()
+        .find(|(l, t)| Some(l) == focused.as_ref() || Some(t) == from_popout.as_ref())
+        .or(open.first())
+        .cloned()
+}
+
+/// Rebuilds the menu bar from the workspace and the window set as they are now, if that changes
+/// it.
 pub fn refresh(app: &AppHandle) {
     let state = app.state::<AppState>();
-    let ms = {
+    let windows = app.state::<WindowSet>().entries();
+    let title = focused(app).map(|(_, t)| t);
+    let group = {
         let ws = state.ws.lock().unwrap();
-        menu_state_for(&ws, crate::tabs::shown_active(&ws).as_ref())
+        let active = title.and_then(|t| crate::tabs::active_in(&ws, &t));
+        menu_state_for(&ws, active.as_ref())
     };
-    if !needs_rebuild(&mut state.menu.lock().unwrap(), ms.clone()) {
+    let key = MenuKey {
+        group: group.clone(),
+        windows: windows
+            .iter()
+            .map(|e| (e.id.clone(), e.title.clone(), e.open))
+            .collect(),
+    };
+    if !needs_rebuild(&mut state.menu.lock().unwrap(), key) {
         return;
     }
-    match build_app_menu(app, &ms) {
+    match build_app_menu(app, &group, &windows) {
         Ok(menu) => {
             let _ = app.set_menu(menu);
         }
         // Not built: the next push tries again.
-        Err(_) => *state.menu.lock().unwrap() = None,
+        Err(_) => invalidate(app),
     }
 }
 
@@ -311,14 +360,20 @@ pub fn handle(app: &AppHandle, menu_id: &str) -> bool {
     let Some(a) = action(menu_id) else {
         return false;
     };
-    let pick = |t: Option<TabId>, ws: &Workspace| t.or_else(|| crate::tabs::shown_active(ws));
+    let window = focused(app);
+    let title = window.as_ref().map(|(_, t)| t.clone());
+    let pick = |t: Option<TabId>, ws: &Workspace| {
+        t.or_else(|| title.as_deref().and_then(|w| crate::tabs::active_in(ws, w)))
+    };
     match a {
         Action::NewGroup => {
             // The key focus may be in a content webview; the field is in the chrome's.
-            if let Some(chrome) = app.get_webview(MAIN_WINDOW) {
-                let _ = chrome.set_focus();
+            if let Some((label, _)) = &window {
+                if let Some(chrome) = app.get_webview(label) {
+                    let _ = chrome.set_focus();
+                }
+                let _ = app.emit_to(label.as_str(), "focus-new-group", ());
             }
-            let _ = app.emit_to(MAIN_WINDOW, "focus-new-group", ());
         }
         Action::Home(t) => {
             let t = pick(t, &app.state::<AppState>().ws.lock().unwrap());
@@ -352,8 +407,8 @@ pub fn handle(app: &AppHandle, menu_id: &str) -> bool {
             }
         }),
         Action::Reopen(i) => mutate(app, |ws| {
-            if let Some(window) = crate::tabs::shown(ws).map(|w| w.title.clone()) {
-                ws.reopen_recent(&window, i);
+            if let Some(window) = &title {
+                ws.reopen_recent(window, i);
             }
         }),
         Action::ClearRecent => mutate(app, |ws| ws.recent.clear()),
@@ -478,6 +533,33 @@ mod tests {
         assert_eq!(s.make_own_group, on("Make Own Group"));
         assert_eq!(s.move_to, off("Move to Group — No other groups"));
         assert!(s.move_targets.is_empty());
+    }
+
+    #[test]
+    fn a_member_moves_to_another_windows_group_named_with_its_window() {
+        let window = |t: &str| flotilla_core::model::ConfigWindow {
+            title: t.into(),
+            groups: vec![],
+        };
+        let mut ws = Workspace::from_config(&[window("A"), window("B")]);
+        let folder = |n| url(&format!("https://drive.google.com/drive/folders/f{n}"));
+        let Some(Opened::Added(h)) = ws.new_group("A", &folder(1), "default") else {
+            panic!()
+        };
+        ws.set_title(&h, "Auction");
+        let Some(Opened::Added(m)) = ws.open_from(
+            &h,
+            &url("https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrSt01/edit"),
+        ) else {
+            panic!()
+        };
+        let Some(Opened::Added(b)) = ws.new_group("B", &folder(2), "default") else {
+            panic!()
+        };
+        ws.set_title(&b, "Bulletins");
+        let s = menu_state_for(&ws, Some(&m));
+        assert_eq!(s.move_targets, vec![(b, "Bulletins — B".to_string())]);
+        assert_eq!(s.move_to, on("Move to Group"));
     }
 
     #[test]
