@@ -8,7 +8,8 @@ use url::Url;
 
 /// The tab-list part of chrome-core's window DTO (`tabs`, `active`, `collapsed`); `chrome.js` adds
 /// the window identity fields. Each group is a run of rows keyed by its head's id, the head row
-/// first (`head: true`) and named by the head's title. `live` is whether the tab's webview exists
+/// first (`head: true`) and named by the head's title; removing a head removes its group, so its
+/// bin asks for a second click (`confirmRemove`). `live` is whether the tab's webview exists
 /// (`created`): the row's dot then offers Unload, and tab cycling skips cold rows. `icon` is the
 /// glyph of the kind of Google page the tab opens on; other pages keep chrome-core's letter tile.
 pub fn sidebar_dto(window: Option<&WindowWs>, created: &HashSet<TabId>) -> Value {
@@ -25,6 +26,7 @@ pub fn sidebar_dto(window: Option<&WindowWs>, created: &HashSet<TabId>) -> Value
                         "group": g.head.id,
                         "groupName": g.head.title,
                         "head": head,
+                        "confirmRemove": head,
                         "detached": t.detached,
                         "icon": icon_of(&t.home_url),
                         "live": created.contains(&t.id),
@@ -128,6 +130,8 @@ mod tests {
             ]
         );
         assert_eq!(dto["tabs"][1]["title"], json!("Budget"));
+        assert_eq!(dto["tabs"][0]["confirmRemove"], json!(true));
+        assert_eq!(dto["tabs"][1]["confirmRemove"], json!(false));
         assert_eq!(dto["tabs"][0]["icon"], json!("icons/folder.svg"));
         assert_eq!(dto["tabs"][1]["icon"], json!("icons/doc.svg"));
         // Only h2 has a webview.
