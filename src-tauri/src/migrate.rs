@@ -198,19 +198,17 @@ mod tests {
     use flotilla_core::session::Loaded;
     use std::path::PathBuf;
 
-    const ROTARY: &str = "https://drive.google.com/drive/folders/0AExampleFolderRoot";
-    const BUDGET: &str =
-        "https://docs.google.com/spreadsheets/d/1ExampleSheetId0000000000000000000000000000/edit";
-    const BULLETINS: &str = "https://drive.google.com/drive/folders/1BulletinsFolderIdAbCdEfGh";
-    const BULLETIN: &str =
-        "https://docs.google.com/presentation/d/1ExampleSlidesId000000000000000000000000000/edit";
-    const FLYER: &str = "https://docs.google.com/document/d/1GreatEscapeFlyerAbCdEfGhIj/edit";
+    const CLUB: &str = "https://drive.google.com/drive/folders/0AbCdEfGhIjKlMnOpQ";
+    const BUDGET: &str = "https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOpQrSt04/edit";
+    const NEWSLETTERS: &str = "https://drive.google.com/drive/folders/1NewslettersFolderIdAbCdE";
+    const NEWSLETTER: &str = "https://docs.google.com/presentation/d/1AbCdEfGhIjKlMnOpQrSt05/edit";
+    const FLYER: &str = "https://docs.google.com/document/d/1FairFlyerAbCdEfGhIjKlMn/edit";
     const OLD: &str = "https://drive.google.com/drive/folders/1OldClosedFolderAbCdEfGhIj";
 
-    /// The user's config before the migration: the starter's header, a top-level name and colour.
+    /// A config before the migration:the starter's header, a top-level name and colour.
     const OLD_CONFIG: &str = "# flotilla config — app-wide settings. Edit and save; flotilla \
-        hot-reloads.\n\n# The window's name.\ntitle = \"Rotary\"\n\n# The window's accent colour.\n\
-        colour = \"#17458f\"\n\n# Chrome sizing.\ndensity = \"comfortable\"\n";
+        hot-reloads.\n\n# The window's name.\ntitle = \"Club\"\n\n# The window's accent colour.\n\
+        colour = \"#2a6f4e\"\n\n# Chrome sizing.\ndensity = \"comfortable\"\n";
 
     fn tab(id: &str, url: &str, title: &str, detached: bool) -> Tab {
         Tab {
@@ -231,35 +229,30 @@ mod tests {
         }
     }
 
-    /// The user's session today: the Rotary drive root with its Budget sheet, the Bulletins
-    /// folder (collapsed) with the 2026-11-02 Bulletin popped out, and a group headed by the
-    /// Example Event flyer; titles as the pages reported them; the Budget active; one group in
+    /// A v1 session: the Club drive root with its Budget sheet, the Newsletters
+    /// folder (collapsed) with the 2026-11-02 Newsletter popped out, and a group headed by the
+    /// Fair flyer; titles as the pages reported them; the Budget active; one group in
     /// Recent.
     fn v1() -> V1Session {
         V1Session {
             groups: vec![
                 group(
-                    tab("t-1", ROTARY, "Rotary (interim) - Google Drive", false),
-                    vec![tab(
-                        "t-2",
-                        BUDGET,
-                        "Rotary Example – Budget - Google Sheets",
-                        false,
-                    )],
+                    tab("t-1", CLUB, "Club drive - Google Drive", false),
+                    vec![tab("t-2", BUDGET, "Club – Budget - Google Sheets", false)],
                     false,
                 ),
                 group(
-                    tab("t-3", BULLETINS, "Bulletins - Google Drive", false),
+                    tab("t-3", NEWSLETTERS, "Newsletters - Google Drive", false),
                     vec![tab(
                         "t-4",
-                        BULLETIN,
-                        "2026-11-02 Bulletin - Google Slides",
+                        NEWSLETTER,
+                        "2026-11-02 Newsletter - Google Slides",
                         true,
                     )],
                     true,
                 ),
                 group(
-                    tab("t-6", FLYER, "Example Event flyer - Google Docs", false),
+                    tab("t-6", FLYER, "Fair flyer - Google Docs", false),
                     vec![],
                     false,
                 ),
@@ -299,15 +292,12 @@ mod tests {
         let w = &cfg.windows[0];
         assert_eq!(w.title, "flotilla");
         let names: Vec<&str> = w.groups.iter().map(|g| g.name.as_str()).collect();
-        assert_eq!(
-            names,
-            ["Rotary (interim)", "Bulletins", "Example Event flyer"]
-        );
-        assert_eq!(w.groups[0].extra.url, ROTARY);
-        assert_eq!(w.groups[0].tabs[0].title, "Rotary Example – Budget");
+        assert_eq!(names, ["Club drive", "Newsletters", "Fair flyer"]);
+        assert_eq!(w.groups[0].extra.url, CLUB);
+        assert_eq!(w.groups[0].tabs[0].title, "Club – Budget");
         assert!(w.groups[1].extra.collapsed);
         assert!(w.groups[1].tabs[0].detached);
-        assert_eq!(w.groups[1].tabs[0].title, "2026-11-02 Bulletin");
+        assert_eq!(w.groups[1].tabs[0].title, "2026-11-02 Newsletter");
         // The run state: the old active tab, by its new id, and Recent.
         assert_eq!(s.active.get("flotilla"), Some(&id(BUDGET)));
         assert_eq!(s.recent.len(), 1);
@@ -341,8 +331,8 @@ mod tests {
         );
         let cfg = config(&cfg_path);
         assert_eq!(cfg.windows.len(), 1);
-        assert_eq!(cfg.windows[0].title, "Rotary");
-        assert_eq!(cfg.windows[0].colour.as_deref(), Some("#17458f"));
+        assert_eq!(cfg.windows[0].title, "Club");
+        assert_eq!(cfg.windows[0].colour.as_deref(), Some("#2a6f4e"));
         assert_eq!(cfg.windows[0].groups.len(), 3);
     }
 
@@ -392,8 +382,8 @@ mod tests {
         std::fs::create_dir_all(cfg_path.parent().unwrap()).unwrap();
         std::fs::write(
             &cfg_path,
-            "title = \"Rotary\"\ncolour = \"#17458F\"\n[[window]]\ntitle = \"flotilla\"\n\
-             [[window]]\ntitle = \"Rotary\"\n",
+            "title = \"Club\"\ncolour = \"#2A6F4E\"\n[[window]]\ntitle = \"flotilla\"\n\
+             [[window]]\ntitle = \"Club\"\n",
         )
         .unwrap();
         migrate(&cfg_path, &session_path, &v1()).unwrap();
@@ -401,19 +391,19 @@ mod tests {
         assert_eq!(cfg.windows.len(), 2);
         assert!(cfg.windows[0].groups.is_empty());
         assert_eq!(cfg.windows[1].groups.len(), 3);
-        assert_eq!(cfg.windows[1].colour.as_deref(), Some("#17458f"));
+        assert_eq!(cfg.windows[1].colour.as_deref(), Some("#2a6f4e"));
     }
 
     #[test]
     fn a_group_already_in_the_config_takes_the_documents_it_lacks() {
         let (_d, cfg_path, session_path) = paths();
         std::fs::create_dir_all(cfg_path.parent().unwrap()).unwrap();
-        // The Rotary root is already a group, in another window, without the Budget.
+        // The Club root is already a group, in another window, without the Budget.
         std::fs::write(
             &cfg_path,
             format!(
                 "title = \"flotilla\"\n[[window]]\ntitle = \"flotilla\"\n[[window]]\ntitle = \"Club\"\n\
-                 [[window.group]]\nname = \"Root\"\nurl = \"{ROTARY}\"\n"
+                 [[window.group]]\nname = \"Root\"\nurl = \"{CLUB}\"\n"
             ),
         )
         .unwrap();

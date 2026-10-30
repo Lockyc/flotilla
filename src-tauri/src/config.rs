@@ -241,11 +241,9 @@ mod tests {
     const GROUP_KEYS: [&str; 6] = ["name", "url", "store", "collapsed", "detached", "tab"];
     const TAB_KEYS: [&str; 3] = ["title", "url", "detached"];
 
-    const FOLDER: &str = "https://drive.google.com/drive/folders/0AExampleFolderRoot";
-    const SHEET: &str =
-        "https://docs.google.com/spreadsheets/d/1ExampleSheetId0000000000000000000000000000/edit";
-    const SLIDES: &str =
-        "https://docs.google.com/presentation/d/1ExampleSlidesId000000000000000000000000000/edit";
+    const FOLDER: &str = "https://drive.google.com/drive/folders/0AbCdEfGhIjKlMnOpQ";
+    const SHEET: &str = "https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOpQrSt04/edit";
+    const SLIDES: &str = "https://docs.google.com/presentation/d/1AbCdEfGhIjKlMnOpQrSt05/edit";
 
     /// The starter's commented `[[window]]` example, uncommented.
     fn starter_example() -> String {
@@ -295,9 +293,9 @@ mod tests {
         let cfg = parse(&format!(
             "density = \"compact\"\ndark_mode = true\ntab_digit_keys = \"cycle\"\n\
              auto_update = false\nallow_insecure = [\"10.0.0.1\"]\nformat_on_save = true\n\
-             [[window]]\ntitle = \"Rotary\"\ncolour = \"#17458F\"\nwidth = 1200\nheight = 800\n\
+             [[window]]\ntitle = \"Club\"\ncolour = \"#2A6F4E\"\nwidth = 1200\nheight = 800\n\
              open_on_start = false\n\
-             [[window.group]]\nname = \"Bulletins\"\nurl = \"{FOLDER}\"\nstore = \"club\"\n\
+             [[window.group]]\nname = \"Newsletters\"\nurl = \"{FOLDER}\"\nstore = \"club\"\n\
              collapsed = true\ndetached = true\n\
              [[window.group.tab]]\ntitle = \"Budget\"\nurl = \"{SHEET}\"\ndetached = true\n"
         ))
@@ -307,11 +305,11 @@ mod tests {
         assert!(cfg.dark_mode && cfg.format_on_save && !cfg.auto_update);
         assert_eq!(cfg.allow_insecure, vec!["10.0.0.1".to_string()]);
         let w = &cfg.windows[0];
-        assert_eq!(w.title, "Rotary");
-        assert_eq!(w.colour.as_deref(), Some("#17458f"));
+        assert_eq!(w.title, "Club");
+        assert_eq!(w.colour.as_deref(), Some("#2a6f4e"));
         assert_eq!((w.width, w.height, w.open_on_start), (1200, 800, false));
         let g = &w.groups[0];
-        assert_eq!(g.name, "Bulletins");
+        assert_eq!(g.name, "Newsletters");
         assert_eq!(
             g.extra,
             FlotillaGroup {
@@ -334,8 +332,8 @@ mod tests {
     #[test]
     fn the_starter_window_is_the_default_and_a_file_without_windows_has_none() {
         assert_eq!(Config::default().windows[0].title, STARTER_WINDOW);
-        let cfg = parse("[[window]]\ntitle = \"Rotary\"\ncolour = \"#17458F\"\n").unwrap();
-        assert_eq!(cfg.colour_of(" Rotary ").as_deref(), Some("#17458f"));
+        let cfg = parse("[[window]]\ntitle = \"Club\"\ncolour = \"#2A6F4E\"\n").unwrap();
+        assert_eq!(cfg.colour_of(" Club ").as_deref(), Some("#2a6f4e"));
         assert_eq!(cfg.colour_of("Other"), None);
         assert!(parse("dark_mode = true\n").unwrap().windows.is_empty());
     }
@@ -343,7 +341,7 @@ mod tests {
     #[test]
     fn workspace_windows_mirror_the_config() {
         let cfg = parse(&format!(
-            "[[window]]\ntitle = \" Rotary \"\n\
+            "[[window]]\ntitle = \" Club \"\n\
              [[window.group]]\nname = \"A\"\nurl = \"{FOLDER}\"\ncollapsed = true\n\
              [[window.group.tab]]\ntitle = \"Budget\"\nurl = \"{SHEET}\"\ndetached = true\n"
         ))
@@ -351,7 +349,7 @@ mod tests {
         assert_eq!(
             cfg.workspace_windows(),
             vec![ConfigWindow {
-                title: " Rotary ".into(),
+                title: " Club ".into(),
                 groups: vec![ConfigGroup {
                     name: "A".into(),
                     url: FOLDER.into(),
@@ -371,21 +369,21 @@ mod tests {
     #[test]
     fn parses_windows_groups_and_docs() {
         let cfg = parse(&format!(
-            "[[window]]\ntitle = \"Rotary\"\n\
-             [[window.group]]\nname = \"Rotary (interim)\"\nurl = \"{FOLDER}\"\n\
+            "[[window]]\ntitle = \"Club\"\n\
+             [[window.group]]\nname = \"Club drive\"\nurl = \"{FOLDER}\"\n\
              [[window.group.tab]]\ntitle = \"Budget\"\nurl = \"{SHEET}\"\n\
-             [[window.group.tab]]\ntitle = \"Bulletin\"\nurl = \"{SLIDES}\"\n\
+             [[window.group.tab]]\ntitle = \"Newsletter\"\nurl = \"{SLIDES}\"\n\
              [[window]]\ntitle = \"Home\"\n\
              [[window.group]]\nname = \"Budget\"\nurl = \"{SHEET}\"\nstore = \"home\"\n"
         ))
         .unwrap();
         assert_eq!(cfg.windows.len(), 2);
-        let rotary = &cfg.windows[0].groups[0];
-        assert_eq!(rotary.extra.store, DEFAULT_STORE);
-        assert!(!rotary.extra.collapsed);
-        let titles: Vec<_> = rotary.tabs.iter().map(|t| t.title.as_str()).collect();
-        assert_eq!(titles, ["Budget", "Bulletin"]);
-        assert!(rotary.tabs.iter().all(|t| !t.detached));
+        let club = &cfg.windows[0].groups[0];
+        assert_eq!(club.extra.store, DEFAULT_STORE);
+        assert!(!club.extra.collapsed);
+        let titles: Vec<_> = club.tabs.iter().map(|t| t.title.as_str()).collect();
+        assert_eq!(titles, ["Budget", "Newsletter"]);
+        assert!(club.tabs.iter().all(|t| !t.detached));
         // The same document in another store is another account's copy, not a second one.
         assert_eq!(cfg.windows[1].groups[0].extra.url, SHEET);
     }
@@ -394,7 +392,7 @@ mod tests {
     fn duplicate_doc_in_config_is_an_error() {
         let view = SHEET.replace("/edit", "/view");
         let err = parse(&format!(
-            "[[window]]\ntitle = \"Rotary\"\n\
+            "[[window]]\ntitle = \"Club\"\n\
              [[window.group]]\nname = \"A\"\nurl = \"{FOLDER}\"\n\
              [[window.group.tab]]\ntitle = \"Budget\"\nurl = \"{SHEET}\"\n\
              [[window.group]]\nname = \"B\"\nurl = \"{view}\"\n"
@@ -406,7 +404,7 @@ mod tests {
     #[test]
     fn duplicate_doc_across_windows_is_an_error() {
         let err = parse(&format!(
-            "[[window]]\ntitle = \"Rotary\"\n\
+            "[[window]]\ntitle = \"Club\"\n\
              [[window.group]]\nname = \"A\"\nurl = \"{FOLDER}\"\n\
              [[window.group.tab]]\ntitle = \"Budget\"\nurl = \"{SHEET}\"\n\
              [[window]]\ntitle = \"Home\"\n\
@@ -435,8 +433,8 @@ mod tests {
 
     #[test]
     fn top_level_title_is_now_unknown() {
-        assert!(parse("title = \"rotary\"").is_err());
-        assert!(parse("colour = \"#17458f\"").is_err());
+        assert!(parse("title = \"club\"").is_err());
+        assert!(parse("colour = \"#2a6f4e\"").is_err());
         // A stray key in a group or tab is an error too, not a silently ignored setting.
         assert!(parse(&format!(
             "[[window]]\ntitle = \"W\"\n[[window.group]]\nname = \"A\"\nurl = \"{FOLDER}\"\n\

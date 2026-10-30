@@ -637,9 +637,9 @@ mod tests {
         let Some(Opened::Added(b)) = ws.new_group("B", &folder(2), "default") else {
             panic!()
         };
-        ws.set_title(&b, "Bulletins");
+        ws.set_title(&b, "Newsletters");
         let s = menu_state_for(&ws, None, Some(&m));
-        assert_eq!(s.move_targets, vec![(b, "Bulletins — B".to_string())]);
+        assert_eq!(s.move_targets, vec![(b, "Newsletters — B".to_string())]);
         assert_eq!(s.move_to, on("Move to Group"));
     }
 

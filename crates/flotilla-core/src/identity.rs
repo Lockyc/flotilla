@@ -433,13 +433,13 @@ mod tests {
     #[test]
     fn a_page_title_drops_the_google_app_name() {
         for (reported, name) in [
-            ("Rotary (interim) - Google Drive", "Rotary (interim)"),
-            (
-                "Rotary Example – Budget - Google Sheets",
-                "Rotary Example – Budget",
-            ),
+            ("Club drive - Google Drive", "Club drive"),
+            ("Club – Budget - Google Sheets", "Club – Budget"),
             ("Minutes - Google Docs", "Minutes"),
-            ("2026-11-02 Bulletin - Google Slides", "2026-11-02 Bulletin"),
+            (
+                "2026-11-02 Newsletter - Google Slides",
+                "2026-11-02 Newsletter",
+            ),
             ("RSVP - Google Forms", "RSVP"),
             ("Example Domain", "Example Domain"),
             ("Google Drive", "Google Drive"),

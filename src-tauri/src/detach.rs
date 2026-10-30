@@ -249,8 +249,8 @@ mod tests {
         const TAB: &str = "t-0123456789abcdef";
         assert_eq!(window_label(TAB), format!("shell-detach:{TAB}"));
         assert_eq!(tab_of(&window_label(TAB)).as_deref(), Some(TAB));
-        assert_eq!(tab_of("rotary"), None);
-        assert_eq!(tab_of(&format!("rotary:{TAB}")), None);
+        assert_eq!(tab_of("club"), None);
+        assert_eq!(tab_of(&format!("club:{TAB}")), None);
         assert_eq!(tab_of("shell-detach:other"), None);
         // The tab's webview inside its pop-out is a child of the pop-out's label.
         assert_eq!(

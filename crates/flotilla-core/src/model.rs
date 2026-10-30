@@ -1513,9 +1513,9 @@ mod tests {
         let new = w.set_home(&h, &sub).unwrap();
         assert_eq!(w.find(&new).unwrap().2.title, sub.as_str());
         // A real name stays.
-        w.set_title(&new, "Bulletins");
+        w.set_title(&new, "Newsletters");
         let newer = w.set_home(&new, &folder(9)).unwrap();
-        assert_eq!(w.find(&newer).unwrap().2.title, "Bulletins");
+        assert_eq!(w.find(&newer).unwrap().2.title, "Newsletters");
     }
 
     #[test]

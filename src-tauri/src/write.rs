@@ -1145,15 +1145,18 @@ mod tests {
 
     #[test]
     fn unique_group_name_suffixes() {
-        assert_eq!(unique_group_name(&[], "Bulletins"), "Bulletins");
+        assert_eq!(unique_group_name(&[], "Newsletters"), "Newsletters");
         assert_eq!(
-            unique_group_name(&["Bulletins"], "Bulletins"),
-            "Bulletins 2"
+            unique_group_name(&["Newsletters"], "Newsletters"),
+            "Newsletters 2"
         );
         assert_eq!(
-            unique_group_name(&[" Bulletins ", "Bulletins 2"], " Bulletins"),
-            "Bulletins 3"
+            unique_group_name(&[" Newsletters ", "Newsletters 2"], " Newsletters"),
+            "Newsletters 3"
         );
-        assert_eq!(unique_group_name(&["Minutes"], "Bulletins"), "Bulletins");
+        assert_eq!(
+            unique_group_name(&["Minutes"], "Newsletters"),
+            "Newsletters"
+        );
     }
 }

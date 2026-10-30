@@ -50,14 +50,14 @@ The config is `~/.config/flotilla/config.toml` (or the file `FLOTILLA_CONFIG` na
 
 ```toml
 [[window]]
-  title  = "Rotary"
-  colour = "#17458f"
+  title  = "Club"
+  colour = "#2a6f4e"
   [[window.group]]
-    name = "Rotary (interim)"
-    url  = "https://drive.google.com/drive/folders/0AExampleFolderRoot"
+    name = "Club drive"
+    url  = "https://drive.google.com/drive/folders/0AbCdEfGhIjKlMnOpQ"
     [[window.group.tab]]
-      title = "Rotary Example – Budget"
-      url   = "https://docs.google.com/spreadsheets/d/1ExampleSheetId0000000000000000000000000000/edit"
+      title = "Club – Budget"
+      url   = "https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOpQrSt04/edit"
 ```
 
 A document is open once across every window: two heads or tabs naming the same document in the same `store` are a config error.

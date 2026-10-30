@@ -179,12 +179,12 @@ mod tests {
 
     #[test]
     fn windows_map_to_decls_in_config_order() {
-        let c = cfg("[[window]]\ntitle = \" Rotary \"\ncolour = \"#abc\"\nwidth = 800\nheight = 600\nopen_on_start = false\n[[window]]\ntitle = \"Home\"\n");
+        let c = cfg("[[window]]\ntitle = \" Club \"\ncolour = \"#abc\"\nwidth = 800\nheight = 600\nopen_on_start = false\n[[window]]\ntitle = \"Home\"\n");
         assert_eq!(
             decls(&c),
             vec![
                 WindowDecl {
-                    title: "Rotary".into(),
+                    title: "Club".into(),
                     colour: Some("#aabbcc".into()),
                     width: 800.0,
                     height: 600.0,
@@ -210,21 +210,21 @@ mod tests {
         let mut ws = Workspace::from_config(&c.workspace_windows());
         let head = ws.windows[1].groups[0].head.id.clone();
         ws.activate(&head);
-        // The set reports B renamed to "Bulletins" under B's old label (or one a closed window
+        // The set reports B renamed to "Newsletters" under B's old label (or one a closed window
         // since lost): it is found by its new title.
-        let entries = [entry("a", "A", true), entry("stale", "Bulletins", false)];
+        let entries = [entry("a", "A", true), entry("stale", "Newsletters", false)];
         let decl = WindowDecl {
-            title: "Bulletins".into(),
-            colour: Some("#17458f".into()),
+            title: "Newsletters".into(),
+            colour: Some("#2a6f4e".into()),
             width: 1500.0,
             height: 1000.0,
             open_on_start: true,
         };
         retitle(&mut ws, &mut c, &entries, &decl);
-        assert_eq!(ws.windows[1].title, "Bulletins");
+        assert_eq!(ws.windows[1].title, "Newsletters");
         assert_eq!(ws.windows[1].groups.len(), 1);
-        assert_eq!(c.windows[1].title, "Bulletins");
-        assert_eq!(c.colour_of("Bulletins").as_deref(), Some("#17458f"));
+        assert_eq!(c.windows[1].title, "Newsletters");
+        assert_eq!(c.colour_of("Newsletters").as_deref(), Some("#2a6f4e"));
         // The reload that echoes the write changes nothing, the active tab included.
         let before = ws.clone();
         ws.rebase(Workspace::from_config(&c.workspace_windows()));

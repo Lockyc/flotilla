@@ -723,16 +723,13 @@ mod tests {
 
     #[test]
     fn labels_round_trip() {
-        assert_eq!(label("rotary", TAB), format!("rotary:{TAB}"));
-        assert_eq!(
-            tab_of(&label("rotary", TAB)),
-            Some(("rotary", TAB.to_string()))
-        );
+        assert_eq!(label("club", TAB), format!("club:{TAB}"));
+        assert_eq!(tab_of(&label("club", TAB)), Some(("club", TAB.to_string())));
         // A window label may hold a `:`; a tab never does.
         assert_eq!(tab_of(&label("a:b", TAB)), Some(("a:b", TAB.to_string())));
         // A chrome whose window label holds a `:` is not a tab.
-        assert_eq!(tab_of("rotary:-interim"), None);
-        assert_eq!(tab_of("rotary"), None);
+        assert_eq!(tab_of("club:-interim"), None);
+        assert_eq!(tab_of("club"), None);
     }
 
     #[test]

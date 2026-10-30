@@ -349,7 +349,7 @@ pub fn begin_rename(app: &AppHandle, id: &TabId) {
 }
 
 /// The sidebar's rename field: names tab `id` (a group's `name` for a head, a document's `title`)
-/// in the config. A group name another group of its window holds is suffixed ("Bulletins 2").
+/// in the config. A group name another group of its window holds is suffixed ("Newsletters 2").
 /// The name is then fixed: titles from the page replace only a name that is still the URL.
 #[tauri::command]
 pub fn rename_tab(id: TabId, name: String, webview: Webview) -> Result<(), String> {
@@ -540,15 +540,12 @@ mod tests {
 
     #[test]
     fn only_a_window_own_page_reports_its_hole() {
-        assert_eq!(
-            hole_caller("rotary", "rotary", true),
-            Some(HoleCaller::Window)
-        );
+        assert_eq!(hole_caller("club", "club", true), Some(HoleCaller::Window));
         let d = crate::detach::window_label(TAB);
         assert_eq!(hole_caller(&d, &d, false), Some(HoleCaller::Detached));
         // A content webview, in either window.
-        let content = tabs::label("rotary", TAB);
-        assert_eq!(hole_caller(&content, "rotary", true), None);
+        let content = tabs::label("club", TAB);
+        assert_eq!(hole_caller(&content, "club", true), None);
         assert_eq!(hole_caller(&tabs::label(&d, TAB), &d, false), None);
         // A window the set does not list (the home surface, the window form).
         assert_eq!(hole_caller("other", "other", false), None);

@@ -27,20 +27,20 @@ title = "flotilla"
 # Another window, with every key a window, its groups and their documents take:
 #
 # [[window]]
-# title = "Rotary"            # the window's name: sidebar banner, window title, Window menu
-# colour = "#17458f"          # optional accent, "#rgb" or "#rrggbb"
+# title = "Club"              # the window's name: sidebar banner, window title, Window menu
+# colour = "#2a6f4e"          # optional accent, "#rgb" or "#rrggbb"
 # width = 1500                # optional size of its first open
 # height = 1000
 # open_on_start = true        # optional; false leaves it closed until opened from the Window menu
 #
 # [[window.group]]
-# name = "Rotary (interim)"   # the group's name in the sidebar
-# url = "https://drive.google.com/drive/folders/0AExampleFolderRoot"  # its head and Home
+# name = "Club drive"         # the group's name in the sidebar
+# url = "https://drive.google.com/drive/folders/0AbCdEfGhIjKlMnOpQ"  # its head and Home
 # store = "default"           # optional login store; another store is another account
 # collapsed = false           # optional; true shows the head alone
 # detached = false            # optional; true reopens the head in its own window
 #
 # [[window.group.tab]]
 # title = "Budget"            # the document's name in the sidebar
-# url = "https://docs.google.com/spreadsheets/d/1ExampleSheetId0000000000000000000000000000/edit"
+# url = "https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOpQrSt04/edit"
 # detached = false            # optional; true reopens it in its own window
