@@ -852,6 +852,7 @@ dependencies = [
  "serde",
  "serde_json",
  "shell-core",
+ "tempfile",
  "url",
 ]
 

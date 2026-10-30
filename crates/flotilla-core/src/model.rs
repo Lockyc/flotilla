@@ -77,6 +77,47 @@ impl Workspace {
         }
     }
 
+    /// Makes a deserialised workspace consistent with the rules the code enforces, trusting
+    /// nothing on disk that is derivable: re-derives every tab's key (groups and recent) from its
+    /// `home_url` and group store, drops later open members whose key now repeats an earlier
+    /// open tab's (heads are never dropped), clears `active` if it no longer names an open tab,
+    /// and raises `next_id` to at least every restored id (dropped duplicates included) so a new tab never reuses one.
+    pub fn rekey_and_repair(&mut self) {
+        for g in self.groups.iter_mut().chain(self.recent.iter_mut()) {
+            let store = g.store.clone();
+            for t in std::iter::once(&mut g.head).chain(g.members.iter_mut()) {
+                if let Ok(url) = Url::parse(&t.home_url) {
+                    t.key = identity(&store, &url);
+                }
+            }
+        }
+        let max = self
+            .groups
+            .iter()
+            .chain(self.recent.iter())
+            .flat_map(|g| std::iter::once(&g.head).chain(g.members.iter()))
+            .filter_map(|t| t.id.strip_prefix("t-")?.parse::<u64>().ok())
+            .max()
+            .unwrap_or(0);
+        self.next_id = self.next_id.max(max);
+        let mut seen: Vec<DocKey> = self.groups.iter().map(|g| g.head.key.clone()).collect();
+        for g in &mut self.groups {
+            g.members.retain(|m| {
+                if seen.contains(&m.key) {
+                    false
+                } else {
+                    seen.push(m.key.clone());
+                    true
+                }
+            });
+        }
+        if let Some(a) = &self.active {
+            if self.find(a).is_none() {
+                self.active = None;
+            }
+        }
+    }
+
     fn tabs(&self) -> impl Iterator<Item = &Tab> {
         self.groups
             .iter()
@@ -735,5 +776,55 @@ mod tests {
         w.close_tab(&b);
         let c = head_of(&mut w, 3);
         assert!(a != b && b != c && a != c);
+    }
+
+    #[test]
+    fn rekey_and_repair_rederives_keys_dedups_and_fixes_next_id() {
+        let mut w = Workspace::default();
+        let h1 = head_of(&mut w, 1);
+        let h2 = head_of(&mut w, 2);
+        let a = id(w.open_from(&h1, &doc(1)).unwrap());
+        let b = id(w.open_from(&h2, &doc(2)).unwrap());
+        w.close_group(&h2);
+        let r = head_of(&mut w, 3);
+        w.close_group(&r);
+        // corrupt: wrong keys, a member repeating another's key, a lowered counter, a stale active
+        w.groups[0].head.key.id = "bogus".into();
+        w.groups[0].members[0].key = w.groups[0].head.key.clone();
+        w.recent[0].head.key.id = "bogus".into();
+        let dup = Tab {
+            id: "t-99".into(),
+            home_url: doc(1).to_string(),
+            title: "dup".into(),
+            key: w.groups[0].head.key.clone(),
+            detached: false,
+        };
+        w.groups[0].members.push(dup);
+        w.next_id = 1;
+        w.active = Some("t-500".into());
+        w.rekey_and_repair();
+        assert_eq!(w.groups[0].head.key, identity("default", &folder(1)));
+        assert_eq!(w.recent[0].head.key, identity("default", &folder(3)));
+        assert_eq!(w.recent[1].members[0].key, identity("default", &doc(2)));
+        assert_eq!(member_ids(&w, &h1), vec![a]); // later duplicate dropped, first kept
+        assert_eq!(w.active, None);
+        assert_eq!(w.next_id, 99);
+        let _ = b;
+        assert_eq!(id(w.new_group(&folder(9), "default")), "t-100");
+    }
+
+    #[test]
+    fn rekey_and_repair_never_drops_a_head_for_a_duplicate_member() {
+        let mut w = Workspace::default();
+        let h1 = head_of(&mut w, 1);
+        let h2 = id(w.new_group(&doc(1), "default"));
+        let mut m = w.groups[0].head.clone();
+        m.id = "t-77".into();
+        m.home_url = doc(1).to_string();
+        w.groups[0].members.push(m);
+        w.rekey_and_repair();
+        assert!(w.groups[0].members.is_empty());
+        assert_eq!(w.groups[1].head.id, h2);
+        assert_eq!(w.groups[0].head.id, h1);
     }
 }

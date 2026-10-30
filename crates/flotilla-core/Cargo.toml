@@ -5,9 +5,10 @@ edition = "2021"
 publish = false
 
 [dependencies]
+serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 url = "2"
 shell-core = { git = "https://github.com/Lockyc/shell-core", rev = "2fc995564fa51dee623661b2ad656b4c77e7c340", default-features = false }
 
 [dev-dependencies]
-serde_json = "1"
+tempfile = "3"
