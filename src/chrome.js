@@ -257,6 +257,8 @@ listen("focus-new-group", () => {
     input.select();
   }
 });
+// The pointer moved onto a content webview (shell-core's web::pointer): this page never sees its
+// own exit, since the content composites above it, so chrome-core's `:hover` would freeze.
 listen("pointer-away", () => sb && sb.pointerAway());
 listen("check-update", () => sb && sb.checkForUpdateNow());
 
