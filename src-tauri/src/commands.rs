@@ -4,11 +4,11 @@
 
 use crate::state::AppState;
 use crate::tabs;
-use flotilla_core::model::TabId;
+use flotilla_core::model::{Opened, TabId};
 use serde::Deserialize;
 use shell_core::compositing::{layout_webviews, HoleRect};
 use shell_core::windows::WindowSet;
-use tauri::{AppHandle, Manager, State, Url, Webview};
+use tauri::{AppHandle, Emitter, Manager, State, Url, Webview};
 
 /// Content webviews load remote origins, which Tauri already refuses app commands to; this keeps
 /// the commands to a window's own chrome page regardless. The title of the window it chromes.
@@ -51,9 +51,14 @@ pub fn get_workspace(
 }
 
 /// The chrome has mounted: what the error bar shows for the notices raised before it could listen
-/// ([`crate::state::Notices`]).
+/// ([`crate::state::Notices`]). The events held for its window while it mounted
+/// ([`crate::state::ChromeQueue`]) are sent now that it listens.
 #[tauri::command]
-pub fn startup_notice(state: State<AppState>) -> Option<String> {
+pub fn startup_notice(webview: Webview, state: State<AppState>) -> Option<String> {
+    let held = state.chrome_queue.lock().unwrap().take(webview.label());
+    for (event, payload) in held {
+        let _ = webview.emit_to(webview.label(), &event, payload);
+    }
     state.notice.lock().unwrap().mount()
 }
 
@@ -155,8 +160,11 @@ pub fn toggle_group(head: TabId, collapsed: bool, webview: Webview) -> Result<()
 pub fn new_group(url: String, webview: Webview) -> Result<(), String> {
     let window = require_chrome(&webview)?;
     let url = parse_group_url(&url)?;
-    mutate(webview.app_handle(), |ws| {
-        ws.new_group(&window, &url, crate::config::DEFAULT_STORE);
+    show_from(webview.app_handle(), &window, |ws| {
+        ws.new_group(&window, &url, crate::config::DEFAULT_STORE)
+            .map(|o| match o {
+                Opened::Added(id) | Opened::Raised(id) => id,
+            })
     });
     Ok(())
 }
@@ -266,6 +274,24 @@ pub fn mutate(app: &AppHandle, op: impl FnOnce(&mut flotilla_core::model::Worksp
     if let Some(id) = &raised {
         crate::detach::raise(app, id);
     }
+    tabs::changed(app);
+}
+
+/// [`mutate`] for an operation started in the window titled `from` that shows a tab (`op`
+/// returns it): when open-once put that tab in another window, that window comes forward,
+/// reopened if it was closed; a popped-out one is raised ([`tabs::front_for`], the path a link's
+/// interception takes too).
+pub fn show_from(
+    app: &AppHandle,
+    from: &str,
+    op: impl FnOnce(&mut flotilla_core::model::Workspace) -> Option<TabId>,
+) {
+    let front = crate::write::through(app, |ws| {
+        let mut shown = None;
+        let raised = crate::detach::apply(ws, |ws| shown = op(ws));
+        tabs::front_for(ws, false, from, shown.as_ref(), raised)
+    });
+    tabs::bring(app, front.as_ref());
     tabs::changed(app);
 }
 

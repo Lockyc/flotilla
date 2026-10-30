@@ -132,6 +132,8 @@ pub fn plan(
             home_url: t.home_url.clone(),
             store: g.store.clone(),
         });
+    // While waiting, the webview under the active tab's label is the closing one: not shown.
+    let show = show.filter(|_| !wait);
     let mut hide: Vec<TabId> = created
         .iter()
         .filter(|id| here(id) && Some(*id) != show.as_ref())
@@ -202,15 +204,32 @@ pub fn changed(app: &AppHandle) {
 /// Brings every open window's content webviews in line with the workspace ([`plan`]) and pushes
 /// the sidebar DTOs. Main thread only. `ws` is locked only to compute each plan.
 pub fn sync(app: &AppHandle) {
-    let mut wait = false;
     for (label, title) in open_windows(app) {
-        wait |= sync_window(app, &label, &title);
+        if sync_window(app, &label, &title) {
+            retry_window(app, label, title, 1);
+        }
     }
     push_dto(app);
-    if wait {
-        let later = app.clone();
-        crate::defer(app, move || sync(&later));
+}
+
+/// How many main-loop turns a window waits for a closing webview to release its tab's label
+/// before giving up; the next change syncs it again.
+const WAIT_TURNS: u32 = 20;
+
+/// Syncs window `label` again on a later turn, until its active tab's label is free
+/// ([`ViewPlan::wait`]) or [`WAIT_TURNS`] have passed.
+fn retry_window(app: &AppHandle, label: String, title: String, turn: u32) {
+    if turn > WAIT_TURNS {
+        return;
     }
+    let later = app.clone();
+    crate::defer(app, move || {
+        if sync_window(&later, &label, &title) {
+            retry_window(&later, label, title, turn + 1);
+        } else {
+            push_dto(&later);
+        }
+    });
 }
 
 /// [`sync`] for the window labelled `label`; whether it must run again once a closing webview has
@@ -390,14 +409,13 @@ fn intercept(app: &AppHandle, label: &str, url: &Url, o: LinkOrigin) -> bool {
         let raised = crate::detach::apply(ws, |ws| {
             decision = nav::decide(ws, &id, url, origin(o));
         });
-        let to = match &decision {
-            Decision::Open(Opened::Added(t) | Opened::Raised(t)) => window_title_of(ws, t),
+        let shown = match &decision {
+            Decision::Open(Opened::Added(t) | Opened::Raised(t)) => Some(t.clone()),
             Decision::PassThrough => None,
         };
-        let front = match (from, to) {
-            (Some((from_popout, from)), Some(to)) => forward(from_popout, &from, &to, raised),
-            _ => None,
-        };
+        let front = from.and_then(|(from_popout, from)| {
+            front_for(ws, from_popout, &from, shown.as_ref(), raised)
+        });
         (decision, front)
     });
     match decision {
@@ -405,15 +423,37 @@ fn intercept(app: &AppHandle, label: &str, url: &Url, o: LinkOrigin) -> bool {
         Decision::Open(_) => {
             let deferred = app.clone();
             crate::defer(app, move || {
-                match &front {
-                    Some(Forward::Detached(r)) => crate::detach::raise(&deferred, r),
-                    Some(Forward::Window(title)) => bring_forward(&deferred, title),
-                    None => {}
-                }
+                bring(&deferred, front.as_ref());
                 changed(&deferred)
             });
             true
         }
+    }
+}
+
+/// The window to bring forward once an operation started in window `from` (from a pop-out of
+/// it when `from_popout`) has shown tab `shown`, or raised the pop-out of tab `raised`:
+/// [`forward`] to `shown`'s window.
+pub fn front_for(
+    ws: &Workspace,
+    from_popout: bool,
+    from: &str,
+    shown: Option<&TabId>,
+    raised: Option<TabId>,
+) -> Option<Forward> {
+    if raised.is_some() {
+        return forward(from_popout, from, from, raised);
+    }
+    let to = window_title_of(ws, shown?)?;
+    forward(from_popout, from, &to, None)
+}
+
+/// Brings `front` forward: a pop-out, or a workspace window (reopened if closed).
+pub fn bring(app: &AppHandle, front: Option<&Forward>) {
+    match front {
+        Some(Forward::Detached(r)) => crate::detach::raise(app, r),
+        Some(Forward::Window(title)) => bring_forward(app, title),
+        None => {}
     }
 }
 
@@ -559,6 +599,41 @@ mod tests {
     }
 
     #[test]
+    fn open_once_in_another_window_brings_that_window_forward() {
+        let (mut ws, a, b) = two_windows();
+        // New Group in A on B's document: B's tab is raised there, and B comes forward.
+        let shown = match ws.new_group("A", &url(DOC_B), "default").unwrap() {
+            Opened::Raised(id) => id,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(shown, b);
+        assert_eq!(
+            front_for(&ws, false, "A", Some(&shown), None),
+            Some(Forward::Window("B".into()))
+        );
+        // Reopening, from A, a closed group whose folder is now open in B raises it in B.
+        let folder_a = url("https://drive.google.com/drive/folders/f1");
+        let head_a = ws.windows[0].groups[0].head.id.clone();
+        ws.close_group(&head_a);
+        let Some(Opened::Added(in_b)) = ws.new_group("B", &folder_a, "default") else {
+            panic!()
+        };
+        let reopened = ws.reopen_recent("A", 0);
+        assert_eq!(reopened, Some(in_b.clone()));
+        assert_eq!(
+            front_for(&ws, false, "A", reopened.as_ref(), None),
+            Some(Forward::Window("B".into()))
+        );
+        // Shown in the window it was asked from: nothing to bring forward.
+        assert_eq!(front_for(&ws, false, "B", Some(&in_b), None), None);
+        // A popped-out tab raised: its pop-out.
+        assert_eq!(
+            front_for(&ws, false, "A", None, Some(a.clone())),
+            Some(Forward::Detached(a))
+        );
+    }
+
+    #[test]
     fn a_failed_tab_is_not_retried_until_cleared() {
         let (ws, _, _, b) = ws();
         let p = plan(&ws, "W", &none(), &set(&[&b]), &none());
@@ -681,7 +756,8 @@ mod tests {
         let p = plan(&ws, "W", &none(), &none(), &set(&[&b]));
         assert!(p.wait);
         assert_eq!(p.create, None);
-        assert_eq!(p.show, Some(b.clone()));
+        // The webview under its label is the closing one: it is not shown.
+        assert_eq!(p.show, None);
         // Once the old webview has gone, it is created.
         let p = plan(&ws, "W", &none(), &none(), &none());
         assert!(!p.wait);

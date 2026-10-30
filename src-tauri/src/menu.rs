@@ -325,24 +325,38 @@ pub fn focused(app: &AppHandle) -> Option<(String, String)> {
         .cloned()
 }
 
-/// Rebuilds the menu bar from the workspace and the window set as they are now, if that changes
-/// it.
-pub fn refresh(app: &AppHandle) {
-    let state = app.state::<AppState>();
-    let windows = app.state::<WindowSet>().entries();
-    let title = focused(app).map(|(_, t)| t);
-    let group = {
-        let ws = state.ws.lock().unwrap();
-        let active = title.and_then(|t| crate::tabs::active_in(&ws, &t));
-        menu_state_for(&ws, active.as_ref())
-    };
-    let key = MenuKey {
-        group: group.clone(),
+/// Rebuilds the menu bar whenever `window` gains focus, so its Group menu acts on that window's
+/// active tab ([`refresh`] rebuilds only when that changes what it shows).
+pub fn follow_focus(app: &AppHandle, window: &tauri::Window) {
+    let app = app.clone();
+    window.on_window_event(move |e| {
+        if let tauri::WindowEvent::Focused(true) = e {
+            refresh(&app);
+        }
+    });
+}
+
+/// What the menu bar shows with the window titled `focused` in front: its active tab's Group menu,
+/// and the Window menu's rows.
+pub fn key_for(ws: &Workspace, focused: Option<&str>, windows: &[WindowEntry]) -> MenuKey {
+    let active = focused.and_then(|t| crate::tabs::active_in(ws, t));
+    MenuKey {
+        group: menu_state_for(ws, active.as_ref()),
         windows: windows
             .iter()
             .map(|e| (e.id.clone(), e.title.clone(), e.open))
             .collect(),
-    };
+    }
+}
+
+/// Rebuilds the menu bar from the workspace and the window set as they are now, if that changes
+/// it. Runs on every DTO push and whenever a window or pop-out gains focus.
+pub fn refresh(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let windows = app.state::<WindowSet>().entries();
+    let title = focused(app).map(|(_, t)| t);
+    let key = key_for(&state.ws.lock().unwrap(), title.as_deref(), &windows);
+    let group = key.group.clone();
     if !needs_rebuild(&mut state.menu.lock().unwrap(), key) {
         return;
     }
@@ -406,11 +420,11 @@ pub fn handle(app: &AppHandle, menu_id: &str) -> bool {
                 ws.close_group(&h);
             }
         }),
-        Action::Reopen(i) => mutate(app, |ws| {
+        Action::Reopen(i) => {
             if let Some(window) = &title {
-                ws.reopen_recent(window, i);
+                commands::show_from(app, window, |ws| ws.reopen_recent(window, i));
             }
-        }),
+        }
         Action::ClearRecent => mutate(app, |ws| ws.recent.clear()),
     }
     true
@@ -560,6 +574,48 @@ mod tests {
         let s = menu_state_for(&ws, Some(&m));
         assert_eq!(s.move_targets, vec![(b, "Bulletins — B".to_string())]);
         assert_eq!(s.move_to, on("Move to Group"));
+    }
+
+    #[test]
+    fn the_group_menu_follows_the_focused_window() {
+        let window = |t: &str| flotilla_core::model::ConfigWindow {
+            title: t.into(),
+            groups: vec![],
+        };
+        let mut ws = Workspace::from_config(&[window("A"), window("B")]);
+        let folder = |n| url(&format!("https://drive.google.com/drive/folders/f{n}"));
+        let Some(Opened::Added(a)) = ws.new_group("A", &folder(1), "default") else {
+            panic!()
+        };
+        let Some(Opened::Added(m)) = ws.open_from(
+            &a,
+            &url("https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrSt01/edit"),
+        ) else {
+            panic!()
+        };
+        let entries = [
+            WindowEntry {
+                id: "a".into(),
+                title: "A".into(),
+                open: true,
+                colour: None,
+            },
+            WindowEntry {
+                id: "b".into(),
+                title: "B".into(),
+                open: true,
+                colour: None,
+            },
+        ];
+        // A in front, its member active: the member's items.
+        let in_a = key_for(&ws, Some("A"), &entries);
+        assert_eq!(in_a.group, menu_state_for(&ws, Some(&m)));
+        assert_eq!(in_a.group.make_own_group, on("Make Own Group"));
+        // B in front, nothing active there: no tab, so nothing acts on A's member.
+        let in_b = key_for(&ws, Some("B"), &entries);
+        assert_eq!(in_b.group, menu_state_for(&ws, None));
+        assert_ne!(in_a, in_b, "a focus change rebuilds the menu bar");
+        assert_eq!(in_b.windows.len(), 2);
     }
 
     #[test]

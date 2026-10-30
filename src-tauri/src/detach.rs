@@ -159,6 +159,7 @@ fn open(app: &AppHandle, t: &Target) -> Result<(), String> {
     wire_return(app, &label, move || redock(&docking, &id));
     if let Some(w) = app.get_window(&label) {
         shell_core::web::content::wire_close_pages(&w);
+        crate::menu::follow_focus(app, &w);
     }
     Ok(())
 }

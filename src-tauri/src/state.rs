@@ -36,6 +36,30 @@ pub struct AppState {
     pub persist: Persist,
     /// The error bar's notices (`tabs::notice`).
     pub notice: Mutex<Notices>,
+    /// Events for chromes still mounting (`ChromeQueue`).
+    pub chrome_queue: Mutex<ChromeQueue>,
+}
+
+/// Events for a window whose chrome is not listening yet: a spine command sent from a pop-out to
+/// the window its tab came from, when that window had to be reopened for it. Handed over when
+/// the chrome mounts (`commands::startup_notice`).
+#[derive(Debug, Default)]
+pub struct ChromeQueue {
+    held: HashMap<String, Vec<(String, serde_json::Value)>>,
+}
+
+impl ChromeQueue {
+    pub fn hold(&mut self, label: &str, event: &str, payload: serde_json::Value) {
+        self.held
+            .entry(label.to_string())
+            .or_default()
+            .push((event.to_string(), payload));
+    }
+
+    /// Window `label`'s held events, in order, once.
+    pub fn take(&mut self, label: &str) -> Vec<(String, serde_json::Value)> {
+        self.held.remove(label).unwrap_or_default()
+    }
 }
 
 /// The error bar's notices. Until the chrome has mounted (`startup_notice`) nothing is listening,
@@ -82,6 +106,21 @@ mod tests {
         );
         assert_eq!(n.raise("later".into()).as_deref(), Some("later"));
         assert_eq!(n.mount(), None);
+    }
+
+    #[test]
+    fn events_for_a_mounting_chrome_are_handed_over_once_in_order() {
+        let mut q = ChromeQueue::default();
+        q.hold("a", "nav-tab", serde_json::json!({ "dir": 1 }));
+        q.hold("a", "jump-tab", serde_json::json!(3));
+        q.hold("b", "check-update", serde_json::json!(null));
+        let a = q.take("a");
+        assert_eq!(
+            a.iter().map(|(e, _)| e.as_str()).collect::<Vec<_>>(),
+            ["nav-tab", "jump-tab"]
+        );
+        assert!(q.take("a").is_empty());
+        assert_eq!(q.take("b").len(), 1);
     }
 
     #[test]

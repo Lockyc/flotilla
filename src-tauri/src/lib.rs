@@ -184,6 +184,7 @@ fn load_state(
         config: std::sync::Mutex::new(config),
         persist,
         notice: std::sync::Mutex::new(notice),
+        chrome_queue: Default::default(),
     }
 }
 
@@ -207,24 +208,37 @@ fn origin_of(app: &tauri::AppHandle, detached: &str) -> Option<String> {
 fn on_spine_action(app: &tauri::AppHandle, routed: shell_core::menu::Routed) {
     use shell_core::menu::{SpineAction, TabNavAction};
     let target = routed.target.as_str();
+    // A pop-out's window may have been closed: reopened here, its chrome only listens once it
+    // has mounted, so its events wait for that (`state::ChromeQueue`).
+    let mounting = routed.from_detached.is_some() && app.get_window(target).is_none();
     if routed.from_detached.is_some() {
         app.state::<WindowSet>().open_or_focus(app, target);
     }
     let from = routed.from_detached.as_deref().and_then(detach::tab_of);
-    let emit = |event: &str| {
-        let _ = app.emit_to(target, event, ());
+    let send = |event: &str, payload: serde_json::Value| {
+        if mounting {
+            app.state::<state::AppState>()
+                .chrome_queue
+                .lock()
+                .unwrap()
+                .hold(target, event, payload);
+        } else {
+            let _ = app.emit_to(target, event, payload);
+        }
     };
+    let emit = |event: &str| send(event, serde_json::Value::Null);
     let title = || tabs::title_of_label(app, target);
+    let nav = |dir: i32| {
+        serde_json::to_value(NavTab {
+            dir,
+            from: from.clone(),
+        })
+        .unwrap()
+    };
     match routed.action {
-        SpineAction::Nav(TabNavAction::Next) => {
-            let _ = app.emit_to(target, "nav-tab", NavTab { dir: 1, from });
-        }
-        SpineAction::Nav(TabNavAction::Prev) => {
-            let _ = app.emit_to(target, "nav-tab", NavTab { dir: -1, from });
-        }
-        SpineAction::Nav(TabNavAction::Jump(n)) => {
-            let _ = app.emit_to(target, "jump-tab", n);
-        }
+        SpineAction::Nav(TabNavAction::Next) => send("nav-tab", nav(1)),
+        SpineAction::Nav(TabNavAction::Prev) => send("nav-tab", nav(-1)),
+        SpineAction::Nav(TabNavAction::Jump(n)) => send("jump-tab", serde_json::json!(n)),
         SpineAction::CloseTab => {
             if let Some(title) = title() {
                 commands::close_active_tab(app, &title);

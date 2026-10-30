@@ -6,10 +6,12 @@
 use crate::state::AppState;
 use config_core::edit::edit_window;
 use config_core::{add_window, remove, At};
-use flotilla_core::model::Workspace;
+use flotilla_core::model::{TabId, Workspace};
+use shell_core::compositing::HoleRect;
 use shell_core::menu::WindowEntry;
 use shell_core::windows::plan::{Slot, WindowDecl};
 use shell_core::windows::{WindowHost, WindowSet, WindowWrite};
+use std::collections::{HashMap, HashSet};
 use tauri::{AppHandle, Emitter, Manager, TitleBarStyle, WebviewUrl, WebviewWindow};
 
 /// What shell-core needs to know about one `[[window]]`.
@@ -65,9 +67,21 @@ fn build(app: &AppHandle, slot: &Slot) -> tauri::Result<WebviewWindow> {
             .title_bar_style(TitleBarStyle::Overlay)
             .theme(dark.then_some(tauri::Theme::Dark))
             .build()?;
+    crate::menu::follow_focus(app, &window.as_ref().window());
     let later = app.clone();
     crate::defer(app, move || crate::tabs::changed(&later));
     Ok(window)
+}
+
+/// What a window's closing drops: the record of its content webviews and its content hole, which
+/// went with it. Its workspace window (groups, active tab) is untouched.
+pub(crate) fn forget(
+    created: &mut HashMap<String, HashSet<TabId>>,
+    hole: &mut HashMap<String, HoleRect>,
+    label: &str,
+) {
+    created.remove(label);
+    hole.remove(label);
 }
 
 /// flotilla's per-window content, built and torn down by the managed [`WindowSet`].
@@ -82,8 +96,11 @@ impl WindowHost for FlotillaHost {
     /// active tab, so it reopens as it was.
     fn closed(&self, app: &AppHandle, label: &str) {
         let state = app.state::<AppState>();
-        state.created.lock().unwrap().remove(label);
-        state.hole.lock().unwrap().remove(label);
+        forget(
+            &mut state.created.lock().unwrap(),
+            &mut state.hole.lock().unwrap(),
+            label,
+        );
         if !app.state::<WindowSet>().is_quitting() {
             crate::menu::invalidate(app);
             crate::menu::refresh(app);
@@ -233,18 +250,32 @@ mod tests {
             flotilla_core::model::Opened::Added(id) => id,
             other => panic!("{other:?}"),
         };
-        let mut created = std::collections::HashMap::from([(
-            "b".to_string(),
-            std::collections::HashSet::from([id.clone()]),
+        use shell_core::windows::plan::{assign, menu_entries};
+        // Both open, under the labels the set gave them.
+        let live = |open: &[&str]| {
+            assign(&decls(&c), &Default::default())
+                .into_iter()
+                .filter(|s| open.contains(&s.decl.title.as_str()))
+                .map(|s| (s.decl.title, s.label))
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        let b_label = live(&["B"])["B"].clone();
+        let mut created = HashMap::from([(b_label.clone(), HashSet::from([id.clone()]))]);
+        let mut hole = HashMap::from([(
+            b_label.clone(),
+            shell_core::compositing::initial_hole(800.0, 600.0),
         )]);
-        // What `FlotillaHost::closed` drops: the window's webviews, nothing of its workspace.
-        created.remove("b");
+        // B closes: `FlotillaHost::closed` drops its view state only.
+        forget(&mut created, &mut hole, &b_label);
+        assert!(created.is_empty() && hole.is_empty());
         assert_eq!(crate::tabs::active_in(&ws, "B"), Some(id.clone()));
         assert_eq!(
             flotilla_core::session::Session::of(&ws).active.get("B"),
             Some(&id)
         );
-        // Every window the config lists is in the menu, open or not.
-        assert_eq!(decls(&c).len(), 2);
+        // The Window menu, from the set's slots with only A live, still lists B, closed.
+        let entries = menu_entries(&assign(&decls(&c), &live(&["A"])));
+        let rows: Vec<(&str, bool)> = entries.iter().map(|e| (e.title.as_str(), e.open)).collect();
+        assert_eq!(rows, [("A", true), ("B", false)]);
     }
 }
