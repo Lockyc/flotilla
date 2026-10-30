@@ -1,4 +1,6 @@
-//! flotilla's platform-neutral model: groups, documents and the saved session. Empty until the
-//! model lands; the Tauri shell in `src-tauri` consumes it.
+//! flotilla's platform-neutral core, free of Tauri: `identity` says which document a URL is, and
+//! `model` is the workspace of groups and tabs built on it (the one-copy rule and Recent). The
+//! Tauri shell in `src-tauri` consumes both.
 
 pub mod identity;
+pub mod model;
