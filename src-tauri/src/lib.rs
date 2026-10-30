@@ -130,14 +130,13 @@ pub fn run() {
             .title_bar_style(TitleBarStyle::Overlay)
             .build()?;
             // Closing the workspace window quits, popped-out windows and all; they reopen at
-            // launch. Closing it drops its content webviews, which would leave their pages running.
+            // launch.
             let closing = window.as_ref().window();
+            shell_core::web::content::wire_close_pages(&closing);
+            let app_handle = app.handle().clone();
             window.on_window_event(move |event| match event {
-                tauri::WindowEvent::CloseRequested { .. } => {
-                    detach::mark_quitting();
-                    shell_core::web::content::close_window_pages(&closing);
-                }
-                tauri::WindowEvent::Destroyed => closing.app_handle().exit(0),
+                tauri::WindowEvent::CloseRequested { .. } => detach::mark_quitting(),
+                tauri::WindowEvent::Destroyed => app_handle.exit(0),
                 _ => {}
             });
             // Restore lazily: only the active tab's webview is created now (this also builds the

@@ -21,7 +21,7 @@ macOS-only Tauri v2 app (Rust + a static web frontend in `src/`) in the same fam
 
 ## Shared cores
 
-chrome-core and shell-core are pinned by `rev` in `src-tauri/Cargo.toml` (shell-core's build-dep and runtime dep in lockstep). Local-dev loop: `just chrome-dev` / `shell-dev`, re-pin with `chrome-pin` / `shell-pin`; the `[patch]` lines in the root `Cargo.toml` stay commented in git (`just gate` and `.githooks/pre-commit` refuse otherwise). The toolchain is pinned in `rust-toolchain.toml`, in lockstep with the sibling apps.
+chrome-core and shell-core are pinned by `rev` in `src-tauri/Cargo.toml`; shell-core also in `crates/flotilla-core/Cargo.toml`, all its dep lines at one rev (`scripts/tooling.env`'s CORES lists both manifests, so `shell-pin` rewrites both). Local-dev loop: `just chrome-dev` / `shell-dev`, re-pin with `chrome-pin` / `shell-pin`; the `[patch]` lines in the root `Cargo.toml` stay commented in git (`just gate` and `.githooks/pre-commit` refuse otherwise). The toolchain is pinned in `rust-toolchain.toml`, in lockstep with the sibling apps.
 
 ## Commands
 

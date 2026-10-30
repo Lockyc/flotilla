@@ -154,15 +154,8 @@ fn open(app: &AppHandle, t: &Target) -> Result<(), String> {
     let id = t.id.clone();
     let docking = app.clone();
     wire_return(app, &label, move || redock(&docking, &id));
-    // `Destroyed` comes after the window has dropped its webview, which would leave the page
-    // running: end it while the window is only asking to close.
     if let Some(w) = app.get_window(&label) {
-        let closing = w.clone();
-        w.on_window_event(move |e| {
-            if let tauri::WindowEvent::CloseRequested { .. } = e {
-                shell_core::web::content::close_window_pages(&closing);
-            }
-        });
+        shell_core::web::content::wire_close_pages(&w);
     }
     Ok(())
 }
