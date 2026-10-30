@@ -11,6 +11,8 @@ description: Agent orientation for flotilla — layout, shared cores, build and 
 
 macOS-only Tauri v2 app (Rust + a static web frontend in `src/`) in the same family as curator, warden and lector. Windows, each a workspace where any tab can head a group of documents (usually a Google Drive folder); documents opened from it list beneath it, each is open once across every window, and the session restores on relaunch.
 
+Deferred work, and what unblocks each item: `docs/FOLLOWUPS.md`.
+
 ## Layout
 
 - `crates/flotilla-core` — platform-neutral, Tauri-free core: `identity` (document keys and kinds), `model` (windows of groups built from the config's mirror types, one-copy registry across windows, Recent; a `TabId` is the FNV-1a of its `DocKey`, so it is stable across reloads), `nav` (what each navigation does), `session` (the session file: each window's active tab and Recent).
