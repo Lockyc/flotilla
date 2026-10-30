@@ -117,6 +117,13 @@ fn item(label: &str, blocked: Option<&str>) -> Item {
     }
 }
 
+fn any_detached(ws: &Workspace) -> bool {
+    ws.groups
+        .iter()
+        .flat_map(|g| std::iter::once(&g.head).chain(g.members.iter()))
+        .any(|t| t.detached)
+}
+
 /// The Group menu for `tab` (the active tab for the menu bar, the clicked row for its context
 /// menu). A tab that is not open counts as none.
 pub fn menu_state_for(ws: &Workspace, tab: Option<&TabId>) -> MenuState {
@@ -140,7 +147,9 @@ pub fn menu_state_for(ws: &Workspace, tab: Option<&TabId>) -> MenuState {
         make_own_group: item("Make Own Group", no_tab.or(is_head.then_some(IS_HEAD))),
         move_to: item("Move to Group", move_blocked),
         move_targets,
-        close_tab: item("Close Tab", no_tab),
+        // The menu bar's Close Tab carries ⌘W, which also docks a focused pop-out; disabled, it
+        // would swallow the shortcut there.
+        close_tab: item("Close Tab", no_tab.filter(|_| !any_detached(ws))),
         close_group: item("Close Group", no_tab),
         recent: item("Recent", ws.recent.is_empty().then_some(NOTHING_CLOSED)),
         recent_entries: ws.recent.iter().map(|g| g.head.title.clone()).collect(),
@@ -524,6 +533,23 @@ mod tests {
             assert_eq!(s.close_group, off("Close Group — No tab selected"));
             assert_eq!(s.recent, on("Recent"));
         }
+    }
+
+    /// A disabled NSMenuItem swallows its shortcut, and ⌘W in a pop-out docks it whatever the main
+    /// window shows.
+    #[test]
+    fn close_tab_stays_enabled_with_no_active_tab_while_a_tab_is_popped_out() {
+        let (mut ws, _, m) = one_group();
+        ws.set_detached(&m, true);
+        ws.active = None;
+        let s = menu_state_for(&ws, None);
+        assert_eq!(s.close_tab, on("Close Tab"));
+        assert_eq!(s.home, off("Home — No tab selected"));
+        ws.set_detached(&m, false);
+        assert_eq!(
+            menu_state_for(&ws, None).close_tab,
+            off("Close Tab — No tab selected")
+        );
     }
 
     #[test]
