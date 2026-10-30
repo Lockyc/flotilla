@@ -230,27 +230,57 @@ fn intercept(app: &AppHandle, label: &str, url: &Url, o: LinkOrigin) -> bool {
     let Some(id) = tab_id(label) else {
         return false;
     };
-    let (decision, raised) = {
+    let (decision, front) = {
         let state = app.state::<AppState>();
         let mut ws = state.ws.lock().unwrap();
+        let from_popout = ws.find(&id).is_some_and(|(_, t)| t.detached);
         let mut decision = Decision::PassThrough;
         let raised = crate::detach::apply(&mut ws, |ws| {
             decision = nav::decide(ws, &id, url, origin(o));
         });
-        (decision, raised)
+        (decision, forward(from_popout, raised))
     };
     match decision {
         Decision::PassThrough => false,
         Decision::Open(_) => {
             let deferred = app.clone();
             let _ = app.run_on_main_thread(move || {
-                if let Some(r) = &raised {
-                    crate::detach::raise(&deferred, r);
+                match &front {
+                    Some(Forward::Detached(r)) => crate::detach::raise(&deferred, r),
+                    Some(Forward::Main) => bring_main_forward(&deferred),
+                    None => {}
                 }
                 changed(&deferred)
             });
             true
         }
+    }
+}
+
+/// The window an opened (or raised) document is shown in, when it is not already in front.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Forward {
+    /// The popped-out tab's own window.
+    Detached(TabId),
+    /// The main window, behind the pop-out the link was clicked in.
+    Main,
+}
+
+/// Which window to bring forward after a link in a tab opened a document: the popped-out tab the
+/// open `raised`, else the main window when the link was clicked in a pop-out (`from_popout`),
+/// else none (the main window is already in front).
+pub fn forward(from_popout: bool, raised: Option<TabId>) -> Option<Forward> {
+    match raised {
+        Some(r) => Some(Forward::Detached(r)),
+        None => from_popout.then_some(Forward::Main),
+    }
+}
+
+/// Unminimizes and focuses the main window.
+pub fn bring_main_forward(app: &AppHandle) {
+    if let Some(w) = app.get_window(MAIN_WINDOW) {
+        let _ = w.unminimize();
+        let _ = w.set_focus();
     }
 }
 
@@ -307,6 +337,18 @@ mod tests {
 
     fn set(ids: &[&TabId]) -> HashSet<TabId> {
         ids.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn an_opened_document_brings_its_window_forward() {
+        let t = || Some("t-3".to_string());
+        // A popped-out tab the open raised: its window, wherever the click came from.
+        assert_eq!(forward(false, t()), Some(Forward::Detached("t-3".into())));
+        assert_eq!(forward(true, t()), Some(Forward::Detached("t-3".into())));
+        // Opened or raised in the main window from a pop-out: the main window.
+        assert_eq!(forward(true, None), Some(Forward::Main));
+        // From the main window, which is already in front.
+        assert_eq!(forward(false, None), None);
     }
 
     #[test]
