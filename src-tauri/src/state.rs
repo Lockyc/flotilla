@@ -13,9 +13,9 @@ use std::sync::Mutex;
 /// gate) held across a `WindowSet` call that reaches the host (`materialize`, `apply`,
 /// `open_or_focus`, `rename`, `delete`): the host takes them.
 ///
-/// Lock order: `gate`, then `ws`, then `created`, then `failed`; and `Persist`'s writer lock before
-/// `ws` (the session snapshot is taken inside it). `hole`, `menu` and `notice` are each taken
-/// alone.
+/// Lock order: `gate`, then `ws`, then `created`, then `hole`, then `failed`; and `Persist`'s
+/// writer lock before `ws` (the session snapshot is taken inside it). `menu`, `notice` and
+/// `chrome_queue` are each taken alone.
 pub struct AppState {
     /// Serialises config writes and reloads (`crate::write::Gate`).
     pub gate: crate::write::Gate,

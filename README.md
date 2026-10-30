@@ -24,7 +24,8 @@ A macOS workspace for work that spreads across many documents. Each piece of wor
 - **Back and forward.** The buttons above the sidebar step the active tab through its history, and Home returns it to the page it opened with. A mouse's back and forward buttons work in every window, popped-out ones included.
 - **Restored on relaunch.** Every group comes back with its head, its documents and its popped-out windows. Only the active tab loads straight away.
 - **Close and reopen.** **⌘W** closes the active tab and **⌘⇧⌫** its whole group, popped-out windows included. A closed group is kept: choosing it under **Group ▸ Recent** reopens it with its documents, docked in the focused window; **Recent ▸ Clear Recent** empties the list.
-- **Find things in the sidebar.** Groups list their documents beneath them, each marked as a Doc, Sheet, Slides deck, Form or Drive folder, and search covers every group. Right-click a row, or use the **Group** menu, for Home, Make Own Group, Move to Group, Close Tab and Close Group.
+- **Find things in the sidebar.** Groups list their documents beneath them, each marked as a Doc, Sheet, Slides deck, Form or Drive folder, and search covers every group. Right-click a row, or use the **Group** menu, for Home, Rename…, Set Home to Current Page, Make Own Group, Move to Group, Close Tab and Close Group.
+- **Names and homes are yours.** A new group or document is named by its page's title once it loads; after that the name stays as written, wherever the tab navigates. **Rename…** edits it in place. **Set Home to Current Page** makes the page a tab has browsed to its home, so Home and relaunch land there; a group keeps its documents.
 
 Links to other sites leave flotilla for your default browser. Content runs in WKWebView (Safari's engine), so Chrome extensions and Docs offline mode are not available.
 

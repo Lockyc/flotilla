@@ -341,6 +341,19 @@ pub(crate) fn own_webview(window: &Window, id: &str) -> Option<tauri::Webview> {
         .filter(|wv| wv.window().label() == window.label())
 }
 
+/// The webview showing tab `id`, in whichever window hosts it.
+pub(crate) fn webview_of(app: &AppHandle, id: &TabId) -> Option<tauri::Webview> {
+    app.webviews()
+        .into_iter()
+        .find(|(l, _)| tab_of(l).is_some_and(|(_, t)| t == *id))
+        .map(|(_, wv)| wv)
+}
+
+/// The page tab `id` shows now; `None` when it has no webview. A webview call: hold no lock.
+pub(crate) fn current_url(app: &AppHandle, id: &TabId) -> Option<Url> {
+    webview_of(app, id)?.url().ok()
+}
+
 /// The page the mouse's back/forward buttons act on: the focused popped-out window's tab, else the
 /// focused window's active tab.
 pub(crate) fn focused_webview(app: &AppHandle) -> Option<tauri::Webview> {
@@ -490,6 +503,9 @@ fn retitle(app: &AppHandle, label: &str, title: &str) {
     };
     if crate::write::through(app, |ws| retitled(ws, &id, title)) {
         push_dto(app);
+    } else {
+        // A new page title is a new page: Set Home to Current Page may have changed.
+        crate::menu::refresh(app);
     }
 }
 

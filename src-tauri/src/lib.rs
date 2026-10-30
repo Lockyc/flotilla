@@ -298,6 +298,7 @@ pub fn run() {
             commands::pop_out_tab,
             commands::pop_in_tab,
             commands::row_menu,
+            commands::rename_tab,
             commands::banner_menu,
             commands::set_hole_rect,
             commands::shell_home_create_config,

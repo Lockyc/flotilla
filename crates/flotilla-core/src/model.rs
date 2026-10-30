@@ -605,6 +605,58 @@ impl Workspace {
     }
 }
 
+/// Why Set Home to Current Page can't make the page tab is on its home.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SetHomeBlock {
+    /// The tab is on its home already (or has no page loaded, which is the same thing).
+    AtHome,
+    /// The page is not an http(s) page.
+    NotWeb,
+    /// The page is a document open in another tab: making it home would open it twice.
+    OpenElsewhere,
+}
+
+impl Workspace {
+    /// Why tab `id`, showing `current` (`None`: nothing loaded), can't make `current` its home,
+    /// if it can't.
+    pub fn set_home_blocked(&self, id: &TabId, current: Option<&Url>) -> Option<SetHomeBlock> {
+        let (_, g, t) = self.find(id)?;
+        let Some(current) = current.filter(|c| c.as_str() != t.home_url) else {
+            return Some(SetHomeBlock::AtHome);
+        };
+        if !matches!(current.scheme(), "http" | "https") {
+            return Some(SetHomeBlock::NotWeb);
+        }
+        self.open_doc(&identity(&g.store, current))
+            .filter(|other| other != id)
+            .map(|_| SetHomeBlock::OpenElsewhere)
+    }
+
+    /// Makes `url` tab `id`'s home: its `home_url`, and so its key and id, change in place. It
+    /// keeps its title, its place, whether it is detached, and its window's selection; a head
+    /// keeps its members. Returns the tab's new id.
+    pub fn set_home(&mut self, id: &TabId, url: &Url) -> Result<TabId, SetHomeBlock> {
+        if let Some(block) = self
+            .set_home_blocked(id, Some(url))
+            .filter(|b| *b != SetHomeBlock::AtHome)
+        {
+            return Err(block);
+        }
+        let (wi, gi) = self.locate(id).ok_or(SetHomeBlock::AtHome)?;
+        let store = self.windows[wi].groups[gi].store.clone();
+        let fresh = tab(url, "", &store, false);
+        let t = self.tab_mut(id).expect("located");
+        t.key = fresh.key;
+        t.id = fresh.id.clone();
+        t.home_url = fresh.home_url;
+        let w = &mut self.windows[wi];
+        if w.active.as_ref() == Some(id) {
+            w.active = Some(fresh.id.clone());
+        }
+        Ok(fresh.id)
+    }
+}
+
 /// Whether window `w` holds `id` as a docked tab.
 fn docked_in(w: &WindowWs, id: &TabId) -> bool {
     w.groups
@@ -1438,5 +1490,64 @@ mod tests {
         w.deactivate(&one);
         assert_eq!(w.windows[0].active, None);
         assert_eq!(w.windows[1].active, Some(two));
+    }
+
+    #[test]
+    fn set_home_rekeys_the_tab_in_place() {
+        let mut w = Workspace::from_config(&two_windows());
+        let one = w.windows[0].groups[0].head.id.clone();
+        let budget = w.windows[0].groups[0].members[0].id.clone();
+        w.activate(&one);
+        let sub = folder(8);
+        // A head: re-keyed where it is, still active, its members kept.
+        let new = w.set_home(&one, &sub).unwrap();
+        assert_eq!(new, tab_id(&identity("default", &sub)));
+        let g = &w.windows[0].groups[0];
+        assert_eq!(
+            (g.head.id.clone(), g.head.home_url.clone()),
+            (new.clone(), sub.to_string())
+        );
+        assert_eq!(g.head.title, "One", "the name is left alone");
+        assert_eq!(g.members.len(), 2);
+        assert_eq!(w.windows[0].active, Some(new));
+        // A detached member stays detached, in its place.
+        w.set_detached(&budget, true);
+        let d9 = doc(9);
+        let moved = w.set_home(&budget, &d9).unwrap();
+        let m = &w.windows[0].groups[0].members[0];
+        assert_eq!((m.id.clone(), m.detached), (moved, true));
+        assert!(w.find(&budget).is_none());
+    }
+
+    #[test]
+    fn set_home_blocks_at_home_off_the_web_and_on_a_doc_open_elsewhere() {
+        let mut w = Workspace::from_config(&two_windows());
+        let budget = w.windows[0].groups[0].members[0].id.clone();
+        let at = |s: &str| Url::parse(s).unwrap();
+        assert_eq!(
+            w.set_home_blocked(&budget, None),
+            Some(SetHomeBlock::AtHome)
+        );
+        assert_eq!(
+            w.set_home_blocked(&budget, Some(&doc(1))),
+            Some(SetHomeBlock::AtHome)
+        );
+        assert_eq!(
+            w.set_home_blocked(&budget, Some(&at("about:blank"))),
+            Some(SetHomeBlock::NotWeb)
+        );
+        // Doc 3 is the Roster, open in window B.
+        assert_eq!(
+            w.set_home_blocked(&budget, Some(&doc(3))),
+            Some(SetHomeBlock::OpenElsewhere)
+        );
+        assert_eq!(
+            w.set_home(&budget, &doc(3)),
+            Err(SetHomeBlock::OpenElsewhere)
+        );
+        assert_eq!(w.set_home_blocked(&budget, Some(&doc(7))), None);
+        // The same document at another address is still this tab: allowed.
+        let view = Url::parse(&doc(1).as_str().replace("/edit", "/view")).unwrap();
+        assert_eq!(w.set_home_blocked(&budget, Some(&view)), None);
     }
 }

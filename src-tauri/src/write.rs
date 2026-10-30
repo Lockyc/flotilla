@@ -6,7 +6,7 @@
 use crate::config::DEFAULT_STORE;
 use config_core::toml_edit::Value;
 use config_core::{add_group, add_tab, move_tab, remove, set_field, At, EditError};
-use flotilla_core::model::{Group, Tab, Workspace};
+use flotilla_core::model::{Group, Tab, TabId, Workspace};
 use std::path::Path;
 use tauri::{AppHandle, Manager};
 
@@ -125,6 +125,30 @@ pub fn change<R>(ws: &mut Workspace, op: impl FnOnce(&mut Workspace) -> R) -> (R
     uniquify(&before, ws);
     let writes = plan(&before, ws);
     (r, writes)
+}
+
+/// [`change`] for an operation that re-keys one tab (`op` returns its old and new id): the diff
+/// sees the same tab with a new `url`, one in-place write ([`Write::SetUrl`]), rather than a tab
+/// removed and another added.
+pub fn change_rekey<E>(
+    ws: &mut Workspace,
+    op: impl FnOnce(&mut Workspace) -> Result<(TabId, TabId), E>,
+) -> (Result<TabId, E>, Vec<Write>) {
+    let mut before = ws.clone();
+    let r = op(ws);
+    if let Ok((old, new)) = &r {
+        let tabs = before
+            .windows
+            .iter_mut()
+            .flat_map(|w| w.groups.iter_mut())
+            .flat_map(|g| std::iter::once(&mut g.head).chain(g.members.iter_mut()));
+        for t in tabs.filter(|t| &t.id == old) {
+            t.id = new.clone();
+        }
+    }
+    uniquify(&before, ws);
+    let writes = plan(&before, ws);
+    (r.map(|(_, new)| new), writes)
 }
 
 /// Renames each group in `after` that is new or renamed since `before` and shares its name with
@@ -649,12 +673,26 @@ impl Gate {
 /// brought in line after the gate is released. The caller holds neither the gate nor `ws`, and
 /// does its own view work afterwards as for any change.
 pub fn through<R>(app: &AppHandle, op: impl FnOnce(&mut Workspace) -> R) -> R {
+    written(app, |ws| change(ws, op))
+}
+
+/// [`through`] for an operation that re-keys one tab ([`change_rekey`]): Set Home to Current
+/// Page. The tab's new id, or why it could not.
+pub fn through_rekey<E>(
+    app: &AppHandle,
+    op: impl FnOnce(&mut Workspace) -> Result<(TabId, TabId), E>,
+) -> Result<TabId, E> {
+    written(app, |ws| change_rekey(ws, op))
+}
+
+/// [`through_with`] on the app's gate, workspace and config file.
+fn written<R>(app: &AppHandle, run: impl FnOnce(&mut Workspace) -> (R, Vec<Write>)) -> R {
     let state = app.state::<crate::state::AppState>();
     through_with(
         &state.gate,
         &state.ws,
         &crate::config::config_path(),
-        op,
+        run,
         |e| {
             crate::tabs::notice(app, format!("Couldn't save to the config: {e}"));
             match crate::config::load(&crate::config::config_path()) {
@@ -666,20 +704,21 @@ pub fn through<R>(app: &AppHandle, op: impl FnOnce(&mut Workspace) -> R) -> R {
     )
 }
 
-/// [`through`]'s sequence, over its parts: under `gate`, `op` on `ws`, its writes to the config at
-/// `path` (seeding the starter config first when there is none), and on a failed write
-/// `reload(error)`, which must do no view work; then, released, `views()` if a write failed.
+/// [`through`]'s sequence, over its parts: under `gate`, `run` on `ws` (a change and the writes
+/// it implies: [`change`] or [`change_rekey`]), its writes to the config at `path` (seeding the
+/// starter config first when there is none), and on a failed write `reload(error)`, which must
+/// do no view work; then, released, `views()` if a write failed.
 pub(crate) fn through_with<R>(
     gate: &Gate,
     ws: &std::sync::Mutex<Workspace>,
     path: &Path,
-    op: impl FnOnce(&mut Workspace) -> R,
+    run: impl FnOnce(&mut Workspace) -> (R, Vec<Write>),
     reload: impl FnOnce(String),
     views: impl FnOnce(),
 ) -> R {
     let (r, failed) = {
         let _held = gate.hold();
-        let (r, writes) = change(&mut ws.lock().unwrap(), op);
+        let (r, writes) = run(&mut ws.lock().unwrap());
         let written = if writes.is_empty() {
             Ok(())
         } else {
@@ -749,11 +788,17 @@ mod tests {
     /// Runs `op` on the workspace the config holds, writes what it implies, and checks the
     /// reload is the workspace the operation left: the echo changes nothing. Returns the writes.
     fn run(op: impl FnOnce(&mut Workspace)) -> Vec<Write> {
+        run_with(|ws| change(ws, op).1).1
+    }
+
+    /// [`run`] for any way of changing the workspace that reports its writes; also returns the
+    /// workspace after the reload.
+    fn run_with(op: impl FnOnce(&mut Workspace) -> Vec<Write>) -> (Workspace, Vec<Write>) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         std::fs::write(&path, source()).unwrap();
         let mut ws = load(&path);
-        let ((), writes) = change(&mut ws, op);
+        let writes = op(&mut ws);
         for w in &writes {
             // Every file state between two edits is a valid config: open-once holds throughout.
             for s in steps(w) {
@@ -770,7 +815,76 @@ mod tests {
         );
         let src = std::fs::read_to_string(&path).unwrap();
         assert!(src.starts_with("# kept"), "{src}");
-        writes
+        (echoed, writes)
+    }
+
+    #[test]
+    fn set_home_rewrites_the_group_url_and_keeps_members() {
+        let sub = "https://drive.google.com/drive/folders/sub";
+        let (ws, writes) = run_with(|ws| {
+            let one = id_of(ws, F1);
+            change_rekey(ws, |ws| {
+                ws.set_home(&one, &url(sub)).map(|n| (one.clone(), n))
+            })
+            .1
+        });
+        assert_eq!(
+            one(writes),
+            Write::SetUrl {
+                window: "A".into(),
+                group: "One".into(),
+                url: None,
+                new_url: sub.into(),
+            }
+        );
+        let g = &ws.windows[0].groups[0];
+        assert_eq!(
+            (g.head.home_url.as_str(), g.head.title.as_str()),
+            (sub, "One")
+        );
+        assert_eq!(g.members.len(), 2);
+    }
+
+    #[test]
+    fn set_home_on_a_doc_rewrites_its_url() {
+        let (ws, writes) = run_with(|ws| {
+            let budget = id_of(ws, D1);
+            change_rekey(ws, |ws| {
+                ws.set_home(&budget, &url(D3)).map(|n| (budget.clone(), n))
+            })
+            .1
+        });
+        assert_eq!(
+            one(writes),
+            Write::SetUrl {
+                window: "A".into(),
+                group: "One".into(),
+                url: Some(D1.into()),
+                new_url: D3.into(),
+            }
+        );
+        let m = &ws.windows[0].groups[0].members[0];
+        assert_eq!((m.home_url.as_str(), m.title.as_str()), (D3, "Budget"));
+    }
+
+    #[test]
+    fn rename_writes_name_and_survives_navigation() {
+        // A group named by its URL, then renamed by the user.
+        let (mut ws, writes) = run_with(|ws| {
+            let two = id_of(ws, F2);
+            let mut w = change(ws, |ws| ws.set_title(&two, F2)).1;
+            w.extend(change(ws, |ws| ws.set_title(&two, "Website")).1);
+            w
+        });
+        assert!(matches!(writes.last(), Some(Write::SetName { name, .. }) if name == "Website"));
+        let two = id_of(&ws, F2);
+        assert_eq!(ws.find(&two).unwrap().2.title, "Website");
+        // Navigating it reports other titles; the rename sticks.
+        assert!(!crate::tabs::retitled(&mut ws, &two, "Drive – Folder"));
+        // A document renamed the same way.
+        let budget = id_of(&ws, D1);
+        ws.set_title(&budget, "Club budget");
+        assert!(!crate::tabs::retitled(&mut ws, &budget, "Budget – Sheet 2"));
     }
 
     fn one<T: Clone>(v: Vec<T>) -> T {
@@ -985,7 +1099,7 @@ mod tests {
             &gate,
             &ws,
             &path,
-            |ws| ws.set_collapsed(&id_of(ws, F2), true),
+            |ws| change(ws, |ws| ws.set_collapsed(&id_of(ws, F2), true)),
             |err| {
                 assert!(err.contains("Two"), "{err}");
                 assert!(gate.held_here(), "the model reloads under the gate");
@@ -1003,7 +1117,7 @@ mod tests {
             &gate,
             &ws,
             &path,
-            |ws| ws.set_collapsed(&id_of(ws, F1), true),
+            |ws| change(ws, |ws| ws.set_collapsed(&id_of(ws, F1), true)),
             |e| panic!("{e}"),
             || panic!("no view work after a landed commit"),
         );

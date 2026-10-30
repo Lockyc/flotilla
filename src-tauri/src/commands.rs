@@ -205,12 +205,13 @@ pub fn row_menu(
     state: State<AppState>,
 ) -> Result<(), String> {
     require_chrome(&webview)?;
+    let current = tabs::current_url(webview.app_handle(), &id);
     let ms = {
         let ws = state.ws.lock().unwrap();
         if ws.find(&id).is_none() {
             return Err("unknown tab".into());
         }
-        crate::menu::menu_state_for(&ws, Some(&id))
+        crate::menu::menu_state_for(&ws, current.as_ref(), Some(&id))
     };
     let menu = crate::menu::row_menu(webview.app_handle(), &ms, &id).map_err(|e| e.to_string())?;
     webview
@@ -229,14 +230,6 @@ pub fn banner_menu(x: f64, y: f64, webview: Webview) -> Result<(), String> {
     app.state::<WindowSet>()
         .banner_menu(app, webview.window().label(), x, y)
         .map_err(|e| e.to_string())
-}
-
-/// The webview showing tab `id`, in whichever window hosts it.
-fn webview_of(app: &AppHandle, id: &TabId) -> Option<Webview> {
-    app.webviews()
-        .into_iter()
-        .find(|(l, _)| tabs::tab_of(l).is_some_and(|(_, t)| t == *id))
-        .map(|(_, wv)| wv)
 }
 
 /// Returns tab `id` to the URL it opened with. A tab with no webview is already there, unless it
@@ -259,7 +252,7 @@ pub fn home(app: &AppHandle, id: &TabId) -> Result<(), String> {
         tabs::changed(app);
         return Ok(());
     }
-    let Some(wv) = webview_of(app, id) else {
+    let Some(wv) = tabs::webview_of(app, id) else {
         return Ok(());
     };
     let url = Url::parse(&home).map_err(|e| e.to_string())?;
@@ -275,6 +268,71 @@ pub fn mutate(app: &AppHandle, op: impl FnOnce(&mut flotilla_core::model::Worksp
         crate::detach::raise(app, id);
     }
     tabs::changed(app);
+}
+
+/// Rename…: asks the sidebar showing tab `id` to edit its row's name in place; the field's
+/// result arrives as [`rename_tab`].
+pub fn begin_rename(app: &AppHandle, id: &TabId) {
+    let state = app.state::<AppState>();
+    let found = {
+        let ws = state.ws.lock().unwrap();
+        ws.find(id)
+            .map(|(wi, _, t)| (ws.windows[wi].title.clone(), t.title.clone()))
+    };
+    let Some((window, title)) = found else {
+        return;
+    };
+    let Some(label) = app.state::<WindowSet>().label_for_title(&window) else {
+        return;
+    };
+    if let Some(chrome) = app.get_webview(&label) {
+        let _ = chrome.set_focus();
+    }
+    let _ = app.emit_to(
+        label.as_str(),
+        "rename-row",
+        serde_json::json!({ "id": id, "title": title }),
+    );
+}
+
+/// The sidebar's rename field: names tab `id` (a group's `name` for a head, a document's `title`)
+/// in the config. A group name another group of its window holds is suffixed ("Bulletins 2").
+/// The name is then fixed: titles from the page replace only a name that is still the URL.
+#[tauri::command]
+pub fn rename_tab(id: TabId, name: String, webview: Webview) -> Result<(), String> {
+    require_chrome(&webview)?;
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("A name can't be empty.".into());
+    }
+    let found = crate::write::through(webview.app_handle(), |ws| {
+        let found = ws.find(&id).is_some();
+        ws.set_title(&id, name);
+        found
+    });
+    if !found {
+        return Err("unknown tab".into());
+    }
+    tabs::push_dto(webview.app_handle());
+    Ok(())
+}
+
+/// Set Home to Current Page: tab `id`'s page now becomes its home (`url` in the config, in
+/// place), so Home and a reload land there. Its id changes with its document key: the next sync
+/// closes its webview and creates it again, at that same page.
+pub fn set_home(app: &AppHandle, id: &TabId) -> Result<(), String> {
+    let current = tabs::current_url(app, id);
+    crate::write::through_rekey(app, |ws| {
+        if let Some(block) = ws.set_home_blocked(id, current.as_ref()) {
+            return Err(crate::menu::set_home_refusal(block));
+        }
+        let url = current.as_ref().expect("a tab not at home has a page");
+        ws.set_home(id, url)
+            .map(|new| (id.clone(), new))
+            .map_err(crate::menu::set_home_refusal)
+    })?;
+    tabs::changed(app);
+    Ok(())
 }
 
 /// [`mutate`] for an operation started in the window titled `from` that shows a tab (`op`

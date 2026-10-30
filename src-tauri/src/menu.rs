@@ -4,7 +4,7 @@
 
 use crate::commands::{self, mutate};
 use crate::state::AppState;
-use flotilla_core::model::{TabId, Workspace};
+use flotilla_core::model::{SetHomeBlock, TabId, Workspace};
 use shell_core::menu::WindowEntry;
 use shell_core::windows::WindowSet;
 use tauri::menu::{
@@ -12,6 +12,7 @@ use tauri::menu::{
     Submenu, SubmenuBuilder,
 };
 use tauri::{AppHandle, Emitter, Manager, Wry};
+use url::Url;
 
 const ACCEL_NEW_GROUP: &str = "Cmd+KeyN";
 const ACCEL_CLOSE_GROUP: &str = "Shift+Cmd+Backspace";
@@ -27,6 +28,8 @@ pub struct Item {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MenuState {
     pub home: Item,
+    pub rename: Item,
+    pub set_home: Item,
     pub make_own_group: Item,
     pub move_to: Item,
     /// The groups `move_to` offers: each other group's head id and name.
@@ -44,6 +47,10 @@ pub struct MenuState {
 pub enum Action {
     NewGroup,
     Home(Option<TabId>),
+    /// Edit the row's name in place in its sidebar.
+    Rename(Option<TabId>),
+    /// Make the tab's current page its home.
+    SetHome(Option<TabId>),
     MakeOwnGroup(Option<TabId>),
     /// Move the tab to the group headed by the second id.
     MoveTo(Option<TabId>, TabId),
@@ -63,6 +70,8 @@ pub fn id(a: &Action) -> String {
     let (verb, tab) = match a {
         Action::NewGroup => ("new_group".into(), None),
         Action::Home(t) => ("home".into(), t.as_ref()),
+        Action::Rename(t) => ("rename".into(), t.as_ref()),
+        Action::SetHome(t) => ("set_home".into(), t.as_ref()),
         Action::MakeOwnGroup(t) => ("make_own_group".into(), t.as_ref()),
         Action::MoveTo(t, head) => (format!("move:{head}"), t.as_ref()),
         Action::CloseTab(t) => ("close_tab".into(), t.as_ref()),
@@ -90,6 +99,8 @@ pub fn action(id: &str) -> Option<Action> {
     Some(match (verb, arg, tab) {
         ("new_group", None, None) => Action::NewGroup,
         ("home", None, t) => Action::Home(t),
+        ("rename", None, t) => Action::Rename(t),
+        ("set_home", None, t) => Action::SetHome(t),
         ("make_own_group", None, t) => Action::MakeOwnGroup(t),
         ("move", Some(head), t) => Action::MoveTo(t, head.to_string()),
         ("close_tab", None, t) => Action::CloseTab(t),
@@ -122,12 +133,34 @@ fn any_detached(ws: &Workspace) -> bool {
     ws.tabs().any(|t| t.detached)
 }
 
+/// Why Set Home to Current Page is unavailable, in the menu's words.
+fn set_home_reason(block: SetHomeBlock) -> &'static str {
+    match block {
+        SetHomeBlock::AtHome => "Already at its home",
+        SetHomeBlock::NotWeb => "Not a web page",
+        SetHomeBlock::OpenElsewhere => "Open in another tab",
+    }
+}
+
+/// Set Home's refusal, for the error bar when the page changed after the menu was built.
+pub fn set_home_refusal(block: SetHomeBlock) -> String {
+    format!(
+        "Can't set this tab's home: {}.",
+        set_home_reason(block).to_lowercase()
+    )
+}
+
 /// The Group menu for `tab` (the focused window's active tab for the menu bar, the clicked row for
-/// its context menu). A tab that is not open counts as none. A member moves to any other group:
-/// its own window's by name, another window's as "name — window".
-pub fn menu_state_for(ws: &Workspace, tab: Option<&TabId>) -> MenuState {
+/// its context menu), whose webview shows `current` (`None`: nothing loaded). A tab that is not
+/// open counts as none. A member moves to any other group: its own window's by name, another
+/// window's as "name — window".
+pub fn menu_state_for(ws: &Workspace, current: Option<&Url>, tab: Option<&TabId>) -> MenuState {
     let found = tab.and_then(|id| ws.find(id));
     let no_tab = found.is_none().then_some(NO_TAB);
+    let set_home_blocked = no_tab.or_else(|| {
+        tab.and_then(|id| ws.set_home_blocked(id, current))
+            .map(set_home_reason)
+    });
     let is_head = found.is_some_and(|(_, g, t)| g.head.id == t.id);
     let move_targets: Vec<(TabId, String)> = match found {
         Some((wi, own, _)) if !is_head => ws
@@ -152,6 +185,8 @@ pub fn menu_state_for(ws: &Workspace, tab: Option<&TabId>) -> MenuState {
         .or(move_targets.is_empty().then_some(NO_OTHER_GROUPS));
     MenuState {
         home: item("Home", no_tab),
+        rename: item("Rename…", no_tab),
+        set_home: item("Set Home to Current Page", set_home_blocked),
         make_own_group: item("Make Own Group", no_tab.or(is_head.then_some(IS_HEAD))),
         move_to: item("Move to Group", move_blocked),
         move_targets,
@@ -217,6 +252,8 @@ fn group_items(
             Some(ACCEL_NEW_GROUP),
         )?,
         entry(Action::Home(t.clone()), &ms.home, None)?,
+        entry(Action::Rename(t.clone()), &ms.rename, None)?,
+        entry(Action::SetHome(t.clone()), &ms.set_home, None)?,
         sep()?,
         entry(Action::MakeOwnGroup(t.clone()), &ms.make_own_group, None)?,
         MenuItemKind::Submenu(moves.build()?),
@@ -338,10 +375,16 @@ pub fn follow_focus(app: &AppHandle, window: &tauri::Window) {
 
 /// What the menu bar shows with the window titled `focused` in front: its active tab's Group menu,
 /// and the Window menu's rows.
-pub fn key_for(ws: &Workspace, focused: Option<&str>, windows: &[WindowEntry]) -> MenuKey {
+/// `current` is the page the focused window's active tab shows.
+pub fn key_for(
+    ws: &Workspace,
+    focused: Option<&str>,
+    current: Option<&Url>,
+    windows: &[WindowEntry],
+) -> MenuKey {
     let active = focused.and_then(|t| crate::tabs::active_in(ws, t));
     MenuKey {
-        group: menu_state_for(ws, active.as_ref()),
+        group: menu_state_for(ws, current, active.as_ref()),
         windows: windows
             .iter()
             .map(|e| (e.id.clone(), e.title.clone(), e.open))
@@ -355,7 +398,17 @@ pub fn refresh(app: &AppHandle) {
     let state = app.state::<AppState>();
     let windows = app.state::<WindowSet>().entries();
     let title = focused(app).map(|(_, t)| t);
-    let key = key_for(&state.ws.lock().unwrap(), title.as_deref(), &windows);
+    // The page is read with no lock held: a webview call.
+    let active = title
+        .as_deref()
+        .and_then(|t| crate::tabs::active_in(&state.ws.lock().unwrap(), t));
+    let current = active.and_then(|id| crate::tabs::current_url(app, &id));
+    let key = key_for(
+        &state.ws.lock().unwrap(),
+        title.as_deref(),
+        current.as_ref(),
+        &windows,
+    );
     let group = key.group.clone();
     if !needs_rebuild(&mut state.menu.lock().unwrap(), key) {
         return;
@@ -393,6 +446,20 @@ pub fn handle(app: &AppHandle, menu_id: &str) -> bool {
             let t = pick(t, &app.state::<AppState>().ws.lock().unwrap());
             if let Some(t) = t {
                 if let Err(e) = commands::home(app, &t) {
+                    crate::tabs::notice(app, e);
+                }
+            }
+        }
+        Action::Rename(t) => {
+            let t = pick(t, &app.state::<AppState>().ws.lock().unwrap());
+            if let Some(t) = t {
+                commands::begin_rename(app, &t);
+            }
+        }
+        Action::SetHome(t) => {
+            let t = pick(t, &app.state::<AppState>().ws.lock().unwrap());
+            if let Some(t) = t {
+                if let Err(e) = commands::set_home(app, &t) {
                     crate::tabs::notice(app, e);
                 }
             }
@@ -512,7 +579,7 @@ mod tests {
     fn a_head_cannot_become_its_own_group_or_move() {
         let (mut ws, h, _) = one_group();
         add_group(&mut ws, "f2", "Website");
-        let s = menu_state_for(&ws, Some(&h));
+        let s = menu_state_for(&ws, None, Some(&h));
         assert_eq!(s.home, on("Home"));
         assert_eq!(
             s.make_own_group,
@@ -529,7 +596,7 @@ mod tests {
         let (mut ws, h, m) = one_group();
         let w = add_group(&mut ws, "f2", "Website");
         let x = add_group(&mut ws, "f3", "Grants");
-        let s = menu_state_for(&ws, Some(&m));
+        let s = menu_state_for(&ws, None, Some(&m));
         assert_eq!(s.make_own_group, on("Make Own Group"));
         assert_eq!(s.move_to, on("Move to Group"));
         // Its own group is not a destination.
@@ -543,7 +610,7 @@ mod tests {
     #[test]
     fn a_single_group_offers_nowhere_to_move() {
         let (ws, _, m) = one_group();
-        let s = menu_state_for(&ws, Some(&m));
+        let s = menu_state_for(&ws, None, Some(&m));
         assert_eq!(s.make_own_group, on("Make Own Group"));
         assert_eq!(s.move_to, off("Move to Group — No other groups"));
         assert!(s.move_targets.is_empty());
@@ -571,9 +638,69 @@ mod tests {
             panic!()
         };
         ws.set_title(&b, "Bulletins");
-        let s = menu_state_for(&ws, Some(&m));
+        let s = menu_state_for(&ws, None, Some(&m));
         assert_eq!(s.move_targets, vec![(b, "Bulletins — B".to_string())]);
         assert_eq!(s.move_to, on("Move to Group"));
+    }
+
+    const DOC1: &str = "https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrSt01/edit";
+
+    #[test]
+    fn rename_is_offered_for_heads_and_documents() {
+        let (ws, h, m) = one_group();
+        assert_eq!(menu_state_for(&ws, None, Some(&h)).rename, on("Rename…"));
+        assert_eq!(menu_state_for(&ws, None, Some(&m)).rename, on("Rename…"));
+        assert_eq!(
+            menu_state_for(&ws, None, None).rename,
+            off("Rename… — No tab selected")
+        );
+    }
+
+    #[test]
+    fn set_home_disabled_at_home() {
+        let (ws, h, m) = one_group();
+        // Not loaded, or on the page it opened with: already home.
+        for (tab, current) in [(&m, None), (&m, Some(url(DOC1))), (&h, None)] {
+            assert_eq!(
+                menu_state_for(&ws, current.as_ref(), Some(tab)).set_home,
+                off("Set Home to Current Page — Already at its home")
+            );
+        }
+        // Browsed into a subfolder: the head can make it home.
+        let sub = url("https://drive.google.com/drive/folders/sub");
+        assert_eq!(
+            menu_state_for(&ws, Some(&sub), Some(&h)).set_home,
+            on("Set Home to Current Page")
+        );
+    }
+
+    #[test]
+    fn set_home_refuses_non_web_urls() {
+        let (ws, h, _) = one_group();
+        for page in ["about:blank", "file:///etc/hosts", "data:text/html,x"] {
+            assert_eq!(
+                menu_state_for(&ws, Some(&url(page)), Some(&h)).set_home,
+                off("Set Home to Current Page — Not a web page"),
+                "{page}"
+            );
+        }
+    }
+
+    #[test]
+    fn set_home_refuses_a_doc_open_elsewhere() {
+        let (mut ws, h, m) = one_group();
+        add_group(&mut ws, "f2", "Website");
+        // The head browsed to the member's document: it is open in another tab.
+        assert_eq!(
+            menu_state_for(&ws, Some(&url(DOC1)), Some(&h)).set_home,
+            off("Set Home to Current Page — Open in another tab")
+        );
+        // A group head's folder, likewise.
+        let f2 = url("https://drive.google.com/drive/folders/f2");
+        assert_eq!(
+            menu_state_for(&ws, Some(&f2), Some(&m)).set_home,
+            off("Set Home to Current Page — Open in another tab")
+        );
     }
 
     #[test]
@@ -608,12 +735,12 @@ mod tests {
             },
         ];
         // A in front, its member active: the member's items.
-        let in_a = key_for(&ws, Some("A"), &entries);
-        assert_eq!(in_a.group, menu_state_for(&ws, Some(&m)));
+        let in_a = key_for(&ws, Some("A"), None, &entries);
+        assert_eq!(in_a.group, menu_state_for(&ws, None, Some(&m)));
         assert_eq!(in_a.group.make_own_group, on("Make Own Group"));
         // B in front, nothing active there: no tab, so nothing acts on A's member.
-        let in_b = key_for(&ws, Some("B"), &entries);
-        assert_eq!(in_b.group, menu_state_for(&ws, None));
+        let in_b = key_for(&ws, Some("B"), None, &entries);
+        assert_eq!(in_b.group, menu_state_for(&ws, None, None));
         assert_ne!(in_a, in_b, "a focus change rebuilds the menu bar");
         assert_eq!(in_b.windows.len(), 2);
     }
@@ -621,14 +748,14 @@ mod tests {
     #[test]
     fn recent_lists_closed_groups_newest_first() {
         let (mut ws, h, _) = one_group();
-        let s = menu_state_for(&ws, Some(&h));
+        let s = menu_state_for(&ws, None, Some(&h));
         assert_eq!(s.recent, off("Recent — Nothing closed yet"));
         assert!(s.recent_entries.is_empty());
 
         let w = add_group(&mut ws, "f2", "Website");
         ws.close_group(&h);
         ws.close_group(&w);
-        let s = menu_state_for(&ws, None);
+        let s = menu_state_for(&ws, None, None);
         assert_eq!(s.recent, on("Recent"));
         assert_eq!(s.recent_entries, ["Website", "Auction"]);
     }
@@ -638,8 +765,8 @@ mod tests {
         let (mut ws, h, _) = one_group();
         ws.close_group(&h);
         for s in [
-            menu_state_for(&ws, None),
-            menu_state_for(&ws, Some(&"t-99".to_string())),
+            menu_state_for(&ws, None, None),
+            menu_state_for(&ws, None, Some(&"t-99".to_string())),
         ] {
             assert_eq!(s.home, off("Home — No tab selected"));
             assert_eq!(s.make_own_group, off("Make Own Group — No tab selected"));
@@ -657,12 +784,12 @@ mod tests {
         let (mut ws, _, m) = one_group();
         ws.set_detached(&m, true);
         ws.windows[0].active = None;
-        let s = menu_state_for(&ws, None);
+        let s = menu_state_for(&ws, None, None);
         assert_eq!(s.close_tab, on("Close Tab"));
         assert_eq!(s.home, off("Home — No tab selected"));
         ws.set_detached(&m, false);
         assert_eq!(
-            menu_state_for(&ws, None).close_tab,
+            menu_state_for(&ws, None, None).close_tab,
             off("Close Tab — No tab selected")
         );
     }
@@ -671,12 +798,21 @@ mod tests {
     fn the_menu_bar_is_rebuilt_only_when_its_state_changes() {
         let (mut ws, h, m) = one_group();
         let mut last = None;
-        assert!(needs_rebuild(&mut last, menu_state_for(&ws, Some(&h))));
+        assert!(needs_rebuild(
+            &mut last,
+            menu_state_for(&ws, None, Some(&h))
+        ));
         // A push that changes nothing the menu shows (a member's retitle) rebuilds nothing.
         ws.set_title(&m, "Budget");
-        assert!(!needs_rebuild(&mut last, menu_state_for(&ws, Some(&h))));
+        assert!(!needs_rebuild(
+            &mut last,
+            menu_state_for(&ws, None, Some(&h))
+        ));
         // Selecting the member enables Make Own Group: rebuilt.
-        assert!(needs_rebuild(&mut last, menu_state_for(&ws, Some(&m))));
-        assert_eq!(last, Some(menu_state_for(&ws, Some(&m))));
+        assert!(needs_rebuild(
+            &mut last,
+            menu_state_for(&ws, None, Some(&m))
+        ));
+        assert_eq!(last, Some(menu_state_for(&ws, None, Some(&m))));
     }
 }

@@ -167,13 +167,67 @@ window.addEventListener("resize", () => {
 });
 new ResizeObserver(() => reportRect()).observe(document.getElementById("content-hole"));
 
-listen("workspace", (e) => sb && identity && sb.update(windowDto(e.payload)));
+// ── Rename… : the row's name becomes a field in place ──────────────────────
+// While a name is being edited, workspace pushes are held (a repaint would drop the field) and the
+// latest one applied when the edit ends.
+let renaming = null; // { input, title } while editing
+let heldDto = null;
+
+function update(dto) {
+  if (renaming) heldDto = dto;
+  else sb.update(windowDto(dto));
+}
+
+function endRename() {
+  if (!renaming) return;
+  renaming.input.remove();
+  renaming.title.style.display = "";
+  renaming = null;
+  if (heldDto) {
+    const dto = heldDto;
+    heldDto = null;
+    sb.update(windowDto(dto));
+  }
+}
+
+function beginRename(id, name) {
+  endRename();
+  const row = document.querySelector(`.cc-tab[data-id="${CSS.escape(id)}"]`);
+  const title = row && row.querySelector(".cc-title");
+  if (!title) return;
+  const input = document.createElement("input");
+  input.className = "row-rename";
+  input.type = "text";
+  input.value = name;
+  input.spellcheck = false;
+  // Keystrokes and clicks in the field stay in it, not the row's selection.
+  for (const ev of ["mousedown", "click", "dblclick", "contextmenu"]) {
+    input.addEventListener(ev, (e) => e.stopPropagation());
+  }
+  input.addEventListener("keydown", (e) => {
+    e.stopPropagation();
+    if (e.key === "Escape") endRename();
+    if (e.key !== "Enter") return;
+    const value = input.value;
+    endRename();
+    invoke("rename_tab", { id, name: value }).catch((err) => sb.setError(String(err)));
+  });
+  input.addEventListener("blur", () => endRename());
+  title.style.display = "none";
+  title.after(input);
+  renaming = { input, title };
+  input.focus();
+  input.select();
+}
+
+listen("rename-row", (e) => sb && beginRename(e.payload.id, e.payload.title));
+listen("workspace", (e) => sb && identity && update(e.payload));
 // A reloaded config: re-read the identity (density) and drop an earlier config error.
 listen("config-reloaded", async () => {
   if (!sb) return;
   identity = await invoke("window_identity");
   sb.clearError();
-  sb.update(windowDto(await invoke("get_workspace")));
+  update(await invoke("get_workspace"));
 });
 listen("notice",(e) => sb && sb.setError(e.payload));
 // Cycling walks loaded tabs only (the live dot); a cold row loads when clicked. From a popped-out

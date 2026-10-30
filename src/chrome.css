@@ -35,6 +35,21 @@ html, body { margin: 0; height: 100vh; overflow: hidden; background: #1e1e1e; }
 }
 #new-group:focus { outline: none; border-color: rgba(10, 132, 255, 0.8); }
 
+/* Rename…: the row's name as a field, styled like chrome-core's search field. */
+.row-rename {
+  flex: 1;
+  min-width: 0;
+  padding: 1px 6px;
+  border: 1px solid var(--cc-active-bar, #4a9eff);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.25);
+  color: #ddd;
+  font: inherit;
+  font-size: var(--cc-row-font);
+  outline: none;
+  user-select: text;
+}
+
 .nav-pill {
   flex: none;
   display: inline-flex;
