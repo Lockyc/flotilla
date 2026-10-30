@@ -199,7 +199,7 @@ function endRename(save) {
 function beginRename(id, name) {
   endRename(true);
   // A row hidden by a search is shown again (its group was already expanded by Rust).
-  const row = sb._revealRow(id);
+  const row = sb.revealRow(id);
   const title = row && row.querySelector(".cc-title");
   if (!title) return;
   const input = document.createElement("input");
