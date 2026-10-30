@@ -17,7 +17,7 @@ A macOS workspace for work that spreads across many documents. Each piece of wor
 
 ## How it works
 
-- **Groups form as you work.** Paste a folder or page link into the field at the top of the sidebar (**⌘N**) to open it as a group. Any tab can head a group. A link to a document, clicked in any tab of a group, opens as a member of that group, with no setup.
+- **Groups form as you work.** Paste a folder or page link into the field at the top of the sidebar (**⌘N**) to open it as a group. Any tab can head a group. A link to a document, clicked in any tab of a group, opens as a member of that group, with no setup. Every group and document is kept in the [config](#config), where it can also be edited by hand.
 - **Windows.** Each window holds its own groups. **Window ▸ New Window…** (**⌥⌘N**) adds one; right-click a window's title row to rename, recolour or delete it. A closed window stays in the **Window** menu and reopens as it was.
 - **Each document is open once.** Opening a document that is already open, in any group, window or popped-out window, brings up the existing tab (and its window) instead of a second copy.
 - **Pop out.** Any tab can move into its own window (**⌘⇧O**); closing that window (**⌘W**) puts the tab back in its group. A document opened from a popped-out window joins its group in the window it came from, which comes to the front.
