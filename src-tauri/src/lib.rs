@@ -270,11 +270,7 @@ fn on_spine_action(app: &tauri::AppHandle, routed: shell_core::menu::Routed) {
         SpineAction::Nav(TabNavAction::Next) => send("nav-tab", nav(1)),
         SpineAction::Nav(TabNavAction::Prev) => send("nav-tab", nav(-1)),
         SpineAction::Nav(TabNavAction::Jump(n)) => send("jump-tab", serde_json::json!(n)),
-        SpineAction::CloseTab => {
-            if let Some(title) = title() {
-                commands::close_active_tab(app, &title);
-            }
-        }
+        SpineAction::CloseTab => commands::unload_active_tab(app, target),
         SpineAction::DockPoppedOut => {
             if let Some(id) = detach::tab_of(target) {
                 detach::pop_in(app, &id);
@@ -326,6 +322,7 @@ pub fn run() {
             commands::nav_back,
             commands::nav_forward,
             commands::unload_tab,
+            commands::remove_tab,
             commands::pop_out_tab,
             commands::pop_in_tab,
             commands::row_menu,

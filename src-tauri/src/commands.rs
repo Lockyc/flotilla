@@ -109,27 +109,45 @@ pub fn pop_in_tab(id: TabId, webview: Webview) -> Result<(), String> {
     Ok(())
 }
 
-/// The row dot's Unload: closes tab `id`'s webview and keeps the tab. If it was active, the nearest
-/// live visible tab takes over ([`tabs::after_unload`]), else nothing is shown; no cold tab wakes.
+/// The row dot's Unload.
 #[tauri::command]
 pub fn unload_tab(id: TabId, webview: Webview, state: State<AppState>) -> Result<(), String> {
     require_chrome(&webview)?;
     if state.ws.lock().unwrap().find(&id).is_none() {
         return Err("unknown tab".into());
     }
-    let window = webview.window();
-    if let Some(wv) = tabs::own_webview(&window, &id) {
+    unload(webview.app_handle(), &webview.window(), &id);
+    Ok(())
+}
+
+/// ⌘W in the window labelled `label`: unloads its active tab.
+pub fn unload_active_tab(app: &AppHandle, label: &str) {
+    let (Some(window), Some(title)) = (app.get_window(label), tabs::title_of_label(app, label))
+    else {
+        return;
+    };
+    let active = tabs::active_in(&app.state::<AppState>().ws.lock().unwrap(), &title);
+    if let Some(id) = active {
+        unload(app, &window, &id);
+    }
+}
+
+/// Closes tab `id`'s webview in `window` and keeps the tab. If it was active, the nearest live
+/// visible tab takes over ([`tabs::after_unload`]), else nothing is shown; no cold tab wakes.
+fn unload(app: &AppHandle, window: &tauri::Window, id: &TabId) {
+    let state = app.state::<AppState>();
+    if let Some(wv) = tabs::own_webview(window, id) {
         shell_core::web::content::close_content_webview(&wv);
     }
     let active_moved = {
         let mut ws = state.ws.lock().unwrap();
         let mut created = state.created.lock().unwrap();
         let created = created.entry(window.label().to_string()).or_default();
-        let was_active = ws.is_active(&id);
-        let next = tabs::after_unload(&ws, created, &id);
-        created.remove(&id);
+        let was_active = ws.is_active(id);
+        let next = tabs::after_unload(&ws, created, id);
+        created.remove(id);
         if was_active {
-            ws.deactivate(&id);
+            ws.deactivate(id);
             if let Some(n) = next {
                 ws.activate(&n);
             }
@@ -137,11 +155,10 @@ pub fn unload_tab(id: TabId, webview: Webview, state: State<AppState>) -> Result
         was_active
     };
     if active_moved {
-        tabs::changed(webview.app_handle());
+        tabs::changed(app);
     } else {
-        tabs::sync(webview.app_handle());
+        tabs::sync(app);
     }
-    Ok(())
 }
 
 #[tauri::command]
@@ -489,13 +506,12 @@ pub fn set_hole_rect(
     Ok(())
 }
 
-/// ⌘W in the window titled `title`: closes its active tab (a head closes its group).
-pub fn close_active_tab(app: &AppHandle, title: &str) {
-    mutate(app, |ws| {
-        if let Some(id) = tabs::active_in(ws, title) {
-            ws.close_tab(&id);
-        }
-    });
+/// The row's remove button: closes tab `id` (a head closes its group).
+#[tauri::command]
+pub fn remove_tab(id: TabId, webview: Webview) -> Result<(), String> {
+    require_chrome(&webview)?;
+    mutate(webview.app_handle(), |ws| ws.close_tab(&id));
+    Ok(())
 }
 
 /// The home surface's "Create a starter config" button: seeds the starter config and applies it,

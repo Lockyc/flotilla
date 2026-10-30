@@ -34,7 +34,9 @@ pub struct MenuState {
     pub move_to: Item,
     /// The groups `move_to` offers: each other group's head id and name.
     pub move_targets: Vec<(TabId, String)>,
-    pub close_tab: Item,
+    /// The menu bar's ⌘W.
+    pub unload_tab: Item,
+    pub remove_tab: Item,
     pub close_group: Item,
     pub recent: Item,
     /// The Recent groups' names, newest first; position is the `recent` index.
@@ -54,8 +56,7 @@ pub enum Action {
     MakeOwnGroup(Option<TabId>),
     /// Move the tab to the group headed by the second id.
     MoveTo(Option<TabId>, TabId),
-    /// The menu bar's Close Tab is the spine's item, so only a row's carries an `Action`.
-    CloseTab(Option<TabId>),
+    RemoveTab(Option<TabId>),
     CloseGroup(Option<TabId>),
     /// Reopen `recent[i]`.
     Reopen(usize),
@@ -74,7 +75,7 @@ pub fn id(a: &Action) -> String {
         Action::SetHome(t) => ("set_home".into(), t.as_ref()),
         Action::MakeOwnGroup(t) => ("make_own_group".into(), t.as_ref()),
         Action::MoveTo(t, head) => (format!("move:{head}"), t.as_ref()),
-        Action::CloseTab(t) => ("close_tab".into(), t.as_ref()),
+        Action::RemoveTab(t) => ("remove_tab".into(), t.as_ref()),
         Action::CloseGroup(t) => ("close_group".into(), t.as_ref()),
         Action::Reopen(i) => (format!("recent:{i}"), None),
         Action::ClearRecent => ("clear_recent".into(), None),
@@ -103,7 +104,7 @@ pub fn action(id: &str) -> Option<Action> {
         ("set_home", None, t) => Action::SetHome(t),
         ("make_own_group", None, t) => Action::MakeOwnGroup(t),
         ("move", Some(head), t) => Action::MoveTo(t, head.to_string()),
-        ("close_tab", None, t) => Action::CloseTab(t),
+        ("remove_tab", None, t) => Action::RemoveTab(t),
         ("close_group", None, t) => Action::CloseGroup(t),
         ("recent", Some(i), None) => Action::Reopen(i.parse().ok()?),
         ("clear_recent", None, None) => Action::ClearRecent,
@@ -190,9 +191,9 @@ pub fn menu_state_for(ws: &Workspace, current: Option<&Url>, tab: Option<&TabId>
         make_own_group: item("Make Own Group", no_tab.or(is_head.then_some(IS_HEAD))),
         move_to: item("Move to Group", move_blocked),
         move_targets,
-        // The menu bar's Close Tab carries ⌘W, which also docks a focused pop-out; disabled, it
-        // would swallow the shortcut there.
-        close_tab: item("Close Tab", no_tab.filter(|_| !any_detached(ws))),
+        // ⌘W also docks a focused pop-out; disabled, it would swallow the shortcut there.
+        unload_tab: item("Unload Tab", no_tab.filter(|_| !any_detached(ws))),
+        remove_tab: item("Remove Tab", no_tab),
         close_group: item("Close Group", no_tab),
         recent: item("Recent", ws.recent.is_empty().then_some(NOTHING_CLOSED)),
         recent_entries: ws.recent.iter().map(|g| g.head.title.clone()).collect(),
@@ -200,12 +201,13 @@ pub fn menu_state_for(ws: &Workspace, current: Option<&Url>, tab: Option<&TabId>
 }
 
 /// The Group menu's items for `ms`. `tab` is the row a context menu acts on; `None` builds the
-/// menu bar's, which act on the active tab, carry the shortcuts, and use the spine's `close_tab`.
+/// menu bar's, which act on the active tab, carry the shortcuts, and lead the tab items with the
+/// spine's ⌘W item, `unload`.
 fn group_items(
     app: &AppHandle,
     ms: &MenuState,
     tab: Option<&TabId>,
-    close_tab: Option<&MenuItem<Wry>>,
+    unload: Option<&MenuItem<Wry>>,
 ) -> tauri::Result<Vec<MenuItemKind<Wry>>> {
     let t = tab.cloned();
     let entry = |a: Action, it: &Item, accel: Option<&str>| -> tauri::Result<MenuItemKind<Wry>> {
@@ -234,15 +236,19 @@ fn group_items(
         .separator()
         .item(&MenuItemBuilder::with_id(id(&Action::ClearRecent), "Clear Recent").build(app)?);
 
-    let close_tab = match close_tab {
-        Some(spine) => {
-            spine.set_text(&ms.close_tab.label)?;
-            spine.set_enabled(ms.close_tab.enabled)?;
-            MenuItemKind::MenuItem(spine.clone())
-        }
-        None => entry(Action::CloseTab(t.clone()), &ms.close_tab, None)?,
-    };
-    Ok(vec![
+    let mut tab_items = vec![];
+    if let Some(spine) = unload {
+        spine.set_text(&ms.unload_tab.label)?;
+        spine.set_enabled(ms.unload_tab.enabled)?;
+        tab_items.push(MenuItemKind::MenuItem(spine.clone()));
+    }
+    tab_items.push(entry(Action::RemoveTab(t.clone()), &ms.remove_tab, None)?);
+    tab_items.push(entry(
+        Action::CloseGroup(t.clone()),
+        &ms.close_group,
+        Some(ACCEL_CLOSE_GROUP),
+    )?);
+    let mut items = vec![
         entry(
             Action::NewGroup,
             &Item {
@@ -258,15 +264,10 @@ fn group_items(
         entry(Action::MakeOwnGroup(t.clone()), &ms.make_own_group, None)?,
         MenuItemKind::Submenu(moves.build()?),
         sep()?,
-        close_tab,
-        entry(
-            Action::CloseGroup(t.clone()),
-            &ms.close_group,
-            Some(ACCEL_CLOSE_GROUP),
-        )?,
-        sep()?,
-        MenuItemKind::Submenu(recent.build()?),
-    ])
+    ];
+    items.extend(tab_items);
+    items.extend([sep()?, MenuItemKind::Submenu(recent.build()?)]);
+    Ok(items)
 }
 
 fn refs(items: &[MenuItemKind<Wry>]) -> Vec<&dyn IsMenuItem<Wry>> {
@@ -474,7 +475,7 @@ pub fn handle(app: &AppHandle, menu_id: &str) -> bool {
                 ws.move_to_group(&t, &head);
             }
         }),
-        Action::CloseTab(t) => mutate(app, |ws| {
+        Action::RemoveTab(t) => mutate(app, |ws| {
             if let Some(t) = pick(t, ws) {
                 ws.close_tab(&t);
             }
@@ -561,7 +562,7 @@ mod tests {
             Action::MakeOwnGroup(t()),
             Action::MoveTo(None, "t-1".into()),
             Action::MoveTo(t(), "t-1".into()),
-            Action::CloseTab(t()),
+            Action::RemoveTab(t()),
             Action::CloseGroup(None),
             Action::CloseGroup(t()),
             Action::Reopen(2),
@@ -587,7 +588,7 @@ mod tests {
         );
         assert_eq!(s.move_to, off("Move to Group — Already a group's head"));
         assert!(s.move_targets.is_empty());
-        assert_eq!(s.close_tab, on("Close Tab"));
+        assert_eq!(s.remove_tab, on("Remove Tab"));
         assert_eq!(s.close_group, on("Close Group"));
     }
 
@@ -777,7 +778,8 @@ mod tests {
             assert_eq!(s.home, off("Home — No tab selected"));
             assert_eq!(s.make_own_group, off("Make Own Group — No tab selected"));
             assert_eq!(s.move_to, off("Move to Group — No tab selected"));
-            assert_eq!(s.close_tab, off("Close Tab — No tab selected"));
+            assert_eq!(s.unload_tab, off("Unload Tab — No tab selected"));
+            assert_eq!(s.remove_tab, off("Remove Tab — No tab selected"));
             assert_eq!(s.close_group, off("Close Group — No tab selected"));
             assert_eq!(s.recent, on("Recent"));
         }
@@ -786,17 +788,18 @@ mod tests {
     /// A disabled NSMenuItem swallows its shortcut, and ⌘W in a pop-out docks it whatever the main
     /// window shows.
     #[test]
-    fn close_tab_stays_enabled_with_no_active_tab_while_a_tab_is_popped_out() {
+    fn unload_tab_stays_enabled_with_no_active_tab_while_a_tab_is_popped_out() {
         let (mut ws, _, m) = one_group();
         ws.set_detached(&m, true);
         ws.windows[0].active = None;
         let s = menu_state_for(&ws, None, None);
-        assert_eq!(s.close_tab, on("Close Tab"));
+        assert_eq!(s.unload_tab, on("Unload Tab"));
+        assert_eq!(s.remove_tab, off("Remove Tab — No tab selected"));
         assert_eq!(s.home, off("Home — No tab selected"));
         ws.set_detached(&m, false);
         assert_eq!(
-            menu_state_for(&ws, None, None).close_tab,
-            off("Close Tab — No tab selected")
+            menu_state_for(&ws, None, None).unload_tab,
+            off("Unload Tab — No tab selected")
         );
     }
 

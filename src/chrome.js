@@ -114,6 +114,10 @@ async function mountChrome() {
       onUnload(id) {
         invoke("unload_tab", { id }).catch((err) => sb.setError(String(err)));
       },
+      // The bin: close the tab (a head closes its group into Recent).
+      onRemove(id) {
+        invoke("remove_tab", { id }).catch((err) => sb.setError(String(err)));
+      },
       // The icon tile's overlay: into its own window, and back into its group.
       onPopOut(id) {
         invoke("pop_out_tab", { id }).catch((err) => sb.setError(String(err)));
