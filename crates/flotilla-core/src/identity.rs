@@ -182,6 +182,27 @@ const NOISE_PARAMS: &[&str] = &["usp", "pli", "authuser", "ouid", "resourcekey"]
 /// (`?tab=t.0`) and the account segment (`/u/<n>`).
 const GOOGLE_NOISE_PARAMS: &[&str] = &["tab"];
 
+/// The address to keep as a home for the page at `url`: without its fragment, and on a Google
+/// page without the document tab it adds on load (`?tab=…`). Everything else is the page's own
+/// address, kept as the user saw it.
+pub fn home_url(url: &Url) -> Url {
+    let mut home = url.clone();
+    home.set_fragment(None);
+    if google_host(url) {
+        let kept: Vec<(String, String)> = url
+            .query_pairs()
+            .filter(|(k, _)| !GOOGLE_NOISE_PARAMS.contains(&k.as_ref()))
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        if kept.is_empty() {
+            home.set_query(None);
+        } else if kept.len() != url.query_pairs().count() {
+            home.query_pairs_mut().clear().extend_pairs(kept);
+        }
+    }
+    home
+}
+
 /// A URL normalised for comparing pages: lowercase host without `www.`, no fragment, no trailing
 /// `/`, none of the sharing/account query params, and on a Google page none of what it adds to
 /// its address on load. Two addresses with one key are the same page: one head, and a tab at its
@@ -193,10 +214,17 @@ pub fn head_key(url: &Url) -> String {
     let port = url.port().map(|p| format!(":{p}")).unwrap_or_default();
     let mut segments: Vec<&str> = url.path().split('/').collect();
     if google {
-        if let Some(at) = segments
+        // The account segment only when an id follows (`/folders/<id>`, `/d/<id>`): an id names
+        // the same file for every account, but `/drive/u/1/my-drive` is that account's own page.
+        let account = segments
             .windows(2)
             .position(|w| w[0] == "u" && w[1].parse::<u32>().is_ok())
-        {
+            .filter(|at| {
+                segments[at + 2..]
+                    .iter()
+                    .any(|s| matches!(*s, "folders" | "d"))
+            });
+        if let Some(at) = account {
             segments.drain(at..at + 2);
         }
     }
@@ -384,6 +412,22 @@ mod tests {
     }
 
     #[test]
+    fn a_home_is_the_page_without_what_it_adds_on_load() {
+        let home = |s: &str| home_url(&Url::parse(s).unwrap()).to_string();
+        let doc = "https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrSt01/edit";
+        assert_eq!(home(&format!("{doc}?tab=t.0#heading=h.x")), doc);
+        assert_eq!(
+            home("https://drive.google.com/drive/u/0/folders/X?usp=sharing"),
+            "https://drive.google.com/drive/u/0/folders/X?usp=sharing"
+        );
+        // Off Google, only the fragment goes.
+        assert_eq!(
+            home("https://example.com/a?tab=2#top"),
+            "https://example.com/a?tab=2"
+        );
+    }
+
+    #[test]
     fn head_key_ignores_what_google_adds_on_load() {
         const DOC: &str = "https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrSt01/edit";
         assert_eq!(head(&format!("{DOC}?tab=t.0#heading=h.x")), head(DOC));
@@ -393,6 +437,15 @@ mod tests {
         );
         // Another view of the document is another page.
         assert_ne!(head(&DOC.replace("/edit", "/view")), head(DOC));
+        // An account segment with no id after it names that account's own page.
+        assert_ne!(
+            head("https://drive.google.com/drive/u/0/my-drive"),
+            head("https://drive.google.com/drive/u/1/my-drive")
+        );
+        assert_eq!(
+            head(&DOC.replace("/document/", "/document/u/1/")),
+            head(DOC)
+        );
         // Off Google, `tab` and `/u/<n>` are the page's own.
         assert_ne!(
             head("https://example.com/a?tab=2"),

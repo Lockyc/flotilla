@@ -332,7 +332,7 @@ pub fn rename_tab(id: TabId, name: String, webview: Webview) -> Result<(), Strin
 }
 
 /// Set Home to Current Page: tab `id`'s page now becomes its home (`url` in the config, in
-/// place), so Home and a reload land there. Its id changes with its document key: the next sync
+/// place, as `identity::home_url` keeps it), so Home and a reload land there. Its id changes with its document key: the next sync
 /// closes its webview and creates it again, at that same page.
 pub fn set_home(app: &AppHandle, id: &TabId) -> Result<(), String> {
     let current = tabs::current_url(app, id);
@@ -340,8 +340,8 @@ pub fn set_home(app: &AppHandle, id: &TabId) -> Result<(), String> {
         if let Some(block) = ws.set_home_blocked(id, current.as_ref()) {
             return Err(crate::menu::set_home_refusal(block));
         }
-        let url = current.as_ref().expect("a tab not at home has a page");
-        ws.set_home(id, url)
+        let page = current.as_ref().expect("a tab not at home has a page");
+        ws.set_home(id, &flotilla_core::identity::home_url(page))
             .map(|new| (id.clone(), new))
             .map_err(crate::menu::set_home_refusal)
     })?;

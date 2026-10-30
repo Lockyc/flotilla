@@ -7,6 +7,7 @@ mod commands;
 mod config;
 mod detach;
 mod menu;
+mod migrate;
 mod persist;
 mod sidebar;
 mod state;
@@ -141,29 +142,52 @@ fn watch_config(app: tauri::AppHandle, path: std::path::PathBuf) {
     });
 }
 
-/// Loads the session from the app data dir and builds the state it seeds. A session notice and a
+/// The session path (`None`: nowhere to keep one), what was found there, and why a version 1
+/// session could not be migrated.
+type SessionLoad = (
+    Option<std::path::PathBuf>,
+    flotilla_core::session::Loaded,
+    Option<String>,
+);
+
+/// Loads the session from the app data dir. A version 1 session is migrated into the config at
+/// `config_path` first ([`migrate::migrate`]), and loads as the v2 session that leaves; one that
+/// can't be is left as it is, unsaved over, with the reason for the error bar.
+fn load_session(app: &tauri::App, config_path: &std::path::Path) -> SessionLoad {
+    use flotilla_core::session::{self, Loaded};
+    let dir = match app.path().app_data_dir() {
+        Ok(dir) => dir,
+        Err(e) => {
+            let reason = format!("no app data folder: {e}");
+            return (None, Loaded::Unpersistable { reason }, None);
+        }
+    };
+    let path = dir.join("session.json");
+    match session::load(&path) {
+        Loaded::V1(v1) => match migrate::migrate(config_path, &path, &v1) {
+            Ok(s) => (Some(path), Loaded::Restored(s), None),
+            Err(e) => (
+                Some(path),
+                Loaded::V1(v1),
+                Some(format!(
+                    "Couldn't move the last session into the config ({e})."
+                )),
+            ),
+        },
+        loaded => (Some(path), loaded, None),
+    }
+}
+
+/// Builds the state a loaded session seeds. A session notice and a
 /// config error share the sidebar's error bar.
 fn load_state(
-    app: &tauri::App,
+    (path, loaded, migration_error): SessionLoad,
     config: config::Config,
     config_error: Option<String>,
 ) -> state::AppState {
-    use flotilla_core::session::{self, Loaded};
-    let (path, loaded) = match app.path().app_data_dir() {
-        Ok(dir) => {
-            let path = dir.join("session.json");
-            let loaded = session::load(&path);
-            (Some(path), loaded)
-        }
-        Err(e) => (
-            None,
-            Loaded::Unpersistable {
-                reason: format!("no app data folder: {e}"),
-            },
-        ),
-    };
+    use flotilla_core::session::Loaded;
     let mut notice = state::Notices::default();
-    for msg in [persist::load_notice(&loaded), config_error]
+    for msg in [persist::load_notice(&loaded), migration_error, config_error]
         .into_iter()
         .flatten()
     {
@@ -307,6 +331,8 @@ pub fn run() {
         ])
         .setup(|app| {
             let cfg_path = config::config_path();
+            // Before the config is read: a version 1 session moves into it.
+            let session = load_session(app, &cfg_path);
             let (cfg, config_error) = match config::load(&cfg_path) {
                 Ok(cfg) => (cfg, None),
                 Err(e) => (config::Config::default(), Some(e)),
@@ -314,7 +340,7 @@ pub fn run() {
             shell_core::web::insecure::set_allowlist(cfg.allow_insecure.clone());
             app.set_theme(cfg.dark_mode.then_some(tauri::Theme::Dark));
             let decls = windows::decls(&cfg);
-            app.manage(load_state(app, cfg, config_error.clone()));
+            app.manage(load_state(session, cfg, config_error.clone()));
             // Closing the last window quits, popped-out windows and all; they reopen at launch.
             app.manage(
                 WindowSet::new("flotilla", cfg_path.clone(), windows::FlotillaHost)

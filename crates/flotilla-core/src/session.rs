@@ -110,12 +110,17 @@ fn quarantine(path: &Path, reason: String) -> Loaded {
     }
 }
 
-/// Writes `ws`'s [`Session`] to `<path>.tmp`, fsyncs it, then renames over `path`, so a crash
-/// leaves the old file or the new one, never half of either.
+/// Writes `ws`'s [`Session`] ([`save_session`]).
 pub fn save(path: &Path, ws: &Workspace) -> std::io::Result<()> {
+    save_session(path, &Session::of(ws))
+}
+
+/// Writes `session` to `<path>.tmp`, fsyncs it, then renames over `path`, so a crash leaves the
+/// old file or the new one, never half of either.
+pub fn save_session(path: &Path, session: &Session) -> std::io::Result<()> {
     let file = File {
         version: SESSION_VERSION,
-        session: Session::of(ws),
+        session: session.clone(),
     };
     let json = serde_json::to_vec_pretty(&file).map_err(std::io::Error::other)?;
     let mut tmp = path.as_os_str().to_owned();
