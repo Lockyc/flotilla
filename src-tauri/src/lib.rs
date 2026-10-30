@@ -2,6 +2,7 @@
 //! hole shows the active tab's webview. The session is loaded at setup and saved as it changes.
 
 mod commands;
+mod menu;
 mod persist;
 mod sidebar;
 mod state;
