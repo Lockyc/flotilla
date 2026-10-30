@@ -1,0 +1,16 @@
+# flotilla config — app-wide settings. Edit and save; flotilla hot-reloads.
+
+# Chrome sizing: "comfortable" or "compact".
+density = "comfortable"
+
+# Force a dark appearance so pages honouring prefers-color-scheme render dark.
+dark_mode = false
+
+# Check for a new release on launch and every 6 hours.
+auto_update = true
+
+# Hosts whose self-signed or invalid TLS certificate is accepted. Read at launch.
+allow_insecure = []
+
+# Reformat this file in house style on each clean reload.
+format_on_save = false

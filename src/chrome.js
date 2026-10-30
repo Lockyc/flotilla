@@ -116,7 +116,14 @@ window.addEventListener("resize", () => {
 new ResizeObserver(() => reportRect()).observe(document.getElementById("content-hole"));
 
 listen("workspace", (e) => sb && identity && sb.update(windowDto(e.payload)));
-listen("notice", (e) => sb && sb.setError(e.payload));
+// A reloaded config: re-read the identity (density) and drop an earlier config error.
+listen("config-reloaded", async () => {
+  if (!sb) return;
+  identity = await invoke("window_identity");
+  sb.clearError();
+  sb.update(windowDto(await invoke("get_workspace")));
+});
+listen("notice",(e) => sb && sb.setError(e.payload));
 // Cycling walks loaded tabs only (the live dot); a cold row loads when clicked.
 listen("nav-tab", (e) => sb && sb.selectByOffset(e.payload, { liveOnly: true }));
 listen("jump-tab", (e) => sb && sb.selectByIndex(e.payload));

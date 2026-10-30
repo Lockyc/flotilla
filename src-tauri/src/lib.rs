@@ -2,6 +2,7 @@
 //! hole shows the active tab's webview. The session is loaded at setup and saved as it changes.
 
 mod commands;
+mod config;
 mod detach;
 mod menu;
 mod persist;
@@ -33,19 +34,54 @@ struct WindowIdentity {
 }
 
 #[tauri::command]
-fn window_identity() -> WindowIdentity {
+fn window_identity(state: tauri::State<state::AppState>) -> WindowIdentity {
+    let cfg = state.config.lock().unwrap();
     WindowIdentity {
         title: "flotilla".into(),
         colour: None,
         default_width: DEFAULT_SIDEBAR_W,
-        density: "comfortable",
+        density: cfg.density.as_str(),
         sidebar_drag: true,
-        auto_update: true,
+        auto_update: cfg.auto_update,
     }
 }
 
-/// Loads the session from the app data dir and builds the state it seeds.
-fn load_state(app: &tauri::App) -> state::AppState {
+/// Applies a reloaded config: remembers it, themes every window, and has the chrome re-read its
+/// identity. `allow_insecure` is not applied here; it is read once at launch.
+fn apply_config(app: &tauri::AppHandle, cfg: config::Config) {
+    app.set_theme(cfg.dark_mode.then_some(tauri::Theme::Dark));
+    *app.state::<state::AppState>().config.lock().unwrap() = cfg;
+    emit_to_main_chrome(app, "config-reloaded", ());
+}
+
+/// Watches the config file: a clean reload is applied (and reformatted when `format_on_save`), a
+/// broken one keeps the last good config and shows its error in the sidebar.
+fn watch_config(app: tauri::AppHandle, path: std::path::PathBuf) {
+    let fmt_path = path.clone();
+    shell_core::watch::watch_config(path, move |src| match config::parse(src) {
+        Ok(cfg) => {
+            // Returning the formatted bytes makes the watcher swallow the echo of our own write.
+            let formatted = cfg
+                .format_on_save
+                .then(|| config_core::format_str(src))
+                .filter(|f| f != src && config_core::format_file(&fmt_path).is_ok());
+            apply_config(&app, cfg);
+            formatted
+        }
+        Err(msg) => {
+            tabs::notice(&app, msg);
+            None
+        }
+    });
+}
+
+/// Loads the session from the app data dir and builds the state it seeds. A session notice and a
+/// config error share the sidebar's error bar.
+fn load_state(
+    app: &tauri::App,
+    config: config::Config,
+    config_error: Option<String>,
+) -> state::AppState {
     use flotilla_core::session::{self, Loaded};
     let (path, loaded) = match app.path().app_data_dir() {
         Ok(dir) => {
@@ -60,7 +96,10 @@ fn load_state(app: &tauri::App) -> state::AppState {
             },
         ),
     };
-    let notice = persist::load_notice(&loaded);
+    let notice = match (persist::load_notice(&loaded), config_error) {
+        (Some(a), Some(b)) => Some(format!("{a} {b}")),
+        (a, b) => a.or(b),
+    };
     let persist = persist::Persist::for_load(path, &loaded);
     let ws = match loaded {
         Loaded::Restored(ws) => ws,
@@ -75,16 +114,10 @@ fn load_state(app: &tauri::App) -> state::AppState {
         created: Default::default(),
         failed: Default::default(),
         menu: Default::default(),
+        config: std::sync::Mutex::new(config),
         persist,
         notice,
     }
-}
-
-pub(crate) fn config_path() -> std::path::PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("flotilla")
-        .join("config.toml")
 }
 
 /// The popped-out tab whose window has key focus, if one does.
@@ -98,7 +131,7 @@ fn emit_to_main_chrome<S: Serialize + Clone>(app: &tauri::AppHandle, event: &str
 
 pub fn run() {
     // The shell-core plugin set (geometry + updater + process) every sibling app installs identically.
-    shell_core::register_plugins(tauri::Builder::default(), Some(&config_path()), &[])
+    shell_core::register_plugins(tauri::Builder::default(), Some(&config::config_path()), &[])
         .invoke_handler(tauri::generate_handler![
             window_identity,
             commands::get_workspace,
@@ -114,8 +147,15 @@ pub fn run() {
             commands::set_hole_rect,
         ])
         .setup(|app| {
-            let state = load_state(app);
-            app.manage(state);
+            let cfg_path = config::config_path();
+            let (cfg, config_error) = match config::load(&cfg_path) {
+                Ok(cfg) => (cfg, None),
+                Err(e) => (config::Config::default(), Some(e)),
+            };
+            shell_core::web::insecure::set_allowlist(cfg.allow_insecure.clone());
+            app.set_theme(cfg.dark_mode.then_some(tauri::Theme::Dark));
+            app.manage(load_state(app, cfg, config_error));
+            watch_config(app.handle().clone(), cfg_path.clone());
 
             // The sidebar chrome is the window's main webview; overlay title bar with the traffic
             // lights floating over chrome-core's `#cc-titlebar` strip.
@@ -144,10 +184,16 @@ pub fn run() {
             tabs::sync(app.handle());
             detach::reconcile(app.handle());
 
-            let cfg_path = config_path();
             // Row context menus' events arrive here too.
             app.on_menu_event(move |app, event| {
                 let id = event.id().as_ref();
+                // Edit Config on a missing file seeds the starter config first, so there is
+                // something to open.
+                if id == shell_core::menu::ids::EDIT_CONFIG {
+                    if let Err(e) = config::create_starter(&cfg_path) {
+                        tabs::notice(app, e);
+                    }
+                }
                 if shell_core::menu::handle_spine_event(id, &cfg_path) || menu::handle(app, id) {
                     return;
                 }

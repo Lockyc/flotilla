@@ -25,6 +25,8 @@ pub struct AppState {
     pub failed: Mutex<HashSet<TabId>>,
     /// What the menu bar was last built from (`menu::refresh`).
     pub menu: Mutex<Option<MenuState>>,
+    /// The app-wide config in force (the last good one).
+    pub config: Mutex<crate::config::Config>,
     pub persist: Persist,
     /// The launch-time notice for the error bar (a quarantined or unpersistable session).
     pub notice: Option<String>,

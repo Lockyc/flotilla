@@ -228,7 +228,7 @@ pub fn row_menu(app: &AppHandle, ms: &MenuState, tab: &TabId) -> tauri::Result<M
 /// The menu bar: the shell-core spine's App, Config and Window menus around flotilla's Edit, Tab
 /// and Group menus, the Group menu acting on the active tab.
 fn build_app_menu(app: &AppHandle, ms: &MenuState) -> tauri::Result<Menu<Wry>> {
-    let path = crate::config_path();
+    let path = crate::config::config_path();
     let windows = [shell_core::menu::WindowEntry {
         id: MAIN_WINDOW.into(),
         title: "flotilla".into(),

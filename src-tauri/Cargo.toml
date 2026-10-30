@@ -34,6 +34,9 @@ tauri-plugin-process = "2"
 shell-core = { git = "https://github.com/Lockyc/shell-core", rev = "29eac848e3d991ff8a2e0d96a320d2d02a47eadd", features = ["runtime"] }
 flotilla-core = { path = "../crates/flotilla-core" }
 dirs = "5"
+toml = "0.8"
+# House-style formatter, starter-config seeding and path resolution, shared with curator, warden and lector. Pinned by rev, same as curator.
+config-core = { git = "https://github.com/Lockyc/config-core", rev = "632b918b62e4677f5254e881a650f7cc74230030" }
 url = "2"
 
 [dev-dependencies]

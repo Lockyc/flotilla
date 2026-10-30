@@ -12,3 +12,5 @@ members = ["src-tauri", "crates/flotilla-core"]
 #PATCH:chrome#chrome-core = { path = "../chrome-core" }
 #PATCH:shell#[patch."https://github.com/Lockyc/shell-core"]
 #PATCH:shell#shell-core = { path = "../shell-core" }
+#PATCH:config#[patch."https://github.com/Lockyc/config-core"]
+#PATCH:config#config-core = { path = "../config-core" }
