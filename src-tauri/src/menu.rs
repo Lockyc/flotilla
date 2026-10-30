@@ -393,18 +393,31 @@ pub fn follow_focus(app: &AppHandle, window: &tauri::Window) {
     });
 }
 
-/// What the menu bar shows with the window titled `focused` in front: its active tab's Group menu,
-/// and the Window menu's rows.
-/// `current` is the page the focused window's active tab shows.
+/// The tab the Group menu acts on: a focused pop-out's own tab (never its window's `active`),
+/// else the active tab of the workspace window titled `title`. `focused` is the focused OS
+/// window's label.
+pub fn menu_tab(ws: &Workspace, focused: Option<&str>, title: Option<&str>) -> Option<TabId> {
+    focused
+        .and_then(crate::detach::tab_of)
+        .filter(|id| ws.find(id).is_some())
+        .or_else(|| title.and_then(|t| crate::tabs::active_in(ws, t)))
+}
+
+/// The label of the focused OS window, a pop-out's included.
+fn focused_label(app: &AppHandle) -> Option<String> {
+    app.get_focused_window().map(|w| w.label().to_string())
+}
+
+/// What the menu bar shows with `tab` the one it acts on ([`menu_tab`]): its Group menu, and the
+/// Window menu's rows. `current` is the page `tab` shows.
 pub fn key_for(
     ws: &Workspace,
-    focused: Option<&str>,
+    tab: Option<&TabId>,
     current: Option<&Url>,
     windows: &[WindowEntry],
 ) -> MenuKey {
-    let active = focused.and_then(|t| crate::tabs::active_in(ws, t));
     MenuKey {
-        group: menu_state_for(ws, current, active.as_ref()),
+        group: menu_state_for(ws, current, tab),
         windows: windows
             .iter()
             .map(|e| (e.id.clone(), e.title.clone(), e.open))
@@ -418,14 +431,19 @@ pub fn refresh(app: &AppHandle) {
     let state = app.state::<AppState>();
     let windows = app.state::<WindowSet>().entries();
     let title = focused(app).map(|(_, t)| t);
+    let label = focused_label(app);
+    let tab = menu_tab(
+        &state.ws.lock().unwrap(),
+        label.as_deref(),
+        title.as_deref(),
+    );
     // The page is read with no lock held: a webview call.
-    let active = title
-        .as_deref()
-        .and_then(|t| crate::tabs::active_in(&state.ws.lock().unwrap(), t));
-    let current = active.and_then(|id| crate::tabs::current_url(app, &id));
+    let current = tab
+        .as_ref()
+        .and_then(|id| crate::tabs::current_url(app, id));
     let key = key_for(
         &state.ws.lock().unwrap(),
-        title.as_deref(),
+        tab.as_ref(),
         current.as_ref(),
         &windows,
     );
@@ -449,8 +467,9 @@ pub fn handle(app: &AppHandle, menu_id: &str) -> bool {
     };
     let window = focused(app);
     let title = window.as_ref().map(|(_, t)| t.clone());
+    let label = focused_label(app);
     let pick = |t: Option<TabId>, ws: &Workspace| {
-        t.or_else(|| title.as_deref().and_then(|w| crate::tabs::active_in(ws, w)))
+        t.or_else(|| menu_tab(ws, label.as_deref(), title.as_deref()))
     };
     match a {
         Action::NewGroup => {
@@ -777,14 +796,23 @@ mod tests {
             },
         ];
         // A in front, its member active: the member's items.
-        let in_a = key_for(&ws, Some("A"), None, &entries);
+        let tab_a = menu_tab(&ws, Some("a"), Some("A"));
+        assert_eq!(tab_a.as_ref(), Some(&m));
+        let in_a = key_for(&ws, tab_a.as_ref(), None, &entries);
         assert_eq!(in_a.group, menu_state_for(&ws, None, Some(&m)));
         assert_eq!(in_a.group.make_own_group, on("Make Own Group"));
         // B in front, nothing active there: no tab, so nothing acts on A's member.
-        let in_b = key_for(&ws, Some("B"), None, &entries);
+        let tab_b = menu_tab(&ws, Some("b"), Some("B"));
+        assert_eq!(tab_b, None);
+        let in_b = key_for(&ws, tab_b.as_ref(), None, &entries);
         assert_eq!(in_b.group, menu_state_for(&ws, None, None));
         assert_ne!(in_a, in_b, "a focus change rebuilds the menu bar");
         assert_eq!(in_b.windows.len(), 2);
+        // A focused pop-out: its own tab, not its window's active one.
+        ws.set_detached(&m, true);
+        ws.activate(&a);
+        let popout = crate::detach::window_label(&m);
+        assert_eq!(menu_tab(&ws, Some(&popout), Some("A")), Some(m));
     }
 
     #[test]
