@@ -29,6 +29,12 @@ impl Persist {
         }
     }
 
+    /// Persists to `path` unless `loaded` says the file there could not be read or moved aside.
+    pub fn for_load(path: Option<PathBuf>, loaded: &Loaded) -> Self {
+        let unpersistable = matches!(loaded, Loaded::Unpersistable { .. });
+        Self::new(path.filter(|_| !unpersistable))
+    }
+
     /// Records a change. The ticket it returns is due only if no later change arrives before the
     /// debounce elapses; `None` when this run does not persist.
     pub fn schedule(&self) -> Option<u64> {
@@ -56,9 +62,10 @@ pub fn load_notice(loaded: &Loaded) -> Option<String> {
     match loaded {
         Loaded::Fresh | Loaded::Restored(_) => None,
         Loaded::Quarantined { moved_to } => {
-            let name = moved_to
-                .file_name()
-                .map_or_else(|| moved_to.display().to_string(), |n| n.to_string_lossy().into_owned());
+            let name = moved_to.file_name().map_or_else(
+                || moved_to.display().to_string(),
+                |n| n.to_string_lossy().into_owned(),
+            );
             Some(format!(
                 "Couldn't read the last session — saved it as {name} and started fresh."
             ))
@@ -142,6 +149,18 @@ mod tests {
         let p = Persist::new(None);
         assert_eq!(p.schedule(), None);
         p.save(&sample()).unwrap();
+    }
+
+    #[test]
+    fn only_an_unpersistable_load_disables_saving() {
+        let p = || Some(PathBuf::from("/x/session.json"));
+        assert!(Persist::for_load(p(), &Loaded::Fresh).schedule().is_some());
+        let q = Loaded::Quarantined {
+            moved_to: PathBuf::from("/x/session.json.bad-1"),
+        };
+        assert!(Persist::for_load(p(), &q).schedule().is_some());
+        let u = Loaded::Unpersistable { reason: "r".into() };
+        assert_eq!(Persist::for_load(p(), &u).schedule(), None);
     }
 
     #[test]

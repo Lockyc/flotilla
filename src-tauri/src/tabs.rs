@@ -1,8 +1,20 @@
 //! The main window's content webviews: one per shown tab, labelled `main:<TabId>`, created lazily
 //! and brought in line with the workspace by [`sync`].
 
+use crate::state::AppState;
+use crate::MAIN_WINDOW;
 use flotilla_core::model::{TabId, Workspace};
+use flotilla_core::nav::{self, Decision, Origin};
+use shell_core::compositing::HoleRect;
+use shell_core::web::content::{
+    close_content_webview, create_content_webview, ContentHooks, ContentSpec, LinkOrigin,
+};
 use std::collections::HashSet;
+use std::sync::Arc;
+use tauri::{AppHandle, Emitter, Manager, Url, Window};
+
+/// The loading bar's colour (sRGB, 0–1): the chrome's neutral blue.
+const BAR_RGBA: (f64, f64, f64, f64) = (0.039, 0.518, 1.0, 1.0);
 
 /// The content webview label for tab `id` in the main window.
 pub fn label(id: &str) -> String {
@@ -66,6 +78,158 @@ pub fn plan(ws: &Workspace, created: &HashSet<TabId>) -> ViewPlan {
     }
 }
 
+/// Whether a page's reported title replaces the row's. A page reports an empty title while it
+/// loads, which would blank a restored row's saved name.
+pub fn adopt_title(current: &str, reported: &str) -> bool {
+    !reported.trim().is_empty() && current != reported
+}
+
+/// After any workspace change: bring the webviews and the sidebar in line, and schedule a save.
+/// Main thread only.
+pub fn changed(app: &AppHandle) {
+    sync(app);
+    crate::persist::mark_dirty(app);
+}
+
+/// Brings the main window's content webviews in line with the workspace ([`plan`]) and pushes the
+/// sidebar DTO. Main thread only. `ws` is locked only to compute the plan.
+pub fn sync(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let Some(window) = app.get_window(MAIN_WINDOW) else {
+        return;
+    };
+    let plan = {
+        let ws = state.ws.lock().unwrap();
+        let created = state.created.lock().unwrap();
+        plan(&ws, &created)
+    };
+    for id in &plan.close {
+        if let Some(wv) = own_webview(&window, id) {
+            close_content_webview(&wv);
+        }
+        state.created.lock().unwrap().remove(id);
+    }
+    if let Some(t) = &plan.create {
+        let hole = *state.hole.lock().unwrap();
+        match create(&window, t, hole) {
+            Ok(()) => {
+                state.created.lock().unwrap().insert(t.id.clone());
+            }
+            Err(e) => notice(app, format!("Couldn't open {}: {e}", t.home_url)),
+        }
+    }
+    for id in &plan.hide {
+        if let Some(wv) = own_webview(&window, id) {
+            let _ = wv.hide();
+        }
+    }
+    if let Some(wv) = plan.show.as_ref().and_then(|id| own_webview(&window, id)) {
+        let _ = wv.show();
+    }
+    push_dto(app);
+}
+
+/// Sends the sidebar DTO to the chrome.
+pub fn push_dto(app: &AppHandle) {
+    let dto = crate::sidebar::sidebar_dto(&app.state::<AppState>().ws.lock().unwrap());
+    let _ = app.emit_to(MAIN_WINDOW, "workspace", dto);
+}
+
+/// Shows `msg` in the sidebar's error bar.
+pub fn notice(app: &AppHandle, msg: String) {
+    let _ = app.emit_to(MAIN_WINDOW, "notice", msg);
+}
+
+/// Tab `id`'s webview, only if it lives in `window` (a popped-out tab's would not).
+fn own_webview(window: &Window, id: &str) -> Option<tauri::Webview> {
+    window
+        .get_webview(&label(id))
+        .filter(|wv| wv.window().label() == window.label())
+}
+
+fn create(window: &Window, t: &Target, hole: HoleRect) -> Result<(), String> {
+    let url = Url::parse(&t.home_url).map_err(|e| e.to_string())?;
+    let label = label(&t.id);
+    let spec = ContentSpec {
+        label: &label,
+        url: &url,
+        home_url: &t.home_url,
+        session: &t.store,
+        hole,
+        bar_rgba: BAR_RGBA,
+        extra_init: &[],
+    };
+    create_content_webview(window, &spec, hooks())
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+fn hooks() -> ContentHooks {
+    ContentHooks {
+        intercept: Some(Arc::new(intercept)),
+        on_app_sentinel: None,
+        on_title: Some(Arc::new(|wv, title| {
+            let app = wv.app_handle().clone();
+            let label = wv.label().to_string();
+            let title = title.to_string();
+            let _ = app
+                .clone()
+                .run_on_main_thread(move || retitle(&app, &label, &title));
+        })),
+        on_download: None,
+    }
+}
+
+fn origin(o: LinkOrigin) -> Origin {
+    match o {
+        LinkOrigin::NewWindow => Origin::NewWindow,
+        LinkOrigin::Click => Origin::Click,
+        LinkOrigin::Navigation => Origin::Navigation,
+    }
+}
+
+/// shell-core's `intercept`: runs inside WebKit's policy callback, so it only decides. On `Open` the
+/// workspace already holds the new or raised tab; showing it is deferred to the main loop.
+fn intercept(app: &AppHandle, label: &str, url: &Url, o: LinkOrigin) -> bool {
+    let Some(id) = tab_id(label) else {
+        return false;
+    };
+    let decision = {
+        let state = app.state::<AppState>();
+        let mut ws = state.ws.lock().unwrap();
+        nav::decide(&mut ws, &id, url, origin(o))
+    };
+    match decision {
+        Decision::PassThrough => false,
+        Decision::Open(_) => {
+            let deferred = app.clone();
+            let _ = app.run_on_main_thread(move || changed(&deferred));
+            true
+        }
+    }
+}
+
+fn retitle(app: &AppHandle, label: &str, title: &str) {
+    let Some(id) = tab_id(label) else {
+        return;
+    };
+    let retitled = {
+        let state = app.state::<AppState>();
+        let mut ws = state.ws.lock().unwrap();
+        let adopt = ws
+            .find(&id)
+            .is_some_and(|(_, t)| adopt_title(&t.title, title));
+        if adopt {
+            ws.set_title(&id, title);
+        }
+        adopt
+    };
+    if retitled {
+        push_dto(app);
+        crate::persist::mark_dirty(app);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -98,6 +262,14 @@ mod tests {
 
     fn set(ids: &[&TabId]) -> HashSet<TabId> {
         ids.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_loading_page_keeps_the_saved_title() {
+        assert!(!adopt_title("Budget", ""));
+        assert!(!adopt_title("Budget", "  "));
+        assert!(!adopt_title("Budget", "Budget"));
+        assert!(adopt_title("Budget", "Budget 2026"));
     }
 
     #[test]

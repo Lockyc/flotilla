@@ -1,5 +1,6 @@
 // flotilla's chrome controller: binds the shared chrome-core ChromeSidebar (the view) to flotilla's
-// Tauri backend. Currently mounts an empty sidebar; the model arrives with the DTO.
+// Tauri backend. Rust owns the workspace and selection; it pushes the tab list as `workspace`
+// events and this file merges it with the window identity.
 
 const { invoke } = window.__TAURI__.core;
 // A bare `listen()` is app-wide, not window-scoped; binding to this webview scopes it to this window.
@@ -9,6 +10,7 @@ const listen = (event, handler) => chromeWebview.listen(event, handler);
 const MIN_W = 160, MAX_W = 520, MAX_FRACTION = 0.4;
 
 let sb = null;
+let identity = null;
 
 function setSidebarWidth(w) {
   document.getElementById("sidebar").style.width = Math.round(w) + "px";
@@ -20,49 +22,71 @@ function reportRect() {
   invoke("set_hole_rect", { rect: { x: r.x, y: r.y, width: r.width, height: r.height } }).catch(() => {});
 }
 
-async function buildDto() {
-  const id = await invoke("window_identity");
-  const tabs = await invoke("get_tabs");
+// chrome-core's window DTO: the identity fields plus Rust's `{ tabs, active, collapsed }`.
+function windowDto(ws) {
   return {
-    title: id.title,
-    colour: id.colour ?? null,
-    density: id.density,
-    windowDrag: id.sidebar_drag !== false,
-    active: null,
-    tabs,
+    title: identity.title,
+    colour: identity.colour ?? null,
+    density: identity.density,
+    windowDrag: identity.sidebar_drag !== false,
+    ...ws,
   };
 }
 
-async function refresh() {
-  sb.update(await buildDto());
-  reportRect();
+// The header slot's field: Enter opens the typed or pasted link as a new group.
+function newGroupField() {
+  const input = document.createElement("input");
+  input.id = "new-group";
+  input.type = "text";
+  input.placeholder = "Open a folder or page as a new group";
+  input.spellcheck = false;
+  input.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter") return;
+    invoke("new_group", { url: input.value })
+      .then(() => {
+        input.value = "";
+        sb.clearError();
+      })
+      .catch((err) => sb.setError(String(err)));
+  });
+  return input;
 }
 
 async function mountChrome() {
-  const id = await invoke("window_identity");
+  identity = await invoke("window_identity");
   sb = window.ChromeSidebar.mount(
     document.getElementById("sidebar"),
     {
-      onSelect() {},
+      // Clicking the active row again returns it to the page it opened with.
+      onSelect(id, { wasActive } = {}) {
+        invoke(wasActive ? "home_tab" : "select_tab", { id }).catch((err) => sb.setError(String(err)));
+      },
+      onToggleGroup(group, collapsed) {
+        invoke("toggle_group", { head: group, collapsed }).catch(() => {});
+      },
       onResize(width) {
         setSidebarWidth(width);
         reportRect();
       },
     },
     {
+      header: newGroupField(),
       appName: "flotilla",
       storageKey: "flotilla:sidebar-width",
-      defaultWidth: id.default_width,
+      defaultWidth: identity.default_width,
       minWidth: MIN_W,
       maxWidth: MAX_W,
       maxFraction: MAX_FRACTION,
-      autoUpdate: id.auto_update !== false,
+      autoUpdate: identity.auto_update !== false,
     }
   );
-  await refresh();
+  sb.update(windowDto(await invoke("get_workspace")));
+  reportRect();
   if (!(parseFloat(localStorage.getItem("flotilla:sidebar-width")) > 0)) {
-    setSidebarWidth(id.default_width);
+    setSidebarWidth(identity.default_width);
   }
+  const notice = await invoke("startup_notice");
+  if (notice) sb.setError(notice);
 }
 
 window.addEventListener("resize", () => {
@@ -75,7 +99,10 @@ window.addEventListener("resize", () => {
 });
 new ResizeObserver(() => reportRect()).observe(document.getElementById("content-hole"));
 
-listen("nav-tab", (e) => sb && sb.selectByOffset(e.payload, { liveOnly: true }));
+listen("workspace", (e) => sb && identity && sb.update(windowDto(e.payload)));
+listen("notice", (e) => sb && sb.setError(e.payload));
+// Every row is reachable: a restored tab with no webview yet is created when stepped to.
+listen("nav-tab", (e) => sb && sb.selectByOffset(e.payload, { liveOnly: false }));
 listen("jump-tab", (e) => sb && sb.selectByIndex(e.payload));
 listen("find-in-sidebar", () => sb && sb.focusSearch());
 listen("pointer-away", () => sb && sb.pointerAway());

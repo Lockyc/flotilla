@@ -56,10 +56,9 @@ mod tests {
     #[test]
     fn sidebar_dto_orders_groups_and_marks_heads() {
         let mut ws = Workspace::default();
-        let Opened::Added(h1) = ws.new_group(
-            &url("https://drive.google.com/drive/folders/f1"),
-            "default",
-        ) else {
+        let Opened::Added(h1) =
+            ws.new_group(&url("https://drive.google.com/drive/folders/f1"), "default")
+        else {
             panic!()
         };
         ws.set_title(&h1, "Auction 2026");
@@ -70,10 +69,9 @@ mod tests {
             panic!()
         };
         ws.set_title(&m1, "Budget");
-        let Opened::Added(h2) = ws.new_group(
-            &url("https://drive.google.com/drive/folders/f2"),
-            "default",
-        ) else {
+        let Opened::Added(h2) =
+            ws.new_group(&url("https://drive.google.com/drive/folders/f2"), "default")
+        else {
             panic!()
         };
         ws.set_title(&h2, "Website");

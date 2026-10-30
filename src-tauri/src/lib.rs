@@ -1,5 +1,7 @@
-//! flotilla's Tauri shell. Currently an empty workspace window: the shared chrome with no tabs.
+//! flotilla's Tauri shell: one window whose sidebar lists the workspace's groups and whose content
+//! hole shows the active tab's webview. The session is loaded at setup and saved as it changes.
 
+mod commands;
 mod persist;
 mod sidebar;
 mod state;
@@ -40,15 +42,39 @@ fn window_identity() -> WindowIdentity {
     }
 }
 
-/// The tab list the chrome renders. Empty until the model lands.
-#[tauri::command]
-fn get_tabs() -> Vec<serde_json::Value> {
-    Vec::new()
+/// Loads the session from the app data dir and builds the state it seeds.
+fn load_state(app: &tauri::App) -> state::AppState {
+    use flotilla_core::session::{self, Loaded};
+    let (path, loaded) = match app.path().app_data_dir() {
+        Ok(dir) => {
+            let path = dir.join("session.json");
+            let loaded = session::load(&path);
+            (Some(path), loaded)
+        }
+        Err(e) => (
+            None,
+            Loaded::Unpersistable {
+                reason: format!("no app data folder: {e}"),
+            },
+        ),
+    };
+    let notice = persist::load_notice(&loaded);
+    let persist = persist::Persist::for_load(path, &loaded);
+    let ws = match loaded {
+        Loaded::Restored(ws) => ws,
+        _ => Default::default(),
+    };
+    state::AppState {
+        ws: std::sync::Mutex::new(ws),
+        hole: std::sync::Mutex::new(shell_core::compositing::initial_hole(
+            FIRST_RUN_SIZE.0,
+            FIRST_RUN_SIZE.1,
+        )),
+        created: Default::default(),
+        persist,
+        notice,
+    }
 }
-
-/// The chrome reports the content hole's rect; no content webviews exist yet to place.
-#[tauri::command]
-fn set_hole_rect(_rect: serde_json::Value) {}
 
 fn config_path() -> std::path::PathBuf {
     dirs::config_dir()
@@ -133,13 +159,21 @@ pub fn run() {
     shell_core::register_plugins(tauri::Builder::default(), Some(&config_path()), &[])
         .invoke_handler(tauri::generate_handler![
             window_identity,
-            get_tabs,
-            set_hole_rect
+            commands::get_workspace,
+            commands::startup_notice,
+            commands::select_tab,
+            commands::toggle_group,
+            commands::new_group,
+            commands::home_tab,
+            commands::set_hole_rect,
         ])
         .setup(|app| {
+            let state = load_state(app);
+            app.manage(state);
+
             // The sidebar chrome is the window's main webview; overlay title bar with the traffic
             // lights floating over chrome-core's `#cc-titlebar` strip.
-            tauri::WebviewWindowBuilder::new(
+            let window = tauri::WebviewWindowBuilder::new(
                 app,
                 MAIN_WINDOW,
                 WebviewUrl::App("index.html".into()),
@@ -149,6 +183,15 @@ pub fn run() {
             .hidden_title(true)
             .title_bar_style(TitleBarStyle::Overlay)
             .build()?;
+            // Closing the window drops its content webviews, which would leave their pages running.
+            let closing = window.as_ref().window();
+            window.on_window_event(move |event| {
+                if let tauri::WindowEvent::CloseRequested { .. } = event {
+                    shell_core::web::content::close_window_pages(&closing);
+                }
+            });
+            // Restore lazily: only the active tab's webview is created now.
+            tabs::sync(app.handle());
 
             app.set_menu(build_app_menu(app)?)?;
             let cfg_path = config_path();
@@ -170,7 +213,7 @@ pub fn run() {
                     shell_core::menu::ids::CHECK_UPDATES => {
                         emit_to_main_chrome(app, "check-update", ())
                     }
-                    shell_core::menu::ids::CLOSE_TAB => emit_to_main_chrome(app, "close-tab", ()),
+                    shell_core::menu::ids::CLOSE_TAB => commands::close_active_tab(app),
                     shell_core::menu::ids::FIND_IN_SIDEBAR => {
                         emit_to_main_chrome(app, "find-in-sidebar", ())
                     }
@@ -179,6 +222,14 @@ pub fn run() {
             });
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running flotilla");
+        .build(tauri::generate_context!())
+        .expect("error while building flotilla")
+        .run(|app, event| {
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                if let Some(window) = app.get_window(MAIN_WINDOW) {
+                    shell_core::web::content::close_window_pages(&window);
+                }
+                persist::save_now(app);
+            }
+        });
 }
