@@ -206,6 +206,11 @@ pub fn run() {
                     }
                     return;
                 }
+                // Window ▸ flotilla: the only window the spine lists.
+                if shell_core::menu::selected_window(id) == Some(MAIN_WINDOW) {
+                    tabs::bring_main_forward(app);
+                    return;
+                }
                 match id {
                     shell_core::menu::ids::CHECK_UPDATES => {
                         emit_to_main_chrome(app, "check-update", ())
