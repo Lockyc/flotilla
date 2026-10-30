@@ -517,7 +517,8 @@ pub fn handle(app: &AppHandle, menu_id: &str) -> bool {
                 crate::tabs::window_title_of(&app.state::<AppState>().ws.lock().unwrap(), &head);
             if let Some(window) = window {
                 commands::show_from(app, &window, true, |ws| {
-                    ws.add_incoming(&item, &head).map(commands::opened_id)
+                    ws.add_incoming(&item, &head)
+                        .map(flotilla_core::model::opened_id)
                 });
             }
         }

@@ -128,7 +128,8 @@ pub struct Workspace {
     /// Closed groups, newest first.
     pub recent: Vec<Group>,
     /// Incoming queues no window can hold, because the config has none, by the title of the
-    /// window they were in. The session keeps them, and the first window there is takes them
+    /// window they were in (`""` for links handed while there was none). The session keeps them,
+    /// and the first window there is takes them
     /// ([`Workspace::adopt_incoming`]).
     pub stray: BTreeMap<String, Vec<Incoming>>,
     /// The detached tab the last operation activated, whose window the shell is to raise.
@@ -716,24 +717,31 @@ impl Workspace {
     }
 
     /// Queues `link` under window `wi`, unless it is queued in any window already.
-    fn enqueue(&mut self, wi: usize, link: &str, problem: Option<String>) -> Handed {
+    /// `wi` `None`: there is no window at all, and it waits in `stray` until one appears
+    /// ([`Self::adopt_incoming`]).
+    fn enqueue(&mut self, wi: Option<usize>, link: &str, problem: Option<String>) -> Handed {
         let id = incoming_id(link);
         if self.queued(&id) {
             return Handed::AlreadyQueued(id);
         }
-        self.windows[wi].incoming.push(Incoming {
+        let item = Incoming {
             id: id.clone(),
             link: link.trim().to_string(),
             problem,
-        });
+        };
+        match wi {
+            Some(wi) => self.windows[wi].incoming.push(item),
+            None => self.stray.entry(String::new()).or_default().push(item),
+        }
         Handed::Queued(id)
     }
 
     /// Takes a link handed to window `window` in `store`. A link that is not a web link is queued
     /// with its reason; one open already, in any window, is raised; a document joins the group
     /// of that window whose head is titled `group`, else is queued; anything else heads a new
-    /// group in the window. A link raised or joined leaves the queue, wherever it waited. `None`,
-    /// and nothing done, when there is no such window or the link is blank.
+    /// group in the window. A link raised or joined leaves the queue, wherever it waited. With no
+    /// window at all, the link is queued in `stray`, with its reason if it is not a web link.
+    /// `None`, and nothing done, when the link is blank, or there is no such window but others.
     pub fn receive(
         &mut self,
         window: &str,
@@ -741,13 +749,16 @@ impl Workspace {
         link: &str,
         store: &str,
     ) -> Option<Handed> {
-        let wi = self.window_index(window)?;
         if link.trim().is_empty() {
             return None;
         }
+        if self.windows.is_empty() {
+            return Some(self.enqueue(None, link, parse_group_url(link).err()));
+        }
+        let wi = self.window_index(window)?;
         let url = match parse_group_url(link) {
             Ok(url) => url,
-            Err(problem) => return Some(self.enqueue(wi, link, Some(problem))),
+            Err(problem) => return Some(self.enqueue(Some(wi), link, Some(problem))),
         };
         if let Some(id) = self.open_doc(&identity(store, &url)) {
             self.activate(&id);
@@ -770,18 +781,21 @@ impl Workspace {
                 self.dismiss_incoming(&incoming_id(link));
                 Some(Handed::Joined(opened_id(opened)))
             }
-            None => Some(self.enqueue(wi, link, None)),
+            None => Some(self.enqueue(Some(wi), link, None)),
         }
     }
 
     /// Queues `link` under window `window` as one that can't be opened, for `problem`, unless it
-    /// is queued in any window already. `None`, and nothing done, when there is no such window or
-    /// the link is blank.
+    /// is queued in any window already; with no window at all, in `stray`. `None`, and nothing
+    /// done, when the link is blank, or there is no such window but others.
     pub fn reject(&mut self, window: &str, link: &str, problem: String) -> Option<Handed> {
-        let wi = self.window_index(window)?;
         if link.trim().is_empty() {
             return None;
         }
+        let wi = match self.windows.is_empty() {
+            true => None,
+            false => Some(self.window_index(window)?),
+        };
         Some(self.enqueue(wi, link, Some(problem)))
     }
 
@@ -824,7 +838,8 @@ impl Workspace {
     }
 }
 
-fn opened_id(o: Opened) -> TabId {
+/// The tab an open shows, whether it added it or raised it.
+pub fn opened_id(o: Opened) -> TabId {
     match o {
         Opened::Added(id) | Opened::Raised(id) => id,
     }
@@ -2051,6 +2066,32 @@ mod tests {
         w.rebase(Workspace::from_config(&cfg));
         assert_eq!(queue(&w, "A"), [doc(7).as_str()]);
         assert_eq!(queue(&w, "B"), [doc(8).as_str()]);
+    }
+
+    #[test]
+    fn a_link_handed_with_no_window_waits_for_the_first() {
+        let mut w = Workspace::from_config(&[]);
+        let a = queued(w.receive("anything", None, doc(1).as_str(), "default"));
+        queued(w.receive("", None, folder(2).as_str(), "default"));
+        let r = queued(w.reject("", "flotilla://open", "No link in flotilla://open".into()));
+        assert_eq!(
+            w.receive("", None, doc(1).as_str(), "default"),
+            Some(Handed::AlreadyQueued(a))
+        );
+        assert_eq!(w.receive("", None, " ", "default"), None);
+        assert_eq!(w.stray[""].len(), 3);
+        w.rebase(Workspace::from_config(&[window(W)]));
+        assert!(w.stray.is_empty());
+        assert_eq!(
+            queue(&w, W),
+            [doc(1).as_str(), folder(2).as_str(), "flotilla://open"]
+        );
+        let rejected = &w.windows[0].incoming[2];
+        assert_eq!(rejected.id, r);
+        assert_eq!(
+            rejected.problem.as_deref(),
+            Some("No link in flotilla://open")
+        );
     }
 
     #[test]

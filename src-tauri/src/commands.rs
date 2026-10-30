@@ -5,7 +5,7 @@
 use crate::config::DEFAULT_STORE;
 use crate::state::AppState;
 use crate::tabs;
-use flotilla_core::model::{Handed, Opened, TabId};
+use flotilla_core::model::{opened_id, Handed, TabId};
 use flotilla_core::nav::parse_group_url;
 use serde::Deserialize;
 use shell_core::compositing::{layout_webviews, HoleRect};
@@ -157,13 +157,6 @@ pub fn new_group(url: String, webview: Webview) -> Result<(), String> {
     Ok(())
 }
 
-/// The tab an open shows, whether it added it or raised it.
-pub(crate) fn opened_id(o: Opened) -> TabId {
-    match o {
-        Opened::Added(id) | Opened::Raised(id) => id,
-    }
-}
-
 /// Links handed over before `setup` has built the workspace: macOS delivers the link a cold launch
 /// was opened with ahead of it. `open_early_links` opens them once the state exists.
 static EARLY_LINKS: std::sync::Mutex<Vec<Url>> = std::sync::Mutex::new(Vec::new());
@@ -226,43 +219,38 @@ pub fn handed_front(
         Handed::Raised(id) | Handed::Grouped(id) | Handed::Joined(id) => {
             tabs::front_for(ws, true, target, Some(id), raised)
         }
-        Handed::Queued(item) | Handed::AlreadyQueued(item) => {
-            let holder = ws
-                .windows
-                .iter()
-                .find(|w| w.incoming.iter().any(|i| &i.id == item))
-                .map_or(target, |w| &w.title);
-            Some(tabs::Forward::Window(holder.to_string()))
-        }
+        // A row waiting in `stray` (there is no window) has no window to show.
+        Handed::Queued(item) | Handed::AlreadyQueued(item) => ws
+            .windows
+            .iter()
+            .find(|w| w.incoming.iter().any(|i| &i.id == item))
+            .or_else(|| ws.windows.iter().find(|w| w.title == target))
+            .map(|w| tabs::Forward::Window(w.title.clone())),
     }
 }
 
 /// A link another app handed flotilla (`open -a flotilla <url>`, or a link router's
 /// `flotilla://open?…`): taken by the window it names, else the last focused one, else the first
-/// ([`target_window`]), reopened if closed. That window decides what the link does
-/// (`Workspace::receive`), and the window showing the result comes forward ([`handed_front`]).
+/// ([`target_window`]); with no window at all it waits for the first one there is. That window
+/// decides what the link does (`Workspace::receive`), and the window showing the result comes
+/// forward, reopened if closed ([`handed_front`]).
 pub fn open_handed(app: &AppHandle, url: &Url) {
     if app.try_state::<AppState>().is_none() {
         EARLY_LINKS.lock().unwrap().push(url.clone());
         return;
     }
     let h = handoff(url);
-    let set = app.state::<WindowSet>();
-    let last = set
+    let last = app
+        .state::<WindowSet>()
         .last_focused()
         .and_then(|label| tabs::title_of_label(app, &label));
     let state = app.state::<AppState>();
-    let target = target_window(
+    let window = target_window(
         &state.ws.lock().unwrap(),
         h.window.as_deref(),
         last.as_deref(),
-    );
-    let Some(window) = target else {
-        return tabs::notice(app, format!("No window to open {} in.", h.link));
-    };
-    if let Some(entry) = set.entry_for_title(&window).filter(|e| !e.open) {
-        set.open_or_focus(app, &entry.id);
-    }
+    )
+    .unwrap_or_default();
     let front = crate::write::through(app, |ws| {
         let mut handed = None;
         let raised = crate::detach::apply(ws, |ws| {
@@ -771,6 +759,20 @@ mod tests {
             Some(Forward::Detached(h))
         );
         assert_eq!(handed_front(&ws, "Rotary", None, None), None);
+    }
+
+    /// `open_handed`'s path with no window configured: the link waits in `stray`, nothing comes
+    /// forward, and the first window there is takes it.
+    #[test]
+    fn a_link_handed_with_no_window_waits_for_one() {
+        let mut ws = Workspace::default();
+        let doc = "https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrSt01/edit";
+        let window = target_window(&ws, Some("Rotary"), None).unwrap_or_default();
+        let handed = ws.receive(&window, None, doc, DEFAULT_STORE);
+        assert!(matches!(handed, Some(Handed::Queued(_))));
+        assert_eq!(handed_front(&ws, &window, handed.as_ref(), None), None);
+        ws.rebase(two_windows());
+        assert_eq!(ws.windows[0].incoming[0].link, doc);
     }
 
     #[test]

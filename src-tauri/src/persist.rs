@@ -51,11 +51,12 @@ impl Persist {
 
     /// Writes the session of the workspace `snapshot` returns, then `windows.json` beside it from
     /// that workspace and the config windows' colours ([`session::windows_manifest`]), both taken
-    /// inside the writer lock. A no-op (and no snapshot) when this run does not persist.
+    /// inside the writer lock. A no-op (and no snapshot) when this run does not persist. The
+    /// error is the error bar's text, naming which file failed.
     pub fn save(
         &self,
         snapshot: impl FnOnce() -> (Workspace, Vec<(String, Option<String>)>),
-    ) -> std::io::Result<()> {
+    ) -> Result<(), String> {
         let Some(path) = &self.path else {
             return Ok(());
         };
@@ -63,9 +64,10 @@ impl Persist {
         // now, never one older than what the writer before it wrote.
         let _w = self.writing.lock().unwrap();
         let (ws, colours) = snapshot();
-        session::save(path, &ws)?;
+        session::save(path, &ws).map_err(|e| format!("Couldn't save the session: {e}"))?;
         let manifest = session::windows_manifest(&ws, &colours);
         session::write_atomic(&manifest_path(path), manifest.as_bytes())
+            .map_err(|e| format!("Couldn't publish the window list: {e}"))
     }
 }
 
@@ -121,8 +123,8 @@ pub fn save_now(app: &AppHandle) {
         let ws = state.ws.lock().unwrap().clone();
         (ws, state.config.lock().unwrap().colours())
     };
-    if let Err(e) = state.persist.save(snapshot) {
-        crate::tabs::notice(app, format!("Couldn't save the session: {e}"));
+    if let Err(msg) = state.persist.save(snapshot) {
+        crate::tabs::notice(app, msg);
     }
 }
 
@@ -170,6 +172,20 @@ mod tests {
         p.save(|| (ws.clone(), colours.clone())).unwrap();
         let written = std::fs::read_to_string(dir.path().join("windows.json")).unwrap();
         assert_eq!(written, session::windows_manifest(&ws, &colours));
+    }
+
+    #[test]
+    fn each_file_names_its_own_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory where windows.json goes: the session saves, the manifest can't.
+        std::fs::create_dir(dir.path().join("windows.json")).unwrap();
+        let p = Persist::new(Some(dir.path().join("session.json")));
+        let e = p.save(|| (sample(), vec![])).unwrap_err();
+        assert!(e.starts_with("Couldn't publish the window list: "), "{e}");
+        let p = Persist::new(Some(dir.path().join("windows.json/x/session.json")));
+        std::fs::write(dir.path().join("windows.json/x"), "").unwrap();
+        let e = p.save(|| (sample(), vec![])).unwrap_err();
+        assert!(e.starts_with("Couldn't save the session: "), "{e}");
     }
 
     /// The snapshot is taken inside the writer lock, so a write that waited on another can never
