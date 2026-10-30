@@ -75,11 +75,10 @@ pub fn select_tab(id: TabId, webview: Webview, state: State<AppState>) -> Result
 #[tauri::command]
 pub fn unload_tab(id: TabId, webview: Webview, state: State<AppState>) -> Result<(), String> {
     require_chrome(&webview)?;
-    let window = webview.window();
-    if let Some(wv) = window
-        .get_webview(&tabs::label(&id))
-        .filter(|wv| wv.window().label() == window.label())
-    {
+    if state.ws.lock().unwrap().find(&id).is_none() {
+        return Err("unknown tab".into());
+    }
+    if let Some(wv) = tabs::own_webview(&webview.window(), &id) {
         shell_core::web::content::close_content_webview(&wv);
     }
     let active_moved = {
@@ -129,17 +128,64 @@ pub fn new_group(url: String, webview: Webview, state: State<AppState>) -> Resul
     Ok(())
 }
 
-/// Returns tab `id` to the URL it opened with. A tab with no webview yet is already there.
 #[tauri::command]
-pub fn home_tab(id: TabId, webview: Webview, state: State<AppState>) -> Result<(), String> {
+pub fn home_tab(id: TabId, webview: Webview) -> Result<(), String> {
     require_chrome(&webview)?;
-    let home = {
+    home(webview.app_handle(), &id)
+}
+
+/// Opens the row menu for tab `id` at the chrome's `(x, y)`: the Group menu acting on that row.
+#[tauri::command]
+pub fn row_menu(
+    id: TabId,
+    x: f64,
+    y: f64,
+    webview: Webview,
+    state: State<AppState>,
+) -> Result<(), String> {
+    require_chrome(&webview)?;
+    let ms = {
         let ws = state.ws.lock().unwrap();
-        ws.find(&id).ok_or("unknown tab")?.1.home_url.clone()
+        if ws.find(&id).is_none() {
+            return Err("unknown tab".into());
+        }
+        crate::menu::menu_state_for(&ws, Some(&id))
+    };
+    let menu = crate::menu::row_menu(webview.app_handle(), &ms, &id).map_err(|e| e.to_string())?;
+    webview
+        .window()
+        .popup_menu_at(&menu, tauri::LogicalPosition::new(x, y))
+        .map_err(|e| e.to_string())
+}
+
+/// Returns tab `id` to the URL it opened with. A tab with no webview is already there, unless it
+/// is the active tab and its webview failed to build: Home is then a fresh attempt at it.
+pub fn home(app: &AppHandle, id: &TabId) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let (home, retry) = {
+        let ws = state.ws.lock().unwrap();
+        let home = ws.find(id).ok_or("unknown tab")?.1.home_url.clone();
+        let retry = ws.active.as_ref() == Some(id)
+            && !state.created.lock().unwrap().contains(id)
+            && state.failed.lock().unwrap().remove(id);
+        (home, retry)
+    };
+    if retry {
+        tabs::changed(app);
+        return Ok(());
+    }
+    let Some(window) = app.get_window(MAIN_WINDOW) else {
+        return Ok(());
     };
     let url = Url::parse(&home).map_err(|e| e.to_string())?;
-    shell_core::web::content::navigate_to(&webview.window(), &tabs::label(&id), &url)
+    shell_core::web::content::navigate_to(&window, &tabs::label(id), &url)
         .map_err(|e| e.to_string())
+}
+
+/// Applies `op` to the workspace, then brings everything in line with it.
+pub fn mutate(app: &AppHandle, op: impl FnOnce(&mut flotilla_core::model::Workspace)) {
+    op(&mut app.state::<AppState>().ws.lock().unwrap());
+    tabs::changed(app);
 }
 
 /// The chrome's `#content-hole` rect, logical px, top-left origin.
@@ -179,15 +225,11 @@ pub fn set_hole_rect(
 
 /// ⌘W: closes the active tab (a head closes its group).
 pub fn close_active_tab(app: &AppHandle) {
-    {
-        let state = app.state::<AppState>();
-        let mut ws = state.ws.lock().unwrap();
-        let Some(id) = ws.active.clone() else {
-            return;
-        };
-        ws.close_tab(&id);
-    }
-    tabs::changed(app);
+    mutate(app, |ws| {
+        if let Some(id) = ws.active.clone() {
+            ws.close_tab(&id);
+        }
+    });
 }
 
 #[cfg(test)]

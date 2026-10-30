@@ -155,7 +155,8 @@ pub fn sync(app: &AppHandle) {
     push_dto(app);
 }
 
-/// Sends the sidebar DTO to the chrome.
+/// Sends the sidebar DTO to the chrome and rebuilds the menu bar, whose Group menu follows the
+/// workspace.
 pub fn push_dto(app: &AppHandle) {
     let state = app.state::<AppState>();
     let dto = {
@@ -164,6 +165,7 @@ pub fn push_dto(app: &AppHandle) {
         crate::sidebar::sidebar_dto(&ws, &created)
     };
     let _ = app.emit_to(MAIN_WINDOW, "workspace", dto);
+    crate::menu::refresh(app);
 }
 
 /// Shows `msg` in the sidebar's error bar.
@@ -172,7 +174,7 @@ pub fn notice(app: &AppHandle, msg: String) {
 }
 
 /// Tab `id`'s webview, only if it lives in `window` (a popped-out tab's would not).
-fn own_webview(window: &Window, id: &str) -> Option<tauri::Webview> {
+pub(crate) fn own_webview(window: &Window, id: &str) -> Option<tauri::Webview> {
     window
         .get_webview(&label(id))
         .filter(|wv| wv.window().label() == window.label())

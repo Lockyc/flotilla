@@ -65,6 +65,10 @@ async function mountChrome() {
       onUnload(id) {
         invoke("unload_tab", { id }).catch((err) => sb.setError(String(err)));
       },
+      // Right-click: the Group menu, acting on this row.
+      onContextMenu(id, { x, y }) {
+        invoke("row_menu", { id, x, y }).catch((err) => sb.setError(String(err)));
+      },
       onToggleGroup(group, collapsed) {
         invoke("toggle_group", { head: group, collapsed }).catch(() => {});
       },
@@ -109,6 +113,14 @@ listen("notice", (e) => sb && sb.setError(e.payload));
 listen("nav-tab", (e) => sb && sb.selectByOffset(e.payload, { liveOnly: true }));
 listen("jump-tab", (e) => sb && sb.selectByIndex(e.payload));
 listen("find-in-sidebar", () => sb && sb.focusSearch());
+// Group ▸ New Group… (⌘N).
+listen("focus-new-group", () => {
+  const input = document.getElementById("new-group");
+  if (input) {
+    input.focus();
+    input.select();
+  }
+});
 listen("pointer-away", () => sb && sb.pointerAway());
 listen("check-update", () => sb && sb.checkForUpdateNow());
 

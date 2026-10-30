@@ -78,78 +78,11 @@ fn load_state(app: &tauri::App) -> state::AppState {
     }
 }
 
-fn config_path() -> std::path::PathBuf {
+pub(crate) fn config_path() -> std::path::PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("flotilla")
         .join("config.toml")
-}
-
-fn build_app_menu<M: Manager<tauri::Wry>>(
-    manager: &M,
-) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
-    use tauri::menu::{MenuBuilder, SubmenuBuilder};
-
-    let path = config_path();
-    let windows = [shell_core::menu::WindowEntry {
-        id: MAIN_WINDOW.into(),
-        title: "flotilla".into(),
-        open: true,
-        colour: None,
-    }];
-    let spine = shell_core::menu::build_spine(
-        manager,
-        shell_core::menu::SpineConfig {
-            app_name: "flotilla",
-            config_path: &path,
-            windows: &windows,
-        },
-        env!("CARGO_PKG_VERSION"),
-        env!("BUILD_GIT_SHA"),
-        env!("BUILD_DATE"),
-    )?;
-
-    // The Edit submenu owns the clipboard accelerators (⌘C/⌘V/⌘X/⌘A/⌘Z) for content webviews.
-    let edit_menu = SubmenuBuilder::new(manager, "Edit")
-        .undo()
-        .redo()
-        .separator()
-        .cut()
-        .copy()
-        .paste()
-        .select_all()
-        .build()?;
-
-    let nav = shell_core::menu::build_tab_nav(manager, false)?;
-    let nav_refs: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = nav
-        .nav
-        .iter()
-        .map(|i| i as &dyn tauri::menu::IsMenuItem<tauri::Wry>)
-        .collect();
-    let jump_refs: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = nav
-        .jumps
-        .iter()
-        .map(|i| i as &dyn tauri::menu::IsMenuItem<tauri::Wry>)
-        .collect();
-    let tabs_menu = SubmenuBuilder::new(manager, "Tab")
-        .items(&nav_refs)
-        .separator()
-        .item(&spine.close_tab)
-        .item(&spine.pop_out_tab)
-        .item(&spine.find_in_sidebar)
-        .separator()
-        .items(&jump_refs)
-        .build()?;
-
-    MenuBuilder::new(manager)
-        .items(&[
-            &spine.submenus[0], // App
-            &edit_menu,
-            &tabs_menu,
-            &spine.submenus[1], // Config
-            &spine.submenus[2], // Window
-        ])
-        .build()
 }
 
 fn emit_to_main_chrome<S: Serialize + Clone>(app: &tauri::AppHandle, event: &str, payload: S) {
@@ -168,6 +101,7 @@ pub fn run() {
             commands::new_group,
             commands::home_tab,
             commands::unload_tab,
+            commands::row_menu,
             commands::set_hole_rect,
         ])
         .setup(|app| {
@@ -196,11 +130,12 @@ pub fn run() {
             // Restore lazily: only the active tab's webview is created now.
             tabs::sync(app.handle());
 
-            app.set_menu(build_app_menu(app)?)?;
+            app.set_menu(menu::build_app_menu(app.handle())?)?;
             let cfg_path = config_path();
+            // Row context menus' events arrive here too.
             app.on_menu_event(move |app, event| {
                 let id = event.id().as_ref();
-                if shell_core::menu::handle_spine_event(id, &cfg_path) {
+                if shell_core::menu::handle_spine_event(id, &cfg_path) || menu::handle(app, id) {
                     return;
                 }
                 if let Some(action) = shell_core::menu::tab_nav_action(id) {
