@@ -6,16 +6,6 @@ use crate::identity::doc_key;
 use crate::model::{Opened, TabId, Workspace};
 use url::Url;
 
-/// How the shell was asked to go to the URL; mirrors shell-core's `LinkOrigin` so core stays
-/// tauri-free. The rule in `decide` is origin-independent; the parameter carries the origin for
-/// callers and logging.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Origin {
-    NewWindow,
-    Click,
-    Navigation,
-}
-
 /// What the shell does with the navigation.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Decision {
@@ -41,8 +31,9 @@ pub fn parse_group_url(input: &str) -> Result<Url, String> {
 /// Decides what `url`, requested from tab `from`, does. On `Open` this has already mutated `ws`;
 /// the caller must then consume the navigation (return true from shell-core's intercept) so
 /// WebKit does not also load the URL into the `from` webview. Creating or raising the webviews is
-/// the caller's, deferred off the policy callback.
-pub fn decide(ws: &mut Workspace, from: &TabId, url: &Url, _origin: Origin) -> Decision {
+/// the caller's, deferred off the policy callback. The rule is the same however the navigation
+/// was asked for (a new window, a click or a plain navigation).
+pub fn decide(ws: &mut Workspace, from: &TabId, url: &Url) -> Decision {
     let Some((_, group, tab)) = ws.find(from) else {
         return Decision::PassThrough;
     };
@@ -58,8 +49,6 @@ pub fn decide(ws: &mut Workspace, from: &TabId, url: &Url, _origin: Origin) -> D
 mod tests {
     use super::*;
     use crate::model::ConfigWindow;
-
-    const ORIGINS: [Origin; 3] = [Origin::NewWindow, Origin::Click, Origin::Navigation];
 
     fn doc(id: &str) -> Url {
         Url::parse(&format!("https://docs.google.com/document/d/{id}/edit")).unwrap()
@@ -94,9 +83,7 @@ mod tests {
         let Opened::Added(h) = new_group(&mut w, &share) else {
             panic!()
         };
-        for o in ORIGINS {
-            assert_eq!(decide(&mut w, &h, &doc(A), o), Decision::PassThrough);
-        }
+        assert_eq!(decide(&mut w, &h, &doc(A)), Decision::PassThrough);
         assert!(w.windows[0].groups[0].members.is_empty());
         assert_eq!(new_group(&mut w, &doc(A)), Opened::Raised(h.clone()));
 
@@ -111,14 +98,12 @@ mod tests {
 
     #[test]
     fn doc_link_from_head_opens_member() {
-        for o in ORIGINS {
-            let mut w = one_window();
-            let h = head(&mut w);
-            assert!(matches!(
-                decide(&mut w, &h, &doc(A), o),
-                Decision::Open(Opened::Added(_))
-            ));
-        }
+        let mut w = one_window();
+        let h = head(&mut w);
+        assert!(matches!(
+            decide(&mut w, &h, &doc(A)),
+            Decision::Open(Opened::Added(_))
+        ));
     }
 
     #[test]
@@ -133,7 +118,7 @@ mod tests {
             panic!()
         };
         assert_eq!(
-            decide(&mut w, &h2, &doc(A), Origin::Click),
+            decide(&mut w, &h2, &doc(A)),
             Decision::Open(Opened::Raised(m))
         );
         assert!(w.find(&h2).is_some_and(|(_, g, _)| g.members.is_empty()));
@@ -150,9 +135,7 @@ mod tests {
             "https://docs.google.com/document/d/{A}/edit?usp=x"
         ))
         .unwrap();
-        for o in ORIGINS {
-            assert_eq!(decide(&mut w, &m, &u, o), Decision::PassThrough);
-        }
+        assert_eq!(decide(&mut w, &m, &u), Decision::PassThrough);
     }
 
     #[test]
@@ -163,7 +146,7 @@ mod tests {
             panic!()
         };
         assert!(matches!(
-            decide(&mut w, &m, &doc(B), Origin::Navigation),
+            decide(&mut w, &m, &doc(B)),
             Decision::Open(Opened::Added(_))
         ));
     }
@@ -173,10 +156,7 @@ mod tests {
         let mut w = one_window();
         let h = head(&mut w);
         let u = Url::parse("https://drive.google.com/drive/folders/other").unwrap();
-        assert_eq!(
-            decide(&mut w, &h, &u, Origin::Navigation),
-            Decision::PassThrough
-        );
+        assert_eq!(decide(&mut w, &h, &u), Decision::PassThrough);
     }
 
     #[test]
@@ -201,11 +181,9 @@ mod tests {
         let mut w = one_window();
         let h = head(&mut w);
         let u = Url::parse("https://example.com/").unwrap();
-        for o in ORIGINS {
-            assert_eq!(decide(&mut w, &h, &u, o), Decision::PassThrough);
-        }
+        assert_eq!(decide(&mut w, &h, &u), Decision::PassThrough);
         assert_eq!(
-            decide(&mut w, &"t-99".into(), &doc(A), Origin::Click),
+            decide(&mut w, &"t-99".into(), &doc(A)),
             Decision::PassThrough
         );
     }

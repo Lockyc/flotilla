@@ -329,12 +329,7 @@ mod tests {
         ws.activate(&h);
         let mut decision = None;
         let raised = apply(&mut ws, |ws| {
-            decision = Some(flotilla_core::nav::decide(
-                ws,
-                &h,
-                &url(DOC_A),
-                flotilla_core::nav::Origin::Click,
-            ))
+            decision = Some(flotilla_core::nav::decide(ws, &h, &url(DOC_A)))
         });
         assert_eq!(
             decision,

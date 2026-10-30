@@ -6,7 +6,7 @@
 use crate::state::AppState;
 use flotilla_core::identity::{is_tab_id, page_title};
 use flotilla_core::model::{Opened, Tab, TabId, WindowWs, Workspace};
-use flotilla_core::nav::{self, Decision, Origin};
+use flotilla_core::nav::{self, Decision};
 use shell_core::compositing::HoleRect;
 use shell_core::label::{child_label, window_of};
 use shell_core::tabs::pick_live_neighbour;
@@ -399,19 +399,11 @@ fn hooks() -> ContentHooks {
     }
 }
 
-fn origin(o: LinkOrigin) -> Origin {
-    match o {
-        LinkOrigin::NewWindow => Origin::NewWindow,
-        LinkOrigin::Click => Origin::Click,
-        LinkOrigin::Navigation => Origin::Navigation,
-    }
-}
-
 /// shell-core's `intercept`: runs inside WebKit's policy callback, so it only decides and writes the
 /// decision through to the config (under the gate, so no reload lands between the two). On `Open`
 /// the workspace already holds the new or raised tab; showing it is queued for a later turn of the
 /// main loop ([`crate::defer`]), after the policy decision returns.
-fn intercept(app: &AppHandle, label: &str, url: &Url, o: LinkOrigin) -> bool {
+fn intercept(app: &AppHandle, label: &str, url: &Url, _: LinkOrigin) -> bool {
     let Some((_, id)) = tab_of(label) else {
         return false;
     };
@@ -421,7 +413,7 @@ fn intercept(app: &AppHandle, label: &str, url: &Url, o: LinkOrigin) -> bool {
             .map(|(wi, _, t)| (t.detached, ws.windows[wi].title.clone()));
         let mut decision = Decision::PassThrough;
         let raised = crate::detach::apply(ws, |ws| {
-            decision = nav::decide(ws, &id, url, origin(o));
+            decision = nav::decide(ws, &id, url);
         });
         let shown = match &decision {
             Decision::Open(Opened::Added(t) | Opened::Raised(t)) => Some(t.clone()),
