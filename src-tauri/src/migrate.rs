@@ -56,7 +56,7 @@ fn migrate_until(
             &title,
             colour.as_deref(),
         ))?,
-        Some(w) if w.colour.is_none() && colour.is_some() => edit(config_core::edit::edit_window(
+        Some(w) if w.colour.is_none() && colour.is_some() => edit(config_core::edit_window(
             config_path,
             &title,
             None,
@@ -88,7 +88,17 @@ fn migrate_until(
         active: active_id
             .map(|k| BTreeMap::from([(title.clone(), tab_id(&k))]))
             .unwrap_or_default(),
-        recent: v1.recent.clone(),
+        recent: v1
+            .recent
+            .iter()
+            .cloned()
+            .map(|mut g| {
+                for t in std::iter::once(&mut g.head).chain(&mut g.members) {
+                    t.title = page_title(&t.title).to_string();
+                }
+                g
+            })
+            .collect(),
     };
     session::save_session(session_path, &s).map_err(|e| format!("session: {e}"))?;
     Ok(s)
@@ -204,6 +214,7 @@ mod tests {
     const NEWSLETTER: &str = "https://docs.google.com/presentation/d/1AbCdEfGhIjKlMnOpQrSt05/edit";
     const FLYER: &str = "https://docs.google.com/document/d/1FairFlyerAbCdEfGhIjKlMn/edit";
     const OLD: &str = "https://drive.google.com/drive/folders/1OldClosedFolderAbCdEfGhIj";
+    const OLD_DECK: &str = "https://docs.google.com/presentation/d/1AbCdEfGhIjKlMnOpQrSt06/edit";
 
     /// A config before the migration:the starter's header, a top-level name and colour.
     const OLD_CONFIG: &str = "# flotilla config — app-wide settings. Edit and save; flotilla \
@@ -257,7 +268,11 @@ mod tests {
                     false,
                 ),
             ],
-            recent: vec![group(tab("t-5", OLD, "Old", false), vec![], false)],
+            recent: vec![group(
+                tab("t-5", OLD, "Old - Google Drive", false),
+                vec![tab("t-7", OLD_DECK, "Old deck - Google Slides", false)],
+                false,
+            )],
             active: Some("t-2".into()),
         }
     }
@@ -301,6 +316,17 @@ mod tests {
         // The run state: the old active tab, by its new id, and Recent.
         assert_eq!(s.active.get("flotilla"), Some(&id(BUDGET)));
         assert_eq!(s.recent.len(), 1);
+        let titles = |g: &Group| {
+            std::iter::once(&g.head)
+                .chain(&g.members)
+                .map(|t| t.title.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            titles(&s.recent[0]),
+            ["Old", "Old deck"],
+            "Recent drops page suffixes too"
+        );
         let Loaded::Restored(saved) = session::load(&session_path) else {
             panic!("the session is v2 now")
         };

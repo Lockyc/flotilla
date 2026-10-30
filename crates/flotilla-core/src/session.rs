@@ -50,8 +50,9 @@ pub struct V1Session {
 pub enum Loaded {
     Fresh,
     Restored(Session),
-    /// A version 1 file, left in place: its groups are the workspace until they move into the
-    /// config.
+    /// A version 1 file, left in place until its groups move into the config. The workspace is
+    /// built from the config alone, so after a failed migration it lacks them until a later
+    /// launch's migration lands.
     V1(V1Session),
     /// The file was unparseable or from a newer build; it was moved here, not deleted.
     Quarantined {

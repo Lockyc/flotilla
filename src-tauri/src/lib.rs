@@ -131,6 +131,13 @@ fn watch_config(app: tauri::AppHandle, path: std::path::PathBuf) {
                     formatted.unwrap_or(src)
                 }
                 Err(msg) => {
+                    // The home surface shows it while no window is open.
+                    let (handle, error) = (app.clone(), msg.clone());
+                    defer(&app, move || {
+                        handle
+                            .state::<WindowSet>()
+                            .set_load_error(&handle, Some(error))
+                    });
                     tabs::notice(&app, msg);
                     src
                 }
@@ -341,7 +348,8 @@ pub fn run() {
             app.set_theme(cfg.dark_mode.then_some(tauri::Theme::Dark));
             let decls = windows::decls(&cfg);
             app.manage(load_state(session, cfg, config_error.clone()));
-            // Closing the last window quits, popped-out windows and all; they reopen at launch.
+            // Closing the last window quits when no tab is popped out; popped-out tabs reopen at
+            // launch.
             app.manage(
                 WindowSet::new("flotilla", cfg_path.clone(), windows::FlotillaHost)
                     .quit_on_last_close(true),
