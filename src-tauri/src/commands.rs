@@ -547,7 +547,8 @@ pub fn set_home(app: &AppHandle, id: &TabId) -> Result<(), String> {
         if let Some(block) = ws.set_home_blocked(id, current.as_ref()) {
             return Err(crate::menu::set_home_refusal(block));
         }
-        let page = current.as_ref().expect("a tab not at home has a page");
+        // No block and no page: the tab is gone (a reload took it while its row menu was open).
+        let page = current.as_ref().ok_or_else(|| "unknown tab".to_string())?;
         ws.set_home(id, &flotilla_core::identity::home_url(page))
             .map(|new| (id.clone(), new))
             .map_err(crate::menu::set_home_refusal)
