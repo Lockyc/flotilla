@@ -1,29 +1,27 @@
 <svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#3b82f6"/>
-      <stop offset="1" stop-color="#1d4ed8"/>
+      <stop offset="0" stop-color="#f97316"/>
+      <stop offset="1" stop-color="#c2410c"/>
     </linearGradient>
   </defs>
-  <!-- Inset to the macOS icon grid (~824/1024) so it matches other apps' icon sizes. -->
-  <g transform="translate(100 100) scale(0.8047)">
-    <rect x="0" y="0" width="1024" height="1024" rx="224" fill="url(#bg)"/>
+  <!-- Edge-to-edge tile: `plate icon` places it in Apple's icon grid (824 of 1024 px). -->
+  <rect width="1024" height="1024" rx="224" fill="url(#bg)"/>
 
-    <!-- content panel -->
-    <rect x="470" y="232" width="404" height="560" rx="40" fill="#ffffff"/>
-    <g fill="#c7d2e3">
-      <rect x="520" y="300" width="240" height="34" rx="17"/>
-      <rect x="520" y="378" width="304" height="22" rx="11"/>
-      <rect x="520" y="430" width="304" height="22" rx="11"/>
-      <rect x="520" y="482" width="220" height="22" rx="11"/>
-    </g>
+  <!-- the fleet: a smaller ship to each side of the flagship -->
+  <g fill="#ffffff" opacity="0.55">
+    <path d="M158 600 L158 420 L238 600 Z"/>
+    <path d="M110 632 H246 L222 684 H134 Z"/>
+    <path d="M866 600 L866 420 L786 600 Z"/>
+    <path d="M778 632 H914 L890 684 H802 Z"/>
+  </g>
 
-    <!-- sidebar: curated tab pills, one active -->
-    <g>
-      <rect x="150" y="232" width="270" height="104" rx="30" fill="#ffffff" opacity="0.5"/>
-      <rect x="150" y="360" width="270" height="104" rx="30" fill="#ffffff"/>
-      <rect x="150" y="488" width="270" height="104" rx="30" fill="#ffffff" opacity="0.5"/>
-      <rect x="150" y="616" width="270" height="104" rx="30" fill="#ffffff" opacity="0.5"/>
-    </g>
+  <!-- the flagship: pennant, mast, two sails, hull -->
+  <g fill="#ffffff">
+    <path d="M512 190 L592 230 L512 270 Z"/>
+    <rect x="502" y="190" width="20" height="500"/>
+    <path d="M488 290 L488 650 L316 650 Z"/>
+    <path d="M536 340 L536 650 L692 650 Z"/>
+    <path d="M272 690 H752 L696 796 H328 Z"/>
   </g>
 </svg>
