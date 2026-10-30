@@ -82,7 +82,7 @@ A document is open once across every window: two heads or tabs naming the same d
 | `tab_digit_keys` | `"jump"` | What ⌘1/⌘2 do: `jump` — ⌘1–⌘9 go to that tab; `cycle` — ⌘1 next tab, ⌘2 previous, ⌘3–⌘9 go to that tab. **Tab ▸ Cycle Tabs with ⌘1/⌘2** flips it. Hot-reloads. |
 | `auto_update` | `true` | Check for a new release on launch and every 6 hours. `false` stops the automatic checks; **Check for Updates…** still works. Read as each window opens. |
 | `allow_insecure` | `[]` | Hosts whose self-signed or invalid TLS certificate is accepted. Read at launch (restart to change). |
-| `open_tabs_section` | `false` | Pin an **Open** section above the groups, listing every document that is loaded or popped out. Each keeps its row in its group too, so the list never shuffles; ⌘1–⌘9 and tab cycling ignore the section. It grows to 2/5 of the window, then scrolls on its own; its header collapses it. A window's own `open_tabs_section` overrides it. Hot-reloads. |
+| `open_tabs_section` | `false` | Pin an **Open** section above the groups, listing every document that is loaded or popped out under its group, which collapses there as it does below. Each keeps its row in its group too, so the list never shuffles; ⌘1–⌘9 and tab cycling ignore the section. It grows to 2/5 of the window, then scrolls on its own; its header collapses it. A window's own `open_tabs_section` overrides it. Hot-reloads. |
 | `format_on_save` | `false` | Reformat the config in house style on each clean reload. A file that fails to parse is left untouched. |
 
 ## For link routers
