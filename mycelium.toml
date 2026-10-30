@@ -3,7 +3,7 @@ summary = "A macOS workspace where any tab can head a group of documents (usuall
 kind    = "app"
 status  = "active"
 tags    = ["workspace", "tabs", "documents", "google-drive", "macos"]
-stack   = ["rust", "tauri", "typescript"]
+stack   = ["rust", "tauri", "javascript"]
 
 [github]
 topics_extra = ["desktop-app", "tab-management", "tauri-app", "webview", "wkwebview", "google-drive", "productivity"]

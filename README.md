@@ -19,9 +19,9 @@ A macOS workspace for work that spreads across many documents. Each piece of wor
 
 - **Groups form as you work.** Paste a folder or page link into the field at the top of the sidebar (**⌘N**) to open it as a group. Any tab can head a group. A link to a document, clicked in any tab of a group, opens as a member of that group, with no setup.
 - **Each document is open once.** Opening a document that is already open, in any group or popped-out window, brings up the existing tab instead of a second copy.
-- **Pop out.** Any tab can move into its own window (**⌘⇧O**); closing that window puts the tab back in its group.
+- **Pop out.** Any tab can move into its own window (**⌘⇧O**); closing that window (**⌘W**) puts the tab back in its group. A document opened from a popped-out window joins its group in the main window, which comes to the front.
 - **Restored on relaunch.** Every group comes back with its head, its documents and its popped-out windows. Only the active tab loads straight away.
-- **Recent.** Closing a group keeps it: **Group ▸ Recent** reopens it with its documents.
+- **Close and reopen.** **⌘W** closes the active tab and **⌘⇧⌫** its whole group, popped-out windows included. A closed group is kept: choosing it under **Group ▸ Recent** reopens it with its documents, docked in the main window; **Recent ▸ Clear Recent** empties the list.
 - **Find things in the sidebar.** Groups list their documents beneath them, and search covers every group. Right-click a row, or use the **Group** menu, for Home, Make Own Group, Move to Group, Close Tab and Close Group.
 
 Links to other sites leave flotilla for your default browser. Content runs in WKWebView (Safari's engine), so Chrome extensions and Docs offline mode are not available.
