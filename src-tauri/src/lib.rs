@@ -51,24 +51,43 @@ fn window_identity(state: tauri::State<state::AppState>) -> WindowIdentity {
     }
 }
 
-/// Applies a reloaded config: remembers it, rebases the workspace on its windows, themes every
-/// window, retitles the main window, brings the webviews, sidebar and menu bar (its Window entry
-/// and tab shortcuts) in line, and has the chrome re-read its identity. `allow_insecure` is not
-/// applied here; it is read once at launch. The callers hold the write gate, so every window call
-/// is left to the main loop: nothing here waits on the main thread, which may be waiting on the
-/// gate.
-pub(crate) fn apply_config(app: &tauri::AppHandle, cfg: config::Config) {
-    let (theme, title) = (
-        cfg.dark_mode.then_some(tauri::Theme::Dark),
-        cfg.window_title(),
-    );
+/// Applies a reloaded config on the watcher thread: [`reload_model`], then [`refresh_views`],
+/// which reaches the main thread by the main loop. `allow_insecure` is not applied here; it is
+/// read once at launch.
+fn apply_config(app: &tauri::AppHandle, cfg: config::Config) {
+    reload_model(app, cfg);
+    refresh_views(app);
+}
+
+/// Remembers a reloaded config and rebases the workspace on its windows; no view work, so it is
+/// safe under the write gate on any thread.
+pub(crate) fn reload_model(app: &tauri::AppHandle, cfg: config::Config) {
     let state = app.state::<state::AppState>();
     let fresh = flotilla_core::model::Workspace::from_config(&cfg.workspace_windows());
     state.ws.lock().unwrap().rebase(fresh);
     *state.config.lock().unwrap() = cfg;
     *state.menu.lock().unwrap() = None;
+}
+
+/// Brings the views in line with the config in force: themes every window, retitles the main
+/// window, brings the webviews, sidebar and menu bar (its Window entry and tab shortcuts) in line,
+/// and has the chrome re-read its identity. Run by the main loop, which runs it inline when the
+/// caller is already on the main thread: never call it holding the write gate on the main thread.
+pub(crate) fn refresh_views(app: &tauri::AppHandle) {
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
+        let (theme, title) = {
+            let cfg = handle
+                .state::<state::AppState>()
+                .config
+                .lock()
+                .unwrap()
+                .clone();
+            (
+                cfg.dark_mode.then_some(tauri::Theme::Dark),
+                cfg.window_title(),
+            )
+        };
         handle.set_theme(theme);
         if let Some(w) = handle.get_webview_window(MAIN_WINDOW) {
             let _ = w.set_title(&title);

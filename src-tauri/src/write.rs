@@ -589,12 +589,50 @@ pub fn apply(path: &Path, w: &Write) -> Result<(), EditError> {
 /// ([`through`]) and across each reload ([`Gate::reload`]), so a reload never reads a commit half
 /// written, and a format-on-save rewrite never lands between two of a commit's edits. Taken
 /// before `ws`.
+///
+/// Not reentrant: whatever runs under it must not reach anything that takes it again, which is
+/// why it never covers view work (creating or closing a webview can run `intercept` synchronously,
+/// and a main-thread task posted from the main thread runs inline). Taking it twice on one thread
+/// panics rather than hangs.
 #[derive(Default)]
-pub struct Gate(std::sync::Mutex<()>);
+pub struct Gate {
+    lock: std::sync::Mutex<()>,
+    owner: std::sync::Mutex<Option<std::thread::ThreadId>>,
+}
+
+/// The gate, held; released on drop.
+pub struct Held<'a> {
+    gate: &'a Gate,
+    _lock: std::sync::MutexGuard<'a, ()>,
+}
+
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        *self.gate.owner() = None;
+    }
+}
 
 impl Gate {
-    pub fn hold(&self) -> std::sync::MutexGuard<'_, ()> {
-        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    fn owner(&self) -> std::sync::MutexGuard<'_, Option<std::thread::ThreadId>> {
+        self.owner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub fn hold(&self) -> Held<'_> {
+        assert!(
+            !self.held_here(),
+            "the write gate was taken twice on one thread"
+        );
+        let lock = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        *self.owner() = Some(std::thread::current().id());
+        Held {
+            gate: self,
+            _lock: lock,
+        }
+    }
+
+    /// Whether this thread holds the gate.
+    pub fn held_here(&self) -> bool {
+        *self.owner() == Some(std::thread::current().id())
     }
 
     /// Runs `apply` on the config file's contents, read and applied under the gate: whatever the
@@ -607,36 +645,61 @@ impl Gate {
 }
 
 /// Runs `op` on the workspace and writes what it changed to the config, holding the gate across
-/// both. The caller holds neither the gate nor `ws`.
+/// both ([`through_with`]). A failed write reloads the workspace from the file; its views are
+/// brought in line after the gate is released. The caller holds neither the gate nor `ws`, and
+/// does its own view work afterwards as for any change.
 pub fn through<R>(app: &AppHandle, op: impl FnOnce(&mut Workspace) -> R) -> R {
     let state = app.state::<crate::state::AppState>();
-    let _held = state.gate.hold();
-    let (r, writes) = change(&mut state.ws.lock().unwrap(), op);
-    commit(app, &writes);
-    r
+    through_with(
+        &state.gate,
+        &state.ws,
+        &crate::config::config_path(),
+        op,
+        |e| {
+            crate::tabs::notice(app, format!("Couldn't save to the config: {e}"));
+            match crate::config::load(&crate::config::config_path()) {
+                Ok(cfg) => crate::reload_model(app, cfg),
+                Err(msg) => crate::tabs::notice(app, msg),
+            }
+        },
+        || crate::refresh_views(app),
+    )
 }
 
-/// Applies `writes` to the config file, seeding the starter config first when there is none. A
-/// write that fails stops the rest, shows why, and reloads the workspace from the file. The
-/// caller holds the gate.
-fn commit(app: &AppHandle, writes: &[Write]) {
-    if writes.is_empty() {
-        return;
-    }
-    let path = crate::config::config_path();
-    let done = crate::config::create_starter(&path).and_then(|_| {
-        writes
-            .iter()
-            .try_for_each(|w| apply(&path, w))
-            .map_err(|e| e.to_string())
-    });
-    if let Err(e) = done {
-        crate::tabs::notice(app, format!("Couldn't save to the config: {e}"));
-        match crate::config::load(&path) {
-            Ok(cfg) => crate::apply_config(app, cfg),
-            Err(msg) => crate::tabs::notice(app, msg),
+/// [`through`]'s sequence, over its parts: under `gate`, `op` on `ws`, its writes to the config at
+/// `path` (seeding the starter config first when there is none), and on a failed write
+/// `reload(error)`, which must do no view work; then, released, `views()` if a write failed.
+pub(crate) fn through_with<R>(
+    gate: &Gate,
+    ws: &std::sync::Mutex<Workspace>,
+    path: &Path,
+    op: impl FnOnce(&mut Workspace) -> R,
+    reload: impl FnOnce(String),
+    views: impl FnOnce(),
+) -> R {
+    let (r, failed) = {
+        let _held = gate.hold();
+        let (r, writes) = change(&mut ws.lock().unwrap(), op);
+        let written = if writes.is_empty() {
+            Ok(())
+        } else {
+            crate::config::create_starter(path).and_then(|_| {
+                writes
+                    .iter()
+                    .try_for_each(|w| apply(path, w))
+                    .map_err(|e| e.to_string())
+            })
+        };
+        let failed = written.is_err();
+        if let Err(e) = written {
+            reload(e);
         }
+        (r, failed)
+    };
+    if failed {
+        views();
     }
+    r
 }
 
 #[cfg(test)]
@@ -896,6 +959,55 @@ mod tests {
         writer.join().unwrap();
         reader.join().unwrap();
         assert!(src.contains("name = \"Third\""), "{src}");
+    }
+
+    #[test]
+    #[should_panic(expected = "taken twice")]
+    fn the_gate_refuses_to_be_taken_twice_on_one_thread() {
+        let gate = Gate::default();
+        let _first = gate.hold();
+        let _second = gate.hold();
+    }
+
+    /// A commit whose edit fails reloads the model under the gate, and leaves every view hook
+    /// (which may take the gate again, on the same thread) until the gate is released.
+    #[test]
+    fn a_failed_commit_does_its_view_work_after_the_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, source()).unwrap();
+        let gate = Gate::default();
+        let ws = std::sync::Mutex::new(load(&path));
+        // A hand edit renamed group "Two" since the workspace was built: the write misses it.
+        std::fs::write(&path, source().replace("\"Two\"", "\"Renamed\"")).unwrap();
+        let (reloaded, viewed) = (std::cell::Cell::new(false), std::cell::Cell::new(false));
+        through_with(
+            &gate,
+            &ws,
+            &path,
+            |ws| ws.set_collapsed(&id_of(ws, F2), true),
+            |err| {
+                assert!(err.contains("Two"), "{err}");
+                assert!(gate.held_here(), "the model reloads under the gate");
+                reloaded.set(true);
+            },
+            || {
+                assert!(!gate.held_here(), "view work runs after the gate");
+                let _again = gate.hold();
+                viewed.set(true);
+            },
+        );
+        assert!(reloaded.get() && viewed.get());
+        // A commit that lands does no view work of its own: the caller's follows it.
+        through_with(
+            &gate,
+            &ws,
+            &path,
+            |ws| ws.set_collapsed(&id_of(ws, F1), true),
+            |e| panic!("{e}"),
+            || panic!("no view work after a landed commit"),
+        );
+        assert!(!gate.held_here());
     }
 
     #[test]
