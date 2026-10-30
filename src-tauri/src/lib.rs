@@ -69,13 +69,31 @@ pub(crate) fn reload_model(app: &tauri::AppHandle, cfg: config::Config) {
     *state.menu.lock().unwrap() = None;
 }
 
+/// Queues `task` for a later turn of the main loop. `run_on_main_thread` called on the main thread
+/// runs the task inline, inside whatever is on the stack (WebKit's policy callback, a held gate);
+/// posted from another thread it goes through the event-loop proxy and waits its turn.
+pub(crate) fn defer(app: &tauri::AppHandle, task: impl FnOnce() + Send + 'static) {
+    let handle = app.clone();
+    from_another_thread(
+        move |task| {
+            let _ = handle.run_on_main_thread(task);
+        },
+        task,
+    );
+}
+
+/// Calls `post(task)` on a fresh thread.
+fn from_another_thread<T: Send + 'static>(post: impl FnOnce(T) + Send + 'static, task: T) {
+    std::thread::spawn(move || post(task));
+}
+
 /// Brings the views in line with the config in force: themes every window, retitles the main
 /// window, brings the webviews, sidebar and menu bar (its Window entry and tab shortcuts) in line,
-/// and has the chrome re-read its identity. Run by the main loop, which runs it inline when the
-/// caller is already on the main thread: never call it holding the write gate on the main thread.
+/// and has the chrome re-read its identity. Queued for the main loop ([`defer`]), so it is safe
+/// from any caller.
 pub(crate) fn refresh_views(app: &tauri::AppHandle) {
     let handle = app.clone();
-    let _ = app.run_on_main_thread(move || {
+    defer(app, move || {
         let (theme, title) = {
             let cfg = handle
                 .state::<state::AppState>()
@@ -347,4 +365,23 @@ pub fn run() {
                 persist::save_now(app);
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `defer`'s post leaves the caller's thread, so `run_on_main_thread` goes through the
+    /// event-loop proxy instead of running the task inline on a main-thread caller.
+    #[test]
+    fn a_deferred_task_is_posted_from_another_thread() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        from_another_thread(
+            move |task: u8| tx.send((std::thread::current().id(), task)).unwrap(),
+            7,
+        );
+        let (poster, task) = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert_ne!(poster, std::thread::current().id());
+        assert_eq!(task, 7);
+    }
 }

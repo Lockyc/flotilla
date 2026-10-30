@@ -281,7 +281,8 @@ fn origin(o: LinkOrigin) -> Origin {
 
 /// shell-core's `intercept`: runs inside WebKit's policy callback, so it only decides and writes the
 /// decision through to the config (under the gate, so no reload lands between the two). On `Open`
-/// the workspace already holds the new or raised tab; showing it is deferred to the main loop.
+/// the workspace already holds the new or raised tab; showing it is queued for a later turn of the
+/// main loop ([`crate::defer`]), after the policy decision returns.
 fn intercept(app: &AppHandle, label: &str, url: &Url, o: LinkOrigin) -> bool {
     let Some(id) = tab_id(label) else {
         return false;
@@ -298,7 +299,7 @@ fn intercept(app: &AppHandle, label: &str, url: &Url, o: LinkOrigin) -> bool {
         Decision::PassThrough => false,
         Decision::Open(_) => {
             let deferred = app.clone();
-            let _ = app.run_on_main_thread(move || {
+            crate::defer(app, move || {
                 match &front {
                     Some(Forward::Detached(r)) => crate::detach::raise(&deferred, r),
                     Some(Forward::Main) => bring_main_forward(&deferred),
