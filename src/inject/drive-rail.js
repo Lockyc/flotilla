@@ -11,24 +11,62 @@
   var GRID = "data-flotilla-rail-grid";
   var CELL = "data-flotilla-rail";
   var CONTENT = "data-flotilla-rail-content";
-  var OPEN = "[" + GRID + "]:has([" + CELL + "]:hover,[" + CELL + "]:focus-within) [" + CELL + "]";
+  var OPEN_ATTR = "data-flotilla-rail-open";
+  // How long the pointer rests on the rail before it opens, so crossing it does not.
+  var OPEN_DELAY = 250;
+  // Drive sizes its cells with !important rules that load after this sheet, so each selector is
+  // rooted at the grid to outrank them; a cell left at Drive's width would catch the pointer over
+  // the file list.
+  var SHUT = "[" + GRID + "]>[" + CELL + "]";
+  var OPEN = "[" + GRID + "][" + OPEN_ATTR + "]>[" + CELL + "]";
   var CSS =
-    "[" + CELL + "]{width:" + RAIL + "px!important;overflow:hidden!important;" +
-    "position:relative!important;z-index:3!important;" +
+    SHUT + "{width:" + RAIL + "px!important;min-width:0!important;max-width:none!important;" +
+    "overflow:hidden!important;position:relative!important;z-index:3!important;" +
     "-webkit-mask-image:linear-gradient(to right,#000 " + (RAIL - 16) + "px,transparent " + RAIL + "px);" +
     "mask-image:linear-gradient(to right,#000 " + (RAIL - 16) + "px,transparent " + RAIL + "px)}" +
-    OPEN + "{width:auto!important;overflow:visible!important;-webkit-mask-image:none;mask-image:none;" +
-    "background:var(--flotilla-rail-bg)!important}" +
-    "[" + CONTENT + "]{margin-left:var(--flotilla-rail-margin)!important}";
+    OPEN + "{width:var(--flotilla-rail-w)!important;overflow:visible!important;" +
+    "-webkit-mask-image:none;mask-image:none;background:var(--flotilla-rail-bg)!important}" +
+    "[" + GRID + "]>[" + CONTENT + "]{margin-left:var(--flotilla-rail-margin)!important}";
 
   var marked = [];
+  var railGrid = null;
+  var timer = 0;
 
   function clear() {
     marked.forEach(function (m) {
       m[0].removeAttribute(m[1]);
     });
     marked = [];
+    if (railGrid) railGrid.removeAttribute(OPEN_ATTR);
+    railGrid = null;
   }
+
+  function inRail(el) {
+    return !!(el && el.closest && el.closest("[" + CELL + "]"));
+  }
+
+  function open(now) {
+    clearTimeout(timer);
+    timer = setTimeout(function () {
+      if (railGrid) railGrid.setAttribute(OPEN_ATTR, "");
+    }, now ? 0 : OPEN_DELAY);
+  }
+
+  function close() {
+    clearTimeout(timer);
+    if (railGrid) railGrid.removeAttribute(OPEN_ATTR);
+  }
+
+  document.addEventListener("pointerover", function (e) {
+    if (inRail(e.target)) open(false);
+  }, true);
+  document.addEventListener("pointerout", function (e) {
+    if (inRail(e.target) && !inRail(e.relatedTarget)) close();
+  }, true);
+  document.addEventListener("focusin", function (e) {
+    if (inRail(e.target)) open(true);
+    else close();
+  }, true);
 
   function mark(el, attr) {
     el.setAttribute(attr, "");
@@ -74,10 +112,14 @@
     grid.style.setProperty("--flotilla-rail-bg", background(cells[1]));
     grid.style.setProperty("--flotilla-rail-margin",
       margin - (content.getBoundingClientRect().left - g.left - RAIL) + "px");
+    cells.forEach(function (c) {
+      c.style.setProperty("--flotilla-rail-w", c.getBoundingClientRect().width + "px");
+    });
     mark(grid, GRID);
     mark(cells[0], CELL);
     mark(cells[1], CELL);
     mark(content, CONTENT);
+    railGrid = grid;
   }
 
   function start() {
