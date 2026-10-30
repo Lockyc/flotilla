@@ -4,11 +4,9 @@
 //! workspace window with its title; its label only names its OS window and content webviews.
 
 use crate::state::AppState;
-use config_core::edit::edit_window;
-use config_core::{add_window, remove, At};
+use config_core::{add_window, edit_window, remove, At};
 use flotilla_core::model::{TabId, Workspace};
 use shell_core::compositing::HoleRect;
-use shell_core::menu::WindowEntry;
 use shell_core::windows::plan::{Slot, WindowDecl};
 use shell_core::windows::{WindowHost, WindowSet, WindowWrite};
 use std::collections::{HashMap, HashSet};
@@ -30,28 +28,19 @@ pub(crate) fn decls(cfg: &crate::config::Config) -> Vec<WindowDecl> {
     cfg.windows.iter().map(decl).collect()
 }
 
-/// Carries a window's in-place rename or recolour (`decl`, found by its new title in the set's
-/// `entries`, which list the config's windows in config order) into the held config and the
-/// workspace, ahead of the config reload that echoes it. The label shell-core reports is the one
-/// the window held before a rename, which a closed window has already lost, so it is not used.
+/// Carries the window titled `old`'s in-place rename or recolour (`decl`) into the held config and
+/// the workspace, ahead of the config reload that echoes it.
 pub(crate) fn retitle(
     ws: &mut Workspace,
     cfg: &mut crate::config::Config,
-    entries: &[WindowEntry],
+    old: &str,
     decl: &WindowDecl,
 ) {
-    let title = decl.title.trim();
-    let Some(idx) = entries.iter().position(|e| e.title.trim() == title) else {
-        return;
-    };
-    if let Some(old) = cfg.windows.get(idx).map(|w| w.title.trim().to_string()) {
-        if let Some(w) = ws.windows.iter_mut().find(|w| w.title == old) {
-            w.title = title.to_string();
-        }
+    let (old, title) = (old.trim(), decl.title.trim());
+    if let Some(w) = ws.windows.iter_mut().find(|w| w.title.trim() == old) {
+        w.title = title.to_string();
     }
-    config_core::retitle_window(&mut cfg.windows, title, decl.colour.clone(), |t| {
-        entries.iter().any(|e| e.title.trim() == t.trim())
-    });
+    config_core::retitle_window(&mut cfg.windows, old, title, decl.colour.clone());
 }
 
 /// Builds the window for `slot`: the chrome page (`index.html`) under the slot's label, with the
@@ -107,12 +96,11 @@ impl WindowHost for FlotillaHost {
         }
     }
 
-    fn retitled(&self, app: &AppHandle, label: &str, decl: &WindowDecl) {
-        let entries = app.state::<WindowSet>().entries();
+    fn retitled(&self, app: &AppHandle, label: &str, old: &str, decl: &WindowDecl) {
         {
             let state = app.state::<AppState>();
             let mut ws = state.ws.lock().unwrap();
-            retitle(&mut ws, &mut state.config.lock().unwrap(), &entries, decl);
+            retitle(&mut ws, &mut state.config.lock().unwrap(), old, decl);
         }
         let _ = app.emit_to(label, "config-reloaded", ());
         crate::tabs::push_dto(app);
@@ -168,15 +156,6 @@ mod tests {
         crate::config::parse(src).unwrap()
     }
 
-    fn entry(id: &str, title: &str, open: bool) -> WindowEntry {
-        WindowEntry {
-            id: id.into(),
-            title: title.into(),
-            open,
-            colour: None,
-        }
-    }
-
     #[test]
     fn windows_map_to_decls_in_config_order() {
         let c = cfg("[[window]]\ntitle = \" Club \"\ncolour = \"#abc\"\nwidth = 800\nheight = 600\nopen_on_start = false\n[[window]]\ntitle = \"Home\"\n");
@@ -210,9 +189,7 @@ mod tests {
         let mut ws = Workspace::from_config(&c.workspace_windows());
         let head = ws.windows[1].groups[0].head.id.clone();
         ws.activate(&head);
-        // The set reports B renamed to "Newsletters" under B's old label (or one a closed window
-        // since lost): it is found by its new title.
-        let entries = [entry("a", "A", true), entry("stale", "Newsletters", false)];
+        // The set reports B renamed to "Newsletters".
         let decl = WindowDecl {
             title: "Newsletters".into(),
             colour: Some("#2a6f4e".into()),
@@ -220,7 +197,7 @@ mod tests {
             height: 1000.0,
             open_on_start: true,
         };
-        retitle(&mut ws, &mut c, &entries, &decl);
+        retitle(&mut ws, &mut c, " B ", &decl);
         assert_eq!(ws.windows[1].title, "Newsletters");
         assert_eq!(ws.windows[1].groups.len(), 1);
         assert_eq!(c.windows[1].title, "Newsletters");

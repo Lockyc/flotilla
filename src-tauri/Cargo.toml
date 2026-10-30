@@ -20,7 +20,7 @@ chrome-core = { git = "https://github.com/Lockyc/chrome-core", rev = "ee96b87e95
 # Shared release tooling + build_stamp. build.rs materializes scripts/*.sh (git-ignored) and stamps
 # BUILD_GIT_SHA/BUILD_DATE. default-features=false keeps the build-dep zero-tauri (resolver 2 keeps
 # it separate from the runtime-featured [dependencies] entry below). Pinned by rev.
-shell-core = { git = "https://github.com/Lockyc/shell-core", rev = "f9f78b9eade018ab0a31b77fac96956b286f1799", default-features = false }
+shell-core = { git = "https://github.com/Lockyc/shell-core", rev = "77febfa5175c57568e1e7271b276e370130a1ae9", default-features = false }
 
 [dependencies]
 tauri = { version = "2", features = ["unstable", "devtools"] }
@@ -31,12 +31,12 @@ serde_json = "1"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 # Same rev as the build-dep above — bump both in lockstep.
-shell-core = { git = "https://github.com/Lockyc/shell-core", rev = "f9f78b9eade018ab0a31b77fac96956b286f1799", features = ["runtime"] }
+shell-core = { git = "https://github.com/Lockyc/shell-core", rev = "77febfa5175c57568e1e7271b276e370130a1ae9", features = ["runtime"] }
 flotilla-core = { path = "../crates/flotilla-core" }
 dirs = "5"
 toml = "0.8"
 # House-style formatter, starter-config seeding and path resolution, shared with curator, warden and lector. Pinned by rev, same as curator.
-config-core = { git = "https://github.com/Lockyc/config-core", rev = "b7ba40f1dff382dfe1dd6c1390a30e527551e23f" }
+config-core = { git = "https://github.com/Lockyc/config-core", rev = "3a92590c2df61f5a867a4cecc6180c66c51b9039" }
 url = "2"
 
 [dev-dependencies]
