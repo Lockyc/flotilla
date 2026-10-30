@@ -17,6 +17,9 @@ use tauri::{AppHandle, Emitter, Manager, Url, Window};
 /// The loading bar's colour (sRGB, 0–1): the chrome's neutral blue.
 const BAR_RGBA: (f64, f64, f64, f64) = (0.039, 0.518, 1.0, 1.0);
 
+/// Narrows Google Drive's left navigation to an icon rail; a no-op on every other page.
+const DRIVE_RAIL_JS: &str = include_str!("../../src/inject/drive-rail.js");
+
 /// The content webview label for tab `id` in the main window.
 pub fn label(id: &str) -> String {
     format!("{}:{id}", crate::MAIN_WINDOW)
@@ -210,7 +213,7 @@ pub(crate) fn create(window: &Window, t: &Target, hole: HoleRect) -> Result<(), 
         session: &t.store,
         hole,
         bar_rgba: BAR_RGBA,
-        extra_init: &[],
+        extra_init: &[DRIVE_RAIL_JS],
     };
     create_content_webview(window, &spec, hooks())
         .map(|_| ())
