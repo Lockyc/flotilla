@@ -73,6 +73,11 @@ shell-dev: (_core-patch "dev" "shell")
 [group("shell")]
 shell-pin: (_core-patch "pin" "shell")
 
+# Regenerate src-tauri/icons from icon.svg through plate (github.com/lockyc/plate)
+[group("dist")]
+icon:
+    bash scripts/icon.sh
+
 # Build the release .app bundle (needs the Tauri CLI: `cargo install tauri-cli --version ^2`)
 [group("dist")]
 build:
