@@ -84,6 +84,25 @@ pub fn doc_key(store: &str, url: &Url) -> Option<DocKey> {
     })
 }
 
+/// The key `url` has as a group head: [`doc_key`], or for a Drive `open?id=<id>` share link the
+/// file `<id>` names. Only the link's redirect reveals whether that is a document or a folder, so
+/// the head is keyed by the id either way: a document's redirect then keys as the head itself
+/// (no member), and a folder's is no document at all. Members still need [`doc_key`].
+pub fn head_doc_key(store: &str, url: &Url) -> Option<DocKey> {
+    doc_key(store, url).or_else(|| {
+        let host = url.host_str()?;
+        if !matches!(host, "docs.google.com" | "drive.google.com") || url.path() != "/open" {
+            return None;
+        }
+        let (_, id) = url.query_pairs().find(|(k, _)| k == "id")?;
+        valid_file_id(&id).then(|| DocKey {
+            store: store.to_string(),
+            provider: Google.name().to_string(),
+            id: id.into_owned(),
+        })
+    })
+}
+
 const NOISE_PARAMS: &[&str] = &["usp", "pli", "authuser", "ouid", "resourcekey"];
 
 /// A URL normalised for comparing heads: lowercase host without `www.`, no fragment, no trailing
@@ -179,6 +198,27 @@ mod tests {
             assert_eq!(key("default", &u), None, "{u}");
         }
         assert_eq!(id_of("https://docs.google.com/open?id=O1"), None);
+    }
+
+    #[test]
+    fn an_open_id_share_link_heads_as_its_file() {
+        let head = |s: &str| head_doc_key("default", &Url::parse(s).unwrap()).map(|k| k.id);
+        for u in [
+            format!("https://drive.google.com/open?id={ID}"),
+            format!("https://drive.google.com/open?usp=sharing&id={ID}"),
+            format!("https://docs.google.com/open?id={ID}"),
+            format!("https://docs.google.com/document/d/{ID}/edit"),
+        ] {
+            assert_eq!(head(&u).as_deref(), Some(ID), "{u}");
+        }
+        for u in [
+            "https://drive.google.com/open?id=short".to_string(),
+            "https://drive.google.com/open".into(),
+            format!("https://drive.google.com/drive/folders/{ID}"),
+            format!("https://example.com/open?id={ID}"),
+        ] {
+            assert_eq!(head(&u), None, "{u}");
+        }
     }
 
     #[test]

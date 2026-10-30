@@ -6,16 +6,17 @@
 //! raises the existing tab. The registry is not a separate index: it is derived by scanning the
 //! tabs, so it cannot drift from them.
 
-use crate::identity::{doc_key, head_key, DocKey, HEAD_PROVIDER};
+use crate::identity::{doc_key, head_doc_key, head_key, DocKey, HEAD_PROVIDER};
 use serde::{Deserialize, Serialize};
 use shell_core::tabs::pick_live_neighbour;
 use url::Url;
 
-/// A tab's identity within its group's login `store`: the document it opens, else (a head that is
-/// not a document) its `head_key`. The one rule every operation compares by, so a document is the
-/// same identity whether it heads a group or is a member, and the same URL in two stores is two.
+/// A tab's identity within its group's login `store`: the document it opens (`head_doc_key`, which
+/// for a member is its `doc_key`), else (a head that is not a document) its `head_key`. The one
+/// rule every operation compares by, so a document is the same identity whether it heads a group
+/// or is a member, and the same URL in two stores is two.
 fn identity(store: &str, url: &Url) -> DocKey {
-    doc_key(store, url).unwrap_or_else(|| DocKey {
+    head_doc_key(store, url).unwrap_or_else(|| DocKey {
         store: store.to_string(),
         provider: HEAD_PROVIDER.to_string(),
         id: head_key(url),
@@ -99,7 +100,8 @@ impl Workspace {
     /// nothing on disk that is derivable: re-derives every tab's key (groups and recent) from its
     /// `home_url` and group store, drops later open members whose key now repeats an earlier
     /// open tab's (heads are never dropped), clears `active` unless it names an open docked tab,
-    /// and raises `next_id` to at least every restored id (dropped tabs included) so a new tab never reuses one.
+    /// and raises `next_id` to at least every id still present once unparseable members are gone
+    /// (duplicate members, dropped after it, included) so a new tab never reuses a restored one.
     pub fn rekey_and_repair(&mut self) {
         for g in self.groups.iter_mut().chain(self.recent.iter_mut()) {
             let store = g.store.clone();

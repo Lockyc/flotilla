@@ -61,6 +61,30 @@ mod tests {
         }
     }
 
+    /// A pasted `open?id=` share link heads one group: its redirect to the document is the head
+    /// itself, not a member, and a document already open is raised instead of headed twice.
+    #[test]
+    fn an_open_id_head_redirecting_to_its_document_stays_one_tab() {
+        let share = Url::parse(&format!("https://drive.google.com/open?id={A}")).unwrap();
+        let mut w = Workspace::default();
+        let Opened::Added(h) = w.new_group(&share, "default") else {
+            panic!()
+        };
+        for o in ORIGINS {
+            assert_eq!(decide(&mut w, &h, &doc(A), o), Decision::PassThrough);
+        }
+        assert!(w.groups[0].members.is_empty());
+        assert_eq!(w.new_group(&doc(A), "default"), Opened::Raised(h.clone()));
+
+        let mut w = Workspace::default();
+        let f = head(&mut w);
+        let Some(Opened::Added(m)) = w.open_from(&f, &doc(B)) else {
+            panic!()
+        };
+        let share = Url::parse(&format!("https://drive.google.com/open?id={B}")).unwrap();
+        assert_eq!(w.new_group(&share, "default"), Opened::Raised(m));
+    }
+
     #[test]
     fn doc_link_from_head_opens_member() {
         for o in ORIGINS {
