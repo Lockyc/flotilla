@@ -4,7 +4,7 @@
 
 A macOS workspace where any tab can head a group of documents (usually a Google Drive folder). Documents opened from a tab list beneath it, each document is open once, and the session is restored on relaunch.
 
-**Status:** early, in development. The window currently opens an empty workspace.
+**Status:** early, in development. Paste a folder or page link into the field at the top of the sidebar to open it as a group.
 
 ## Build and run
 
