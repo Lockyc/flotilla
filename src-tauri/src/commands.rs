@@ -233,7 +233,8 @@ pub fn handed_front(
 /// `flotilla://open?…`): taken by the window it names, else the last focused one, else the first
 /// ([`target_window`]); with no window at all it waits for the first one there is. That window
 /// decides what the link does (`Workspace::receive`), and the window showing the result comes
-/// forward, reopened if closed ([`handed_front`]).
+/// forward, reopened if closed ([`handed_front`]). A group or member whose config write fails
+/// leaves the link queued instead ([`requeue`]).
 pub fn open_handed(app: &AppHandle, url: &Url) {
     if app.try_state::<AppState>().is_none() {
         EARLY_LINKS.lock().unwrap().push(url.clone());
@@ -244,25 +245,61 @@ pub fn open_handed(app: &AppHandle, url: &Url) {
         .state::<WindowSet>()
         .last_focused()
         .and_then(|label| tabs::title_of_label(app, &label));
-    let state = app.state::<AppState>();
-    let window = target_window(
-        &state.ws.lock().unwrap(),
-        h.window.as_deref(),
-        last.as_deref(),
-    )
-    .unwrap_or_default();
-    let front = crate::write::through(app, |ws| {
-        let mut handed = None;
-        let raised = crate::detach::apply(ws, |ws| {
-            handed = match &h.problem {
-                Some(problem) => ws.reject(&window, &h.link, problem.clone()),
-                None => ws.receive(&window, h.group.as_deref(), &h.link, DEFAULT_STORE),
-            }
-        });
-        handed_front(ws, &window, handed.as_ref(), raised)
-    });
-    tabs::bring(app, front.as_ref());
+    let placed = crate::write::through_or(
+        app,
+        |ws| place(ws, &h, last.as_deref()),
+        |ws, placed| requeue(ws, &h, last.as_deref(), placed),
+    );
+    tabs::bring(app, placed.front.as_ref());
     tabs::changed(app);
+}
+
+/// Where a handed link went: its window, what that window did with it, and the window to bring
+/// forward.
+#[derive(Debug, PartialEq)]
+pub struct Placed {
+    pub window: String,
+    pub handed: Option<Handed>,
+    pub front: Option<tabs::Forward>,
+}
+
+/// `open_handed`'s change: the target window is resolved on the workspace that then takes the
+/// link, so no reload can remove it in between.
+pub fn place(ws: &mut flotilla_core::model::Workspace, h: &Handoff, last: Option<&str>) -> Placed {
+    let window = target_window(ws, h.window.as_deref(), last).unwrap_or_default();
+    let mut handed = None;
+    let raised = crate::detach::apply(ws, |ws| {
+        handed = match &h.problem {
+            Some(problem) => ws.reject(&window, &h.link, problem.clone()),
+            None => ws.receive(&window, h.group.as_deref(), &h.link, DEFAULT_STORE),
+        }
+    });
+    let front = handed_front(ws, &window, handed.as_ref(), raised);
+    Placed {
+        window,
+        handed,
+        front,
+    }
+}
+
+/// After the config write behind `placed` failed: a new group or member the reload took away is
+/// queued under its window instead (the last focused or first, if that window went too).
+pub fn requeue(
+    ws: &mut flotilla_core::model::Workspace,
+    h: &Handoff,
+    last: Option<&str>,
+    placed: &mut Placed,
+) {
+    let (Some(Handed::Grouped(id)) | Some(Handed::Joined(id))) = &placed.handed else {
+        return;
+    };
+    if ws.find(id).is_some() {
+        return;
+    }
+    let window = target_window(ws, Some(&placed.window), last).unwrap_or_default();
+    placed.handed = ws.queue(&window, &h.link, None);
+    placed.front = handed_front(ws, &window, placed.handed.as_ref(), None);
+    placed.window = window;
 }
 
 /// Opens the links handed over before setup; run at its end.
@@ -761,18 +798,59 @@ mod tests {
         assert_eq!(handed_front(&ws, "Rotary", None, None), None);
     }
 
-    /// `open_handed`'s path with no window configured: the link waits in `stray`, nothing comes
-    /// forward, and the first window there is takes it.
+    /// With no window configured, a handed link waits in `stray`, nothing comes forward, and the
+    /// first window there is takes it.
     #[test]
     fn a_link_handed_with_no_window_waits_for_one() {
         let mut ws = Workspace::default();
         let doc = "https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrSt01/edit";
-        let window = target_window(&ws, Some("Rotary"), None).unwrap_or_default();
-        let handed = ws.receive(&window, None, doc, DEFAULT_STORE);
-        assert!(matches!(handed, Some(Handed::Queued(_))));
-        assert_eq!(handed_front(&ws, &window, handed.as_ref(), None), None);
+        let placed = place(
+            &mut ws,
+            &parse(&format!("flotilla://open?window=Rotary&url={doc}")),
+            None,
+        );
+        assert!(matches!(placed.handed, Some(Handed::Queued(_))));
+        assert_eq!(placed.front, None);
         ws.rebase(two_windows());
         assert_eq!(ws.windows[0].incoming[0].link, doc);
+    }
+
+    /// A failed write's reload takes the new group away: the link waits under Incoming instead,
+    /// in its window, or the first when that window went too.
+    #[test]
+    fn a_handed_link_whose_write_failed_is_queued() {
+        let folder = "https://drive.google.com/drive/folders/f1";
+        let h = parse(&format!("flotilla://open?window=Work&url={folder}"));
+        let mut ws = two_windows();
+        let mut placed = place(&mut ws, &h, None);
+        assert!(matches!(placed.handed, Some(Handed::Grouped(_))));
+        ws.rebase(two_windows());
+        requeue(&mut ws, &h, None, &mut placed);
+        assert!(matches!(placed.handed, Some(Handed::Queued(_))));
+        assert_eq!(placed.front, Some(Forward::Window("Work".into())));
+        assert_eq!(ws.windows[1].incoming[0].link, folder);
+
+        let mut ws = two_windows();
+        let mut placed = place(&mut ws, &h, None);
+        ws.rebase(Workspace::from_config(&[ConfigWindow {
+            title: "Rotary".into(),
+            groups: vec![],
+        }]));
+        requeue(&mut ws, &h, None, &mut placed);
+        assert_eq!(placed.window, "Rotary");
+        assert_eq!(ws.windows[0].incoming[0].link, folder);
+    }
+
+    /// A tab the reload kept, or a link that was only queued or raised, is left as it is.
+    #[test]
+    fn requeue_leaves_what_survived() {
+        let folder = "https://drive.google.com/drive/folders/f1";
+        let h = parse(folder);
+        let mut ws = two_windows();
+        let mut placed = place(&mut ws, &h, None);
+        let before = (ws.clone(), placed.handed.clone());
+        requeue(&mut ws, &h, None, &mut placed);
+        assert_eq!((ws, placed.handed), before);
     }
 
     #[test]

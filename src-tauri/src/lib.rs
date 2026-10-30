@@ -368,6 +368,8 @@ pub fn run() {
             tabs::sync(handle);
             detach::reconcile(handle);
             commands::open_early_links(handle);
+            // `windows.json` reflects the config in force from launch, not from the first change.
+            persist::mark_dirty(handle);
 
             let nav_handle = handle.clone();
             shell_core::mouse_nav::install(move || tabs::focused_webview(&nav_handle));

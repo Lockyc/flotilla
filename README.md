@@ -88,7 +88,7 @@ A document is open once across every window: two heads or tabs naming the same d
 
 flotilla takes `flotilla://open?window=<title>&group=<name>&url=<link>`, every value percent-encoded. `window` names the window to take the link (else the last focused one), and `group` the group in it a document joins (else it waits under Incoming). Launch it with `open -b au.lsjc.flotilla '<that URL>'`.
 
-The windows and their groups are published in `~/Library/Application Support/au.lsjc.flotilla/windows.json`, rewritten whenever they change. Windows are in config order and groups in sidebar order; `colour` is `null` for a window without one:
+The windows and their groups are published in `~/Library/Application Support/au.lsjc.flotilla/windows.json`, written at launch and whenever they change. Windows are in config order and groups in sidebar order; `colour` is `null` for a window without one:
 
 ```json
 {"version":1,"windows":[{"title":"Rotary","colour":"#17458f","groups":["Rotary (interim)","Bulletins"]}]}

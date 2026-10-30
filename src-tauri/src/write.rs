@@ -673,7 +673,18 @@ impl Gate {
 /// brought in line after the gate is released. The caller holds neither the gate nor `ws`, and
 /// does its own view work afterwards as for any change.
 pub fn through<R>(app: &AppHandle, op: impl FnOnce(&mut Workspace) -> R) -> R {
-    written(app, |ws| change(ws, op))
+    written(app, |ws| change(ws, op), |_, _| {})
+}
+
+/// [`through`], and when the write fails, `rescue` on the reloaded workspace and `op`'s result,
+/// still under the gate: what `op` did that only the config would have kept is put back another
+/// way (a handed link the reload took out of its group waits under Incoming).
+pub fn through_or<R>(
+    app: &AppHandle,
+    op: impl FnOnce(&mut Workspace) -> R,
+    rescue: impl FnOnce(&mut Workspace, &mut R),
+) -> R {
+    written(app, |ws| change(ws, op), rescue)
 }
 
 /// [`through`] for an operation that re-keys one tab ([`change_rekey`]): Set Home to Current
@@ -682,11 +693,15 @@ pub fn through_rekey<E>(
     app: &AppHandle,
     op: impl FnOnce(&mut Workspace) -> Result<(TabId, TabId), E>,
 ) -> Result<TabId, E> {
-    written(app, |ws| change_rekey(ws, op))
+    written(app, |ws| change_rekey(ws, op), |_, _| {})
 }
 
 /// [`through_with`] on the app's gate, workspace and config file.
-fn written<R>(app: &AppHandle, run: impl FnOnce(&mut Workspace) -> (R, Vec<Write>)) -> R {
+fn written<R>(
+    app: &AppHandle,
+    run: impl FnOnce(&mut Workspace) -> (R, Vec<Write>),
+    rescue: impl FnOnce(&mut Workspace, &mut R),
+) -> R {
     let state = app.state::<crate::state::AppState>();
     through_with(
         &state.gate,
@@ -700,6 +715,7 @@ fn written<R>(app: &AppHandle, run: impl FnOnce(&mut Workspace) -> (R, Vec<Write
                 Err(msg) => crate::tabs::notice(app, msg),
             }
         },
+        rescue,
         || crate::refresh_views(app),
     )
 }
@@ -707,18 +723,20 @@ fn written<R>(app: &AppHandle, run: impl FnOnce(&mut Workspace) -> (R, Vec<Write
 /// [`through`]'s sequence, over its parts: under `gate`, `run` on `ws` (a change and the writes
 /// it implies: [`change`] or [`change_rekey`]), its writes to the config at `path` (seeding the
 /// starter config first when there is none), and on a failed write `reload(error)`, which must
-/// do no view work; then, released, `views()` if a write failed.
+/// do no view work, then `rescue` on the reloaded `ws` and `run`'s result; then, released,
+/// `views()` if a write failed.
 pub(crate) fn through_with<R>(
     gate: &Gate,
     ws: &std::sync::Mutex<Workspace>,
     path: &Path,
     run: impl FnOnce(&mut Workspace) -> (R, Vec<Write>),
     reload: impl FnOnce(String),
+    rescue: impl FnOnce(&mut Workspace, &mut R),
     views: impl FnOnce(),
 ) -> R {
     let (r, failed) = {
         let _held = gate.hold();
-        let (r, writes) = run(&mut ws.lock().unwrap());
+        let (mut r, writes) = run(&mut ws.lock().unwrap());
         let written = if writes.is_empty() {
             Ok(())
         } else {
@@ -732,6 +750,7 @@ pub(crate) fn through_with<R>(
         let failed = written.is_err();
         if let Err(e) = written {
             reload(e);
+            rescue(&mut ws.lock().unwrap(), &mut r);
         }
         (r, failed)
     };
@@ -1114,15 +1133,25 @@ mod tests {
         // A hand edit renamed group "Two" since the workspace was built: the write misses it.
         std::fs::write(&path, source().replace("\"Two\"", "\"Renamed\"")).unwrap();
         let (reloaded, viewed) = (std::cell::Cell::new(false), std::cell::Cell::new(false));
-        through_with(
+        let rescued = through_with(
             &gate,
             &ws,
             &path,
-            |ws| change(ws, |ws| ws.set_collapsed(&id_of(ws, F2), true)),
+            |ws| {
+                change(ws, |ws| {
+                    ws.set_collapsed(&id_of(ws, F2), true);
+                    false
+                })
+            },
             |err| {
                 assert!(err.contains("Two"), "{err}");
                 assert!(gate.held_here(), "the model reloads under the gate");
                 reloaded.set(true);
+            },
+            |_, rescued| {
+                assert!(reloaded.get(), "the rescue follows the reload");
+                assert!(gate.held_here(), "the rescue runs under the gate");
+                *rescued = true;
             },
             || {
                 assert!(!gate.held_here(), "view work runs after the gate");
@@ -1130,7 +1159,7 @@ mod tests {
                 viewed.set(true);
             },
         );
-        assert!(reloaded.get() && viewed.get());
+        assert!(reloaded.get() && rescued && viewed.get());
         // A commit that lands does no view work of its own: the caller's follows it.
         through_with(
             &gate,
@@ -1138,6 +1167,7 @@ mod tests {
             &path,
             |ws| change(ws, |ws| ws.set_collapsed(&id_of(ws, F1), true)),
             |e| panic!("{e}"),
+            |_, _| panic!("no rescue after a landed commit"),
             || panic!("no view work after a landed commit"),
         );
         assert!(!gate.held_here());

@@ -141,17 +141,14 @@ pub const MANIFEST_VERSION: u32 = 1;
 
 /// `windows.json`, the file link routers read to offer flotilla's windows and groups:
 /// `{"version":1,"windows":[{"title","colour","groups":[<group name>…]}]}`, windows in config
-/// order and each one's groups in sidebar order. `colours` is each config window's title and
-/// accent; a window missing from it is neutral (`null`).
-pub fn windows_manifest(ws: &Workspace, colours: &[(String, Option<String>)]) -> String {
+/// order and each one's groups in sidebar order. `colour_of` is the accent of the config window
+/// titled so; `None` is neutral (`null`).
+pub fn windows_manifest(ws: &Workspace, colour_of: impl Fn(&str) -> Option<String>) -> String {
     let windows: Vec<serde_json::Value> = ws
         .windows
         .iter()
         .map(|w| {
-            let colour = colours
-                .iter()
-                .find(|(t, _)| t.trim() == w.title.trim())
-                .and_then(|(_, c)| c.clone());
+            let colour = colour_of(&w.title);
             let groups: Vec<&str> = w.groups.iter().map(|g| g.head.title.as_str()).collect();
             serde_json::json!({ "title": w.title, "colour": colour, "groups": groups })
         })
@@ -285,11 +282,8 @@ mod tests {
         };
         w.set_title(&w.windows[0].groups[0].head.id.clone(), "Rotary (interim)");
         w.set_title(&h4, "Bulletins");
-        let colours = [
-            ("B".to_string(), None),
-            (" A ".to_string(), Some("#17458f".to_string())),
-        ];
-        let m: serde_json::Value = serde_json::from_str(&windows_manifest(&w, &colours)).unwrap();
+        let colour_of = |t: &str| (t == "A").then(|| "#17458f".to_string());
+        let m: serde_json::Value = serde_json::from_str(&windows_manifest(&w, colour_of)).unwrap();
         assert_eq!(
             m,
             serde_json::json!({

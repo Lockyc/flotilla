@@ -374,7 +374,9 @@ impl Workspace {
 
     /// The index of the window titled `title` (compared trimmed).
     pub fn window_index(&self, title: &str) -> Option<usize> {
-        self.windows.iter().position(|w| w.title == title.trim())
+        self.windows
+            .iter()
+            .position(|w| w.title.trim() == title.trim())
     }
 
     /// Makes `id` the active tab of its window, expanding its group if it is a member of a
@@ -773,7 +775,7 @@ impl Workspace {
             self.windows[wi]
                 .groups
                 .iter()
-                .find(|g| g.head.title == name.trim())
+                .find(|g| g.head.title.trim() == name.trim())
                 .map(|g| g.head.id.clone())
         });
         match head.and_then(|h| self.open_from(&h, &url)) {
@@ -789,6 +791,13 @@ impl Workspace {
     /// is queued in any window already; with no window at all, in `stray`. `None`, and nothing
     /// done, when the link is blank, or there is no such window but others.
     pub fn reject(&mut self, window: &str, link: &str, problem: String) -> Option<Handed> {
+        self.queue(window, link, Some(problem))
+    }
+
+    /// Queues `link` under window `window`, with `problem` if it can't be opened, unless it is
+    /// queued in any window already; with no window at all, in `stray`. `None`, and nothing
+    /// done, when the link is blank, or there is no such window but others.
+    pub fn queue(&mut self, window: &str, link: &str, problem: Option<String>) -> Option<Handed> {
         if link.trim().is_empty() {
             return None;
         }
@@ -796,7 +805,7 @@ impl Workspace {
             true => None,
             false => Some(self.window_index(window)?),
         };
-        Some(self.enqueue(wi, link, Some(problem)))
+        Some(self.enqueue(wi, link, problem))
     }
 
     /// Opens Incoming item `id` into the group `head` belongs to ([`Self::open_from`]), and on
@@ -1932,6 +1941,17 @@ mod tests {
         assert_eq!(active(&w), Some(m));
         assert!(queue(&w, W).is_empty());
         assert!(queue(&w, "V").is_empty(), "its row went with the join");
+    }
+
+    #[test]
+    fn receive_matches_a_group_name_trimmed_on_both_sides() {
+        let (mut w, h1) = fleet();
+        w.set_title(&h1, " Fleet ");
+        let Some(Handed::Joined(m)) = w.receive(W, Some("Fleet "), doc(1).as_str(), "default")
+        else {
+            panic!()
+        };
+        assert_eq!(member_ids(&w, &h1), vec![m]);
     }
 
     #[test]
