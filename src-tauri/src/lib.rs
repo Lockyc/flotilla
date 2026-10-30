@@ -223,9 +223,12 @@ pub fn run() {
                     }
                     return;
                 }
-                // Window ▸ <the main window>: the only window the spine lists.
+                // Window ▸ <the main window>: the only window the spine lists. muda flips a check
+                // item's tick on click; the rebuild puts it back.
                 if shell_core::menu::selected_window(id) == Some(MAIN_WINDOW) {
                     tabs::bring_main_forward(app);
+                    *app.state::<state::AppState>().menu.lock().unwrap() = None;
+                    menu::refresh(app);
                     return;
                 }
                 match id {
