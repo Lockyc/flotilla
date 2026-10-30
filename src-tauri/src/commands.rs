@@ -54,7 +54,7 @@ pub fn startup_notice(state: State<AppState>) -> Option<String> {
     state.notice.clone()
 }
 
-/// Selecting a popped-out tab's row raises its window instead ([`crate::detach::divert`]).
+/// Selecting a popped-out tab's row raises its window instead ([`mutate`]).
 #[tauri::command]
 pub fn select_tab(id: TabId, webview: Webview, state: State<AppState>) -> Result<(), String> {
     require_chrome(&webview)?;
@@ -63,7 +63,7 @@ pub fn select_tab(id: TabId, webview: Webview, state: State<AppState>) -> Result
     }
     // An explicit selection is a fresh attempt at a tab whose webview failed to build.
     state.failed.lock().unwrap().remove(&id);
-    crate::detach::raising(webview.app_handle(), |ws| ws.activate(&id));
+    mutate(webview.app_handle(), |ws| ws.activate(&id));
     Ok(())
 }
 
@@ -147,7 +147,7 @@ pub fn toggle_group(
 pub fn new_group(url: String, webview: Webview) -> Result<(), String> {
     require_chrome(&webview)?;
     let url = parse_group_url(&url)?;
-    crate::detach::raising(webview.app_handle(), |ws| {
+    mutate(webview.app_handle(), |ws| {
         ws.new_group(&url, DEFAULT_STORE);
     });
     Ok(())
@@ -207,9 +207,13 @@ pub fn home(app: &AppHandle, id: &TabId) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-/// Applies `op` to the workspace, then brings everything in line with it.
+/// Applies `op` to the workspace, raises the window of a popped-out tab it activated
+/// ([`crate::detach::apply`]), then brings everything in line with it.
 pub fn mutate(app: &AppHandle, op: impl FnOnce(&mut flotilla_core::model::Workspace)) {
-    op(&mut app.state::<AppState>().ws.lock().unwrap());
+    let raised = crate::detach::apply(&mut app.state::<AppState>().ws.lock().unwrap(), op);
+    if let Some(id) = &raised {
+        crate::detach::raise(app, id);
+    }
     tabs::changed(app);
 }
 

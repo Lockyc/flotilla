@@ -233,9 +233,10 @@ fn intercept(app: &AppHandle, label: &str, url: &Url, o: LinkOrigin) -> bool {
     let (decision, raised) = {
         let state = app.state::<AppState>();
         let mut ws = state.ws.lock().unwrap();
-        let before = ws.active.clone();
-        let decision = nav::decide(&mut ws, &id, url, origin(o));
-        let raised = crate::detach::divert(&mut ws, before);
+        let mut decision = Decision::PassThrough;
+        let raised = crate::detach::apply(&mut ws, |ws| {
+            decision = nav::decide(ws, &id, url, origin(o));
+        });
         (decision, raised)
     };
     match decision {

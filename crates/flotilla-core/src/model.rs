@@ -54,9 +54,27 @@ pub struct Workspace {
     pub groups: Vec<Group>,
     /// Closed groups, newest first.
     pub recent: Vec<Group>,
+    /// The tab the main window shows. Never a detached tab: activating one leaves this as it is
+    /// and asks for its window instead ([`Workspace::take_raise`]).
     pub active: Option<TabId>,
     next_id: u64,
+    /// The detached tab the last operation activated, whose window the shell is to raise.
+    #[serde(skip)]
+    raise: Pending,
 }
+
+/// A request waiting for the shell, not part of the workspace's value: never saved, and two
+/// workspaces differing only in it are equal.
+#[derive(Clone, Debug, Default)]
+struct Pending(Option<TabId>);
+
+impl PartialEq for Pending {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for Pending {}
 
 /// What opening a URL did; either way the tab is now active.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -80,7 +98,7 @@ impl Workspace {
     /// Makes a deserialised workspace consistent with the rules the code enforces, trusting
     /// nothing on disk that is derivable: re-derives every tab's key (groups and recent) from its
     /// `home_url` and group store, drops later open members whose key now repeats an earlier
-    /// open tab's (heads are never dropped), clears `active` if it no longer names an open tab,
+    /// open tab's (heads are never dropped), clears `active` unless it names an open docked tab,
     /// and raises `next_id` to at least every restored id (dropped tabs included) so a new tab never reuses one.
     pub fn rekey_and_repair(&mut self) {
         for g in self.groups.iter_mut().chain(self.recent.iter_mut()) {
@@ -115,7 +133,7 @@ impl Workspace {
             });
         }
         if let Some(a) = &self.active {
-            if self.find(a).is_none() {
+            if self.find(a).is_none_or(|(_, t)| t.detached) {
                 self.active = None;
             }
         }
@@ -138,16 +156,27 @@ impl Workspace {
             .position(|g| &g.head.id == id || g.members.iter().any(|m| &m.id == id))
     }
 
-    /// Makes `id` the active tab, expanding its group if it is a member of a collapsed one.
+    /// Makes `id` the active tab, expanding its group if it is a member of a collapsed one. A
+    /// detached tab is not made active; its window is asked for ([`Workspace::take_raise`]).
     pub fn activate(&mut self, id: &TabId) {
         let Some(gi) = self.group_index(id) else {
             return;
         };
+        if self.find(id).is_some_and(|(_, t)| t.detached) {
+            self.raise.0 = Some(id.clone());
+            return;
+        }
         let g = &mut self.groups[gi];
         if &g.head.id != id {
             g.collapsed = false;
         }
         self.active = Some(id.clone());
+    }
+
+    /// The detached tab an operation since the last call activated, if any: its window is to be
+    /// raised. Cleared by the call.
+    pub fn take_raise(&mut self) -> Option<TabId> {
+        self.raise.0.take()
     }
 
     fn raise(&mut self, id: TabId) -> Opened {
@@ -190,9 +219,9 @@ impl Workspace {
     }
 
     /// Closes a tab. Closing a head closes its group (`close_group` then picks the neighbouring
-    /// group's head). Closing the active member activates, via `activate`, the tab
-    /// `shell_core::tabs::pick_live_neighbour` picks over `[head, members...]` with every tab
-    /// eligible: always the previous tab, since the head at index 0 is always eligible.
+    /// group's head). Closing the active member activates the tab
+    /// `shell_core::tabs::pick_live_neighbour` picks over `[head, members...]` with every docked
+    /// tab eligible, else none.
     pub fn close_tab(&mut self, id: &TabId) {
         let Some(gi) = self.group_index(id) else {
             return;
@@ -202,7 +231,10 @@ impl Workspace {
         }
         let g = &mut self.groups[gi];
         let at = g.members.iter().position(|m| &m.id == id).unwrap();
-        let eligible = vec![true; g.members.len() + 1];
+        let eligible: Vec<bool> = std::iter::once(&g.head)
+            .chain(g.members.iter())
+            .map(|t| !t.detached)
+            .collect();
         let pick = pick_live_neighbour(at + 1, &eligible);
         let neighbour = pick.map(|i| match i {
             0 => g.head.id.clone(),
@@ -210,6 +242,7 @@ impl Workspace {
         });
         g.members.remove(at);
         if self.active.as_ref() == Some(id) {
+            self.active = None;
             if let Some(n) = neighbour {
                 self.activate(&n);
             }
@@ -217,7 +250,8 @@ impl Workspace {
     }
 
     /// Closes the group headed by `head` into the front of `recent`. If the active tab was in it,
-    /// the next group's head (else the previous group's) becomes active.
+    /// the nearest following group's docked head (else the nearest preceding one's) becomes
+    /// active, else none.
     pub fn close_group(&mut self, head: &TabId) {
         let Some(gi) = self.groups.iter().position(|g| &g.head.id == head) else {
             return;
@@ -230,10 +264,11 @@ impl Workspace {
         self.recent.insert(0, group);
         self.recent.truncate(RECENT_CAP);
         if was_active {
-            self.active = self
-                .groups
-                .get(gi)
-                .or_else(|| gi.checked_sub(1).and_then(|p| self.groups.get(p)))
+            let docked = |g: &&Group| !g.head.detached;
+            self.active = self.groups[gi..]
+                .iter()
+                .find(docked)
+                .or_else(|| self.groups[..gi].iter().rev().find(docked))
                 .map(|g| g.head.id.clone());
         }
     }
@@ -367,9 +402,14 @@ impl Workspace {
         }
     }
 
+    /// Detaching the active tab leaves nothing active; the shell picks what the main window shows
+    /// next before detaching.
     pub fn set_detached(&mut self, id: &TabId, detached: bool) {
         if let Some(t) = self.tab_mut(id) {
             t.detached = detached;
+            if detached && self.active.as_ref() == Some(id) {
+                self.active = None;
+            }
         }
     }
 
@@ -842,5 +882,106 @@ mod tests {
         w.rekey_and_repair();
         assert!(w.groups[0].members.is_empty());
         assert_eq!(w.groups[0].head.key, key);
+    }
+
+    // `active` is never a detached tab.
+
+    /// Group 1: head h1, members a, b. Group 2: head h2. `active` is b.
+    fn two_groups() -> (Workspace, TabId, TabId, TabId, TabId) {
+        let mut w = Workspace::default();
+        let h1 = head_of(&mut w, 1);
+        let a = id(w.open_from(&h1, &doc(1)).unwrap());
+        let b = id(w.open_from(&h1, &doc(2)).unwrap());
+        let h2 = head_of(&mut w, 2);
+        w.activate(&b);
+        (w, h1, a, b, h2)
+    }
+
+    #[test]
+    fn activating_a_detached_tab_keeps_active_and_asks_for_its_window() {
+        let (mut w, h1, a, b, _) = two_groups();
+        w.set_detached(&a, true);
+        w.set_collapsed(&h1, true);
+        w.activate(&a);
+        assert_eq!(w.active, Some(b));
+        // Nor does it expand the group the docked tab would have been shown in.
+        assert!(w.groups[0].collapsed);
+        assert_eq!(w.take_raise(), Some(a));
+        assert_eq!(w.take_raise(), None);
+    }
+
+    #[test]
+    fn raising_a_detached_doc_asks_for_its_window() {
+        let (mut w, h1, a, b, _) = two_groups();
+        w.set_detached(&a, true);
+        assert_eq!(w.open_from(&h1, &doc(1)), Some(Opened::Raised(a.clone())));
+        assert_eq!(w.active, Some(b));
+        assert_eq!(w.take_raise(), Some(a));
+    }
+
+    #[test]
+    fn detaching_the_active_tab_clears_active() {
+        let (mut w, _, _, b, _) = two_groups();
+        w.set_detached(&b, true);
+        assert_eq!(w.active, None);
+    }
+
+    #[test]
+    fn making_a_detached_member_its_own_group_keeps_active() {
+        let (mut w, _, a, b, _) = two_groups();
+        w.set_detached(&a, true);
+        w.make_own_group(&a);
+        assert_eq!(w.groups[1].head.id, a);
+        assert_eq!(w.active, Some(b));
+        assert_eq!(w.take_raise(), Some(a));
+    }
+
+    #[test]
+    fn moving_a_detached_member_keeps_active() {
+        let (mut w, _, a, b, h2) = two_groups();
+        w.set_detached(&a, true);
+        w.move_to_group(&a, &h2);
+        assert_eq!(member_ids(&w, &h2), vec![a]);
+        assert_eq!(w.active, Some(b));
+        assert_eq!(w.take_raise(), None);
+    }
+
+    #[test]
+    fn closing_a_tab_skips_a_detached_neighbour() {
+        let (mut w, h1, a, b, _) = two_groups();
+        w.set_detached(&a, true);
+        w.close_tab(&b);
+        assert_eq!(w.active, Some(h1.clone()));
+        // Every neighbour detached: nothing is active.
+        let (mut w, h1, a, b, _) = two_groups();
+        w.set_detached(&h1, true);
+        w.set_detached(&a, true);
+        w.close_tab(&b);
+        assert_eq!(w.active, None);
+    }
+
+    #[test]
+    fn closing_a_group_skips_a_group_whose_head_is_detached() {
+        let (mut w, h1, _, b, h2) = two_groups();
+        let h3 = head_of(&mut w, 3);
+        w.activate(&b);
+        w.set_detached(&h2, true);
+        w.close_group(&h1);
+        assert_eq!(w.active, Some(h3.clone()));
+        // Only detached heads remain: nothing is active.
+        w.set_detached(&h3, true);
+        assert_eq!(w.active, None);
+        let (mut w, h1, _, _, h2) = two_groups();
+        w.set_detached(&h2, true);
+        w.close_group(&h1);
+        assert_eq!(w.active, None);
+    }
+
+    #[test]
+    fn loading_clears_an_active_detached_tab() {
+        let (mut w, _, _, b, _) = two_groups();
+        w.tab_mut(&b).unwrap().detached = true;
+        w.rekey_and_repair();
+        assert_eq!(w.active, None);
     }
 }

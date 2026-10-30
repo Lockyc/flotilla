@@ -367,7 +367,7 @@ pub fn handle(app: &AppHandle, menu_id: &str) -> bool {
                 ws.close_group(&h);
             }
         }),
-        Action::Reopen(i) => crate::detach::raising(app, |ws| {
+        Action::Reopen(i) => mutate(app, |ws| {
             ws.reopen_recent(i);
         }),
         Action::ClearRecent => mutate(app, |ws| ws.recent.clear()),

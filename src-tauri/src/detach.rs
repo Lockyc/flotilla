@@ -34,26 +34,22 @@ pub fn pop_out(ws: &mut Workspace, created: &HashSet<TabId>, id: &TabId) -> Resu
         Some(_) => {}
     }
     if ws.active.as_ref() == Some(id) {
-        let next = tabs::after_unload(ws, created, id);
-        ws.active = None;
-        if let Some(n) = next {
+        if let Some(n) = tabs::after_unload(ws, created, id) {
             ws.activate(&n);
         }
     }
+    // Clears `active` if it is still this tab.
     ws.set_detached(id, true);
     Ok(())
 }
 
-/// After an operation that may have raised a tab (selecting its row, opening its document again):
-/// if the raised tab is popped out, the main window goes on showing `before` (when that is still
-/// an open, docked tab, else nothing) and the raised tab's window is returned, to be raised.
-pub fn divert(ws: &mut Workspace, before: Option<TabId>) -> Option<TabId> {
-    let raised = ws.active.clone()?;
-    if !ws.find(&raised).is_some_and(|(_, t)| t.detached) {
-        return None;
-    }
-    ws.active = before.filter(|b| ws.find(b).is_some_and(|(_, t)| !t.detached));
-    Some(raised)
+/// Applies workspace operation `op` and returns the popped-out tab it activated, whose window is
+/// to be raised ([`raise`]); the model leaves `active` on a docked tab. Every shell mutation runs
+/// through this, so any operation that activates a popped-out tab raises its window.
+pub fn apply(ws: &mut Workspace, op: impl FnOnce(&mut Workspace)) -> Option<TabId> {
+    ws.take_raise();
+    op(ws);
+    ws.take_raise()
 }
 
 /// Which detached windows to open and close, given the tabs whose window is `open` now.
@@ -196,21 +192,6 @@ pub fn pop_in(app: &AppHandle, id: &TabId) {
     }
 }
 
-/// Applies `op`, which may raise a tab ([`divert`]): a popped-out one has its window raised.
-pub fn raising(app: &AppHandle, op: impl FnOnce(&mut Workspace)) {
-    let raised = {
-        let state = app.state::<AppState>();
-        let mut ws = state.ws.lock().unwrap();
-        let before = ws.active.clone();
-        op(&mut ws);
-        divert(&mut ws, before)
-    };
-    if let Some(id) = &raised {
-        raise(app, id);
-    }
-    tabs::changed(app);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -289,37 +270,56 @@ mod tests {
     fn selecting_a_popped_out_row_raises_its_window_and_keeps_the_main_tab() {
         let (mut ws, _, a, b) = ws();
         ws.set_detached(&a, true);
-        let before = ws.active.clone();
-        ws.activate(&a);
-        assert_eq!(divert(&mut ws, before), Some(a));
+        assert_eq!(apply(&mut ws, |ws| ws.activate(&a)), Some(a));
         assert_eq!(ws.active, Some(b));
     }
 
     #[test]
-    fn selecting_a_docked_row_diverts_nothing() {
-        let (mut ws, h, _, b) = ws();
-        ws.activate(&h);
-        assert_eq!(divert(&mut ws, Some(b)), None);
+    fn selecting_a_docked_row_raises_nothing() {
+        let (mut ws, h, _, _) = ws();
+        assert_eq!(apply(&mut ws, |ws| ws.activate(&h)), None);
         assert_eq!(ws.active, Some(h));
     }
 
     #[test]
+    fn a_menu_action_that_activates_a_popped_out_tab_raises_its_window() {
+        // Group ▸ Make Own Group on a popped-out member, as `commands::mutate` runs it.
+        let (mut ws, _, a, b) = ws();
+        ws.set_detached(&a, true);
+        assert_eq!(apply(&mut ws, |ws| ws.make_own_group(&a)), Some(a));
+        assert_eq!(ws.active, Some(b));
+    }
+
+    #[test]
+    fn a_raise_left_by_an_earlier_operation_is_not_replayed() {
+        let (mut ws, h, a, _) = ws();
+        ws.set_detached(&a, true);
+        ws.activate(&a);
+        assert_eq!(apply(&mut ws, |ws| ws.activate(&h)), None);
+    }
+
+    #[test]
     fn opening_a_popped_out_doc_again_raises_its_window() {
-        let (mut ws, h, a, b) = ws();
+        let (mut ws, h, a, _) = ws();
         ws.set_detached(&a, true);
         ws.activate(&h);
-        let before = ws.active.clone();
+        let mut decision = None;
+        let raised = apply(&mut ws, |ws| {
+            decision = Some(flotilla_core::nav::decide(
+                ws,
+                &h,
+                &url(DOC_A),
+                flotilla_core::nav::Origin::Click,
+            ))
+        });
         assert_eq!(
-            flotilla_core::nav::decide(&mut ws, &h, &url(DOC_A), flotilla_core::nav::Origin::Click),
-            flotilla_core::nav::Decision::Open(Opened::Raised(a.clone()))
+            decision,
+            Some(flotilla_core::nav::Decision::Open(Opened::Raised(
+                a.clone()
+            )))
         );
-        assert_eq!(divert(&mut ws, before), Some(a));
+        assert_eq!(raised, Some(a));
         assert_eq!(ws.active, Some(h));
-        // The main window keeps nothing it cannot show.
-        ws.set_detached(&b, true);
-        ws.activate(&b);
-        assert_eq!(divert(&mut ws, Some(b.clone())), Some(b));
-        assert_eq!(ws.active, None);
     }
 
     #[test]
