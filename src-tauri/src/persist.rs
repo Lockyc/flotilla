@@ -29,9 +29,10 @@ impl Persist {
         }
     }
 
-    /// Persists to `path` unless `loaded` says the file there could not be read or moved aside.
+    /// Persists to `path` unless `loaded` says the file there could not be read or moved aside, or
+    /// is a version 1 session whose groups are not yet in the config (saving would replace them).
     pub fn for_load(path: Option<PathBuf>, loaded: &Loaded) -> Self {
-        let unpersistable = matches!(loaded, Loaded::Unpersistable { .. });
+        let unpersistable = matches!(loaded, Loaded::Unpersistable { .. } | Loaded::V1(_));
         Self::new(path.filter(|_| !unpersistable))
     }
 
@@ -63,7 +64,7 @@ impl Persist {
 /// The error-bar text for what `session::load` found, if the user needs telling.
 pub fn load_notice(loaded: &Loaded) -> Option<String> {
     match loaded {
-        Loaded::Fresh | Loaded::Restored(_) => None,
+        Loaded::Fresh | Loaded::Restored(_) | Loaded::V1(_) => None,
         Loaded::Quarantined { moved_to } => {
             let name = moved_to.file_name().map_or_else(
                 || moved_to.display().to_string(),
@@ -115,13 +116,14 @@ pub fn save_now(app: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tabs::testing::{new_group, one_window};
     use flotilla_core::model::Opened;
-    use url::Url;
+    use flotilla_core::session::{Session, V1Session};
 
     fn sample() -> Workspace {
-        let mut ws = Workspace::default();
-        let f = Url::parse("https://drive.google.com/drive/folders/f1").unwrap();
-        let Opened::Added(_) = ws.new_group(&f, "default") else {
+        let mut ws = one_window();
+        let Opened::Added(_) = new_group(&mut ws, "https://drive.google.com/drive/folders/f1")
+        else {
             panic!()
         };
         ws
@@ -143,7 +145,7 @@ mod tests {
         let p = Persist::new(Some(path.clone()));
         let ws = sample();
         p.save(|| ws.clone()).unwrap();
-        assert_eq!(session::load(&path), Loaded::Restored(ws));
+        assert_eq!(session::load(&path), Loaded::Restored(Session::of(&ws)));
     }
 
     /// The snapshot is taken inside the writer lock, so a write that waited on another can never
@@ -177,12 +179,18 @@ mod tests {
         assert!(Persist::for_load(p(), &q).schedule().is_some());
         let u = Loaded::Unpersistable { reason: "r".into() };
         assert_eq!(Persist::for_load(p(), &u).schedule(), None);
+        let v1 = Loaded::V1(V1Session {
+            groups: vec![],
+            recent: vec![],
+            active: None,
+        });
+        assert_eq!(Persist::for_load(p(), &v1).schedule(), None);
     }
 
     #[test]
     fn notices_name_the_quarantine_file_and_the_reason() {
         assert_eq!(load_notice(&Loaded::Fresh), None);
-        assert_eq!(load_notice(&Loaded::Restored(Workspace::default())), None);
+        assert_eq!(load_notice(&Loaded::Restored(Session::default())), None);
         let q = Loaded::Quarantined {
             moved_to: PathBuf::from("/x/au.lsjc.flotilla/session.json.bad-1700000000"),
         };

@@ -1,20 +1,26 @@
-//! The workspace model: groups of tabs, the one-copy registry and Recent. Pure and platform-neutral;
-//! the shell owns webviews and persistence and drives this through `Workspace`.
+//! The workspace model: windows of groups of tabs, the one-copy registry and Recent. Pure and
+//! platform-neutral; the shell owns webviews, the config file and the session file, and drives
+//! this through `Workspace`.
 //!
-//! Two levels only: a group's head (any URL, usually a Drive folder) and flat members (documents).
-//! A document is open at most once across every group, detached tabs included; opening it again
-//! raises the existing tab. The registry is not a separate index: it is derived by scanning the
-//! tabs, so it cannot drift from them.
+//! The windows and their groups are built from the config ([`Workspace::from_config`]) and
+//! replaced on each reload ([`Workspace::rebase`]); the session adds each window's active tab and
+//! Recent ([`Workspace::restore`]). Two levels only: a group's head (any URL, usually a Drive
+//! folder) and flat members (documents). A document is open at most once across every window,
+//! detached tabs included; opening it again raises the existing tab in its own window. The
+//! registry is not a separate index: it is derived by scanning the tabs, so it cannot drift from
+//! them.
 
-use crate::identity::{doc_key, identity, DocKey};
+use crate::identity::{doc_key, identity, tab_id, DocKey};
 use serde::{Deserialize, Serialize};
 use shell_core::tabs::pick_live_neighbour;
+use std::collections::BTreeMap;
 use url::Url;
 
 /// Closed groups kept in `Workspace::recent`; the oldest is dropped past this.
 pub const RECENT_CAP: usize = 20;
 
-/// `"t-<n>"`, from the counter persisted in the workspace. Never reused.
+/// `"t-<16 hex>"`, the [`tab_id`] of the tab's key: open-once makes it unique app-wide, and it is
+/// the same across reloads, reorders and moves between windows.
 pub type TabId = String;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,22 +44,53 @@ pub struct Group {
     pub store: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Workspace {
+/// One window's groups, and the tab it shows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WindowWs {
+    /// The config window's title, which names it in the session.
+    pub title: String,
     pub groups: Vec<Group>,
+    /// The tab the window shows. Never a detached tab: activating one leaves this as it is and
+    /// asks for its window instead ([`Workspace::take_raise`]).
+    pub active: Option<TabId>,
+}
+
+/// A config `[[window]]` as the model reads it; the shell maps its config onto these.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ConfigWindow {
+    pub title: String,
+    pub groups: Vec<ConfigGroup>,
+}
+
+/// A config `[[window.group]]`: its name, head `url`, store and members.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ConfigGroup {
+    pub name: String,
+    pub url: String,
+    pub store: String,
+    pub collapsed: bool,
+    pub tabs: Vec<ConfigTab>,
+}
+
+/// A config `[[window.group.tab]]`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ConfigTab {
+    pub title: String,
+    pub url: String,
+    pub detached: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Workspace {
+    pub windows: Vec<WindowWs>,
     /// Closed groups, newest first.
     pub recent: Vec<Group>,
-    /// The tab the main window shows. Never a detached tab: activating one leaves this as it is
-    /// and asks for its window instead ([`Workspace::take_raise`]).
-    pub active: Option<TabId>,
-    next_id: u64,
     /// The detached tab the last operation activated, whose window the shell is to raise.
-    #[serde(skip)]
     raise: Pending,
 }
 
-/// A request waiting for the shell, not part of the workspace's value: never saved, and two
-/// workspaces differing only in it are equal.
+/// A request waiting for the shell, not part of the workspace's value: two workspaces differing
+/// only in it are equal.
 #[derive(Clone, Debug, Default)]
 struct Pending(Option<TabId>);
 
@@ -65,73 +102,130 @@ impl PartialEq for Pending {
 
 impl Eq for Pending {}
 
-/// What opening a URL did; either way the tab is now active.
+/// What opening a URL did; either way the tab is now active in its window.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Opened {
     Added(TabId),
     Raised(TabId),
 }
 
+/// A tab opening `url` in `store`, keyed and identified from them.
+fn tab(url: &Url, title: &str, store: &str, detached: bool) -> Tab {
+    let key = identity(store, url);
+    Tab {
+        id: tab_id(&key),
+        home_url: url.to_string(),
+        title: title.to_string(),
+        key,
+        detached,
+    }
+}
+
+/// Re-derives `t`'s key and id from its `home_url` in `store`. A URL that no longer parses keeps
+/// both.
+fn rekey(t: &mut Tab, store: &str) {
+    if let Ok(url) = Url::parse(&t.home_url) {
+        t.key = identity(store, &url);
+        t.id = tab_id(&t.key);
+    }
+}
+
 impl Workspace {
-    fn mint(&mut self, url: &Url, store: &str) -> Tab {
-        self.next_id += 1;
-        Tab {
-            id: format!("t-{}", self.next_id),
-            home_url: url.to_string(),
-            title: url.to_string(),
-            key: identity(store, url),
-            detached: false,
+    /// The windows and groups the config holds, nothing active. An entry whose URL does not
+    /// parse, or whose identity repeats an earlier one, is left out (the config's own checks
+    /// refuse both, so this only guards the model's invariant).
+    pub fn from_config(windows: &[ConfigWindow]) -> Workspace {
+        let mut seen: Vec<DocKey> = vec![];
+        let mut claim = |t: &Tab| {
+            let fresh = !seen.contains(&t.key);
+            if fresh {
+                seen.push(t.key.clone());
+            }
+            fresh
+        };
+        let windows = windows
+            .iter()
+            .map(|w| WindowWs {
+                title: w.title.trim().to_string(),
+                groups: w
+                    .groups
+                    .iter()
+                    .filter_map(|g| {
+                        let head = tab(&Url::parse(&g.url).ok()?, &g.name, &g.store, false);
+                        if !claim(&head) {
+                            return None;
+                        }
+                        let members = g
+                            .tabs
+                            .iter()
+                            .filter_map(|t| {
+                                let url = Url::parse(&t.url).ok()?;
+                                Some(tab(&url, &t.title, &g.store, t.detached))
+                            })
+                            .filter(|t| claim(t))
+                            .collect();
+                        Some(Group {
+                            head,
+                            members,
+                            collapsed: g.collapsed,
+                            store: g.store.clone(),
+                        })
+                    })
+                    .collect(),
+                active: None,
+            })
+            .collect();
+        Workspace {
+            windows,
+            ..Default::default()
         }
     }
 
-    /// Makes a deserialised workspace consistent with the rules the code enforces, trusting
-    /// nothing on disk that is derivable: re-derives every tab's key (groups and recent) from its
-    /// `home_url` and group store, drops later open members whose key now repeats an earlier
-    /// open tab's (heads are never dropped), clears `active` unless it names an open docked tab,
-    /// and raises `next_id` to at least every id still present once unparseable members are gone
-    /// (duplicate members, dropped after it, included) so a new tab never reuses a restored one.
-    pub fn rekey_and_repair(&mut self) {
-        for g in self.groups.iter_mut().chain(self.recent.iter_mut()) {
-            let store = g.store.clone();
-            // A member whose URL no longer parses cannot be keyed or opened: dropped. A head
-            // with such a URL keeps the group and its persisted key.
-            g.members.retain(|m| Url::parse(&m.home_url).is_ok());
-            for t in std::iter::once(&mut g.head).chain(g.members.iter_mut()) {
-                if let Ok(url) = Url::parse(&t.home_url) {
-                    t.key = identity(&store, &url);
-                }
-            }
+    /// Adopts a reloaded config's windows. Each window keeps its active tab when a window of the
+    /// same title still holds it docked; Recent is the session's and stays.
+    pub fn rebase(&mut self, fresh: Workspace) {
+        let old = std::mem::replace(&mut self.windows, fresh.windows);
+        for w in &mut self.windows {
+            w.active = old
+                .iter()
+                .find(|o| o.title == w.title)
+                .and_then(|o| o.active.clone())
+                .filter(|a| docked_in(w, a));
         }
-        let max = self
-            .groups
-            .iter()
-            .chain(self.recent.iter())
-            .flat_map(|g| std::iter::once(&g.head).chain(g.members.iter()))
-            .filter_map(|t| t.id.strip_prefix("t-")?.parse::<u64>().ok())
-            .max()
-            .unwrap_or(0);
-        self.next_id = self.next_id.max(max);
-        let mut seen: Vec<DocKey> = self.groups.iter().map(|g| g.head.key.clone()).collect();
-        for g in &mut self.groups {
+    }
+
+    /// Applies a saved session: each window's active tab by title (when that window holds it
+    /// docked), and Recent with every key and id re-derived from its URL and store, members whose
+    /// URL no longer parses or whose identity repeats in the group dropped.
+    pub fn restore(&mut self, active: BTreeMap<String, TabId>, mut recent: Vec<Group>) {
+        for w in &mut self.windows {
+            w.active = active.get(&w.title).cloned().filter(|a| docked_in(w, a));
+        }
+        for g in &mut recent {
+            let store = g.store.clone();
+            g.members.retain(|m| Url::parse(&m.home_url).is_ok());
+            rekey(&mut g.head, &store);
+            let mut seen = vec![g.head.key.clone()];
+            for m in &mut g.members {
+                rekey(m, &store);
+            }
             g.members.retain(|m| {
-                if seen.contains(&m.key) {
-                    false
-                } else {
+                let fresh = !seen.contains(&m.key);
+                if fresh {
                     seen.push(m.key.clone());
-                    true
                 }
+                fresh
             });
         }
-        if let Some(a) = &self.active {
-            if self.find(a).is_none_or(|(_, t)| t.detached) {
-                self.active = None;
-            }
-        }
+        recent.truncate(RECENT_CAP);
+        self.recent = recent;
     }
 
-    fn tabs(&self) -> impl Iterator<Item = &Tab> {
-        self.groups
+    /// Every open tab, in every window.
+    pub fn tabs(&self) -> impl Iterator<Item = &Tab> {
+        self.windows
             .iter()
+            .flat_map(|w| w.groups.iter())
             .flat_map(|g| std::iter::once(&g.head).chain(g.members.iter()))
     }
 
@@ -140,27 +234,52 @@ impl Workspace {
         self.tabs().find(|t| &t.key == key).map(|t| t.id.clone())
     }
 
-    fn group_index(&self, id: &TabId) -> Option<usize> {
-        self.groups
-            .iter()
-            .position(|g| &g.head.id == id || g.members.iter().any(|m| &m.id == id))
+    /// The window and group index holding tab `id`.
+    fn locate(&self, id: &TabId) -> Option<(usize, usize)> {
+        self.windows.iter().enumerate().find_map(|(wi, w)| {
+            w.groups
+                .iter()
+                .position(|g| &g.head.id == id || g.members.iter().any(|m| &m.id == id))
+                .map(|gi| (wi, gi))
+        })
     }
 
-    /// Makes `id` the active tab, expanding its group if it is a member of a collapsed one. A
-    /// detached tab is not made active; its window is asked for ([`Workspace::take_raise`]).
+    /// The index of the window titled `title` (compared trimmed).
+    pub fn window_index(&self, title: &str) -> Option<usize> {
+        self.windows.iter().position(|w| w.title == title.trim())
+    }
+
+    /// Makes `id` the active tab of its window, expanding its group if it is a member of a
+    /// collapsed one. A detached tab is not made active; its window is asked for
+    /// ([`Workspace::take_raise`]).
     pub fn activate(&mut self, id: &TabId) {
-        let Some(gi) = self.group_index(id) else {
+        let Some((wi, gi)) = self.locate(id) else {
             return;
         };
-        if self.find(id).is_some_and(|(_, t)| t.detached) {
+        if self.find(id).is_some_and(|(_, _, t)| t.detached) {
             self.raise.0 = Some(id.clone());
             return;
         }
-        let g = &mut self.groups[gi];
+        let w = &mut self.windows[wi];
+        let g = &mut w.groups[gi];
         if &g.head.id != id {
             g.collapsed = false;
         }
-        self.active = Some(id.clone());
+        w.active = Some(id.clone());
+    }
+
+    /// Whether `id` is the tab its window shows.
+    pub fn is_active(&self, id: &TabId) -> bool {
+        self.windows.iter().any(|w| w.active.as_ref() == Some(id))
+    }
+
+    /// Leaves the window showing `id` with nothing active.
+    pub fn deactivate(&mut self, id: &TabId) {
+        for w in &mut self.windows {
+            if w.active.as_ref() == Some(id) {
+                w.active = None;
+            }
+        }
     }
 
     /// The detached tab an operation since the last call activated, if any: its window is to be
@@ -174,120 +293,137 @@ impl Workspace {
         Opened::Raised(id)
     }
 
-    /// Opens `url` as a new group head in `store`. Raises instead when a tab with the same
-    /// identity (`identity`) is already open.
-    pub fn new_group(&mut self, url: &Url, store: &str) -> Opened {
+    /// Opens `url` as a new group head in `store` at the end of window `window`. Raises instead
+    /// when a tab with the same identity (`identity`) is open in any window. `None` when there is
+    /// no such window.
+    pub fn new_group(&mut self, window: &str, url: &Url, store: &str) -> Option<Opened> {
         if let Some(id) = self.open_doc(&identity(store, url)) {
-            return self.raise(id);
+            return Some(self.raise(id));
         }
-        let head = self.mint(url, store);
+        let wi = self.window_index(window)?;
+        let head = tab(url, url.as_str(), store, false);
         let id = head.id.clone();
-        self.groups.push(Group {
+        self.windows[wi].groups.push(Group {
             head,
             members: vec![],
             collapsed: false,
             store: store.to_string(),
         });
         self.activate(&id);
-        Opened::Added(id)
+        Some(Opened::Added(id))
     }
 
     /// Opens document `url` from tab `from`, joining `from`'s group at the end. `None` when `url`
-    /// is not a document or `from` is not open. An already-open document is raised wherever it is.
+    /// is not a document or `from` is not open. An already-open document is raised wherever it
+    /// is, in whichever window.
     pub fn open_from(&mut self, from: &TabId, url: &Url) -> Option<Opened> {
-        let gi = self.group_index(from)?;
-        let key = doc_key(&self.groups[gi].store, url)?;
+        let (wi, gi) = self.locate(from)?;
+        let store = self.windows[wi].groups[gi].store.clone();
+        let key = doc_key(&store, url)?;
         if let Some(id) = self.open_doc(&key) {
             return Some(self.raise(id));
         }
-        let store = self.groups[gi].store.clone();
-        let tab = self.mint(url, &store);
-        let id = tab.id.clone();
-        self.groups[gi].members.push(tab);
+        let t = tab(url, url.as_str(), &store, false);
+        let id = t.id.clone();
+        self.windows[wi].groups[gi].members.push(t);
         self.activate(&id);
         Some(Opened::Added(id))
     }
 
-    /// Closes a tab. Closing a head closes its group (`close_group` then picks the neighbouring
-    /// group's head). Closing the active member activates the tab
-    /// `shell_core::tabs::pick_live_neighbour` picks over `[head, members...]` with every docked
-    /// tab eligible, else none.
-    pub fn close_tab(&mut self, id: &TabId) {
-        let Some(gi) = self.group_index(id) else {
-            return;
-        };
-        if &self.groups[gi].head.id == id {
-            return self.close_group(id);
-        }
-        let g = &mut self.groups[gi];
-        let at = g.members.iter().position(|m| &m.id == id).unwrap();
+    /// The tab `shell_core::tabs::pick_live_neighbour` picks for member `at` of group `gi` in
+    /// window `wi`, over `[head, members...]` with every docked tab eligible.
+    fn member_neighbour(&self, wi: usize, gi: usize, at: usize) -> Option<TabId> {
+        let g = &self.windows[wi].groups[gi];
         let eligible: Vec<bool> = std::iter::once(&g.head)
             .chain(g.members.iter())
             .map(|t| !t.detached)
             .collect();
-        let pick = pick_live_neighbour(at + 1, &eligible);
-        let neighbour = pick.map(|i| match i {
+        pick_live_neighbour(at + 1, &eligible).map(|i| match i {
             0 => g.head.id.clone(),
             i => g.members[i - 1].id.clone(),
-        });
-        g.members.remove(at);
-        if self.active.as_ref() == Some(id) {
-            self.active = None;
+        })
+    }
+
+    /// Closes a tab. Closing a head closes its group (`close_group` then picks the neighbouring
+    /// group's head). Closing its window's active member activates [`Self::member_neighbour`],
+    /// else none.
+    pub fn close_tab(&mut self, id: &TabId) {
+        let Some((wi, gi)) = self.locate(id) else {
+            return;
+        };
+        if &self.windows[wi].groups[gi].head.id == id {
+            return self.close_group(id);
+        }
+        let at = self.windows[wi].groups[gi]
+            .members
+            .iter()
+            .position(|m| &m.id == id)
+            .unwrap();
+        let neighbour = self.member_neighbour(wi, gi, at);
+        self.windows[wi].groups[gi].members.remove(at);
+        if self.windows[wi].active.as_ref() == Some(id) {
+            self.windows[wi].active = None;
             if let Some(n) = neighbour {
                 self.activate(&n);
             }
         }
     }
 
-    /// Closes the group headed by `head` into the front of `recent`. If the active tab was in it,
-    /// the nearest following group's docked head (else the nearest preceding one's) becomes
-    /// active, else none.
+    /// Closes the group headed by `head` into the front of `recent`. If its window's active tab
+    /// was in it, the nearest following group's docked head (else the nearest preceding one's)
+    /// becomes active, else none.
     pub fn close_group(&mut self, head: &TabId) {
-        let Some(gi) = self.groups.iter().position(|g| &g.head.id == head) else {
+        let Some((wi, gi)) = self.locate(head) else {
             return;
         };
-        let group = self.groups.remove(gi);
-        let was_active = self
+        let w = &mut self.windows[wi];
+        if &w.groups[gi].head.id != head {
+            return;
+        }
+        let group = w.groups.remove(gi);
+        let was_active = w
             .active
             .as_ref()
             .is_some_and(|a| a == &group.head.id || group.members.iter().any(|m| &m.id == a));
-        self.recent.insert(0, group);
-        self.recent.truncate(RECENT_CAP);
         if was_active {
             let docked = |g: &&Group| !g.head.detached;
-            self.active = self.groups[gi..]
+            w.active = w.groups[gi..]
                 .iter()
                 .find(docked)
-                .or_else(|| self.groups[..gi].iter().rev().find(docked))
+                .or_else(|| w.groups[..gi].iter().rev().find(docked))
                 .map(|g| g.head.id.clone());
         }
+        self.recent.insert(0, group);
+        self.recent.truncate(RECENT_CAP);
     }
 
-    /// Restores `recent[index]` as a group and activates its head. Members whose document is now
-    /// open elsewhere are left where they are.
+    /// Restores `recent[index]` as a group at the end of window `window` and activates its head.
+    /// Members whose document is now open elsewhere are left where they are. `None` (the entry
+    /// kept) when there is no such entry or window.
     ///
     /// If the head's identity is now open elsewhere, nothing is duplicated and that tab is raised
     /// and returned: when it is a head, the entry's other members join its group and the entry
     /// leaves Recent; when it is a member, the entry stays in Recent untouched.
-    pub fn reopen_recent(&mut self, index: usize) -> Option<TabId> {
+    pub fn reopen_recent(&mut self, window: &str, index: usize) -> Option<TabId> {
         let entry = self.recent.get(index)?;
         if let Some(occupant) = self.open_doc(&entry.head.key) {
-            let gi = self.group_index(&occupant)?;
-            if self.groups[gi].head.id != occupant {
+            let (wi, gi) = self.locate(&occupant)?;
+            if self.windows[wi].groups[gi].head.id != occupant {
                 self.raise(occupant.clone());
                 return Some(occupant);
             }
             let entry = self.recent.remove(index);
             let members = self.restorable(entry.members, &[entry.head.key]);
-            self.groups[gi].members.extend(members);
+            self.windows[wi].groups[gi].members.extend(members);
             self.raise(occupant.clone());
             return Some(occupant);
         }
+        let wi = self.window_index(window)?;
         let mut group = self.recent.remove(index);
         group.members = self.restorable(group.members, &[group.head.key.clone()]);
         group.head.detached = false;
         let id = group.head.id.clone();
-        self.groups.push(group);
+        self.windows[wi].groups.push(group);
         self.activate(&id);
         Some(id)
     }
@@ -313,18 +449,19 @@ impl Workspace {
         }
     }
 
-    /// Lifts a member into a new group headed by it (same store), placed after its old group.
+    /// Lifts a member into a new group headed by it (same store), placed after its old group in
+    /// the same window.
     pub fn make_own_group(&mut self, member: &TabId) {
-        let Some(gi) = self.group_index(member) else {
+        let Some((wi, gi)) = self.locate(member) else {
             return;
         };
-        let g = &mut self.groups[gi];
-        let Some(at) = g.members.iter().position(|m| &m.id == member) else {
+        let groups = &mut self.windows[wi].groups;
+        let Some(at) = groups[gi].members.iter().position(|m| &m.id == member) else {
             return;
         };
-        let head = g.members.remove(at);
-        let store = g.store.clone();
-        self.groups.insert(
+        let head = groups[gi].members.remove(at);
+        let store = groups[gi].store.clone();
+        groups.insert(
             gi + 1,
             Group {
                 head,
@@ -336,52 +473,70 @@ impl Workspace {
         self.activate(member);
     }
 
-    /// Moves a member to the end of the group `head` belongs to. A move into a group on another
-    /// store re-keys the document to that store, and is refused if it is already open there.
+    /// Moves a member to the end of the group `head` belongs to, in whichever window. A move into
+    /// a group on another store re-keys the document to that store (and so gives it that key's
+    /// id), and is refused if it is already open there. An active member stays active, in its new
+    /// window; the window it left shows [`Self::member_neighbour`].
     pub fn move_to_group(&mut self, member: &TabId, head: &TabId) {
-        let (Some(from), Some(to)) = (self.group_index(member), self.group_index(head)) else {
+        let (Some((fw, fg)), Some((tw, tg))) = (self.locate(member), self.locate(head)) else {
             return;
         };
-        if from == to {
+        if (fw, fg) == (tw, tg) {
             return;
         }
-        let Some(at) = self.groups[from]
+        let Some(at) = self.windows[fw].groups[fg]
             .members
             .iter()
             .position(|m| &m.id == member)
         else {
             return;
         };
-        let mut tab = self.groups[from].members[at].clone();
-        if self.groups[from].store != self.groups[to].store {
-            let store = self.groups[to].store.clone();
-            let Ok(url) = Url::parse(&tab.home_url) else {
-                return;
-            };
-            tab.key = identity(&store, &url);
-            if self.open_doc(&tab.key).is_some() {
+        let mut moved = self.windows[fw].groups[fg].members[at].clone();
+        let store = self.windows[tw].groups[tg].store.clone();
+        if self.windows[fw].groups[fg].store != store {
+            rekey(&mut moved, &store);
+            if self.open_doc(&moved.key).is_some() {
                 return;
             }
         }
-        self.groups[from].members.remove(at);
-        self.groups[to].members.push(tab);
-        if self.active.as_ref() == Some(member) {
-            self.activate(member);
+        let was_active = self.windows[fw].active.as_ref() == Some(member);
+        let neighbour = (was_active && fw != tw)
+            .then(|| self.member_neighbour(fw, fg, at))
+            .flatten();
+        self.windows[fw].groups[fg].members.remove(at);
+        let id = moved.id.clone();
+        self.windows[tw].groups[tg].members.push(moved);
+        if was_active {
+            if fw != tw {
+                self.windows[fw].active = None;
+                if let Some(n) = neighbour {
+                    self.activate(&n);
+                }
+            }
+            self.activate(&id);
         }
     }
 
     fn tab_mut(&mut self, id: &TabId) -> Option<&mut Tab> {
-        self.groups.iter_mut().find_map(|g| {
-            if &g.head.id == id {
-                Some(&mut g.head)
-            } else {
-                g.members.iter_mut().find(|m| &m.id == id)
-            }
-        })
+        self.windows
+            .iter_mut()
+            .flat_map(|w| w.groups.iter_mut())
+            .find_map(|g| {
+                if &g.head.id == id {
+                    Some(&mut g.head)
+                } else {
+                    g.members.iter_mut().find(|m| &m.id == id)
+                }
+            })
     }
 
     pub fn set_collapsed(&mut self, head: &TabId, collapsed: bool) {
-        if let Some(g) = self.groups.iter_mut().find(|g| &g.head.id == head) {
+        if let Some(g) = self
+            .windows
+            .iter_mut()
+            .flat_map(|w| w.groups.iter_mut())
+            .find(|g| &g.head.id == head)
+        {
             g.collapsed = collapsed;
         }
     }
@@ -392,34 +547,47 @@ impl Workspace {
         }
     }
 
-    /// Detaching the active tab leaves nothing active; the shell picks what the main window shows
-    /// next before detaching.
+    /// Detaching its window's active tab leaves that window with nothing active; the shell picks
+    /// what it shows next before detaching.
     pub fn set_detached(&mut self, id: &TabId, detached: bool) {
         if let Some(t) = self.tab_mut(id) {
             t.detached = detached;
-            if detached && self.active.as_ref() == Some(id) {
-                self.active = None;
+            if detached {
+                self.deactivate(id);
             }
         }
     }
 
-    pub fn find(&self, id: &TabId) -> Option<(&Group, &Tab)> {
-        self.groups.iter().find_map(|g| {
-            std::iter::once(&g.head)
-                .chain(g.members.iter())
-                .find(|t| &t.id == id)
-                .map(|t| (g, t))
+    /// The window index, group and tab of `id`.
+    pub fn find(&self, id: &TabId) -> Option<(usize, &Group, &Tab)> {
+        self.windows.iter().enumerate().find_map(|(wi, w)| {
+            w.groups.iter().find_map(|g| {
+                std::iter::once(&g.head)
+                    .chain(g.members.iter())
+                    .find(|t| &t.id == id)
+                    .map(|t| (wi, g, t))
+            })
         })
     }
 
     pub fn group_of(&self, id: &TabId) -> Option<&Group> {
-        self.find(id).map(|(g, _)| g)
+        self.find(id).map(|(_, g, _)| g)
     }
+}
+
+/// Whether window `w` holds `id` as a docked tab.
+fn docked_in(w: &WindowWs, id: &TabId) -> bool {
+    w.groups
+        .iter()
+        .flat_map(|g| std::iter::once(&g.head).chain(g.members.iter()))
+        .any(|t| &t.id == id && !t.detached)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const W: &str = "W";
 
     fn doc(n: u32) -> Url {
         Url::parse(&format!(
@@ -438,8 +606,20 @@ mod tests {
         }
     }
 
+    fn window(title: &str) -> ConfigWindow {
+        ConfigWindow {
+            title: title.into(),
+            groups: vec![],
+        }
+    }
+
+    /// One empty window, `W`.
+    fn ws() -> Workspace {
+        Workspace::from_config(&[window(W)])
+    }
+
     fn head_of(w: &mut Workspace, n: u32) -> TabId {
-        id(w.new_group(&folder(n), "default"))
+        id(w.new_group(W, &folder(n), "default").unwrap())
     }
 
     fn member_ids(w: &Workspace, head: &TabId) -> Vec<TabId> {
@@ -451,31 +631,191 @@ mod tests {
             .collect()
     }
 
+    fn active(w: &Workspace) -> Option<TabId> {
+        w.windows[0].active.clone()
+    }
+
+    fn groups(w: &Workspace) -> &[Group] {
+        &w.windows[0].groups
+    }
+
+    fn cgroup(name: &str, url: &Url, store: &str, tabs: &[(&str, &Url)]) -> ConfigGroup {
+        ConfigGroup {
+            name: name.into(),
+            url: url.to_string(),
+            store: store.into(),
+            collapsed: false,
+            tabs: tabs
+                .iter()
+                .map(|(t, u)| ConfigTab {
+                    title: (*t).into(),
+                    url: u.to_string(),
+                    detached: false,
+                })
+                .collect(),
+        }
+    }
+
+    /// Window A: group "One" (folder 1; docs 1, 2). Window B: group "Two" (folder 2; doc 3).
+    fn two_windows() -> Vec<ConfigWindow> {
+        vec![
+            ConfigWindow {
+                title: "A".into(),
+                groups: vec![cgroup(
+                    "One",
+                    &folder(1),
+                    "default",
+                    &[("Budget", &doc(1)), ("Minutes", &doc(2))],
+                )],
+            },
+            ConfigWindow {
+                title: "B".into(),
+                groups: vec![cgroup("Two", &folder(2), "default", &[("Roster", &doc(3))])],
+            },
+        ]
+    }
+
+    #[test]
+    fn from_config_builds_windows_groups_and_titles() {
+        let w = Workspace::from_config(&two_windows());
+        assert_eq!(w.windows.len(), 2);
+        assert_eq!(w.windows[0].title, "A");
+        let g = &w.windows[0].groups[0];
+        assert_eq!(g.head.title, "One");
+        assert_eq!(g.head.home_url, folder(1).to_string());
+        assert_eq!(g.store, "default");
+        let titles: Vec<_> = g.members.iter().map(|m| m.title.as_str()).collect();
+        assert_eq!(titles, ["Budget", "Minutes"]);
+        assert_eq!(g.members[0].id, tab_id(&identity("default", &doc(1))));
+        assert!(w.windows.iter().all(|w| w.active.is_none()));
+    }
+
+    #[test]
+    fn ids_are_stable_across_reloads_and_reorders() {
+        let first = Workspace::from_config(&two_windows());
+        let mut reordered = two_windows();
+        reordered.reverse();
+        reordered[1].groups[0].tabs.reverse();
+        // The Roster moves from window B to window A.
+        let roster = reordered[0].groups[0].tabs.remove(0);
+        reordered[1].groups[0].tabs.push(roster);
+        let second = Workspace::from_config(&reordered);
+        let ids = |w: &Workspace| {
+            let mut v: Vec<TabId> = w.tabs().map(|t| t.id.clone()).collect();
+            v.sort();
+            v
+        };
+        assert_eq!(ids(&first), ids(&second));
+        assert_eq!(ids(&first).len(), 5);
+        assert_eq!(
+            Workspace::from_config(&two_windows()),
+            first,
+            "a reload of the same config is the same workspace"
+        );
+    }
+
+    #[test]
+    fn opening_a_doc_open_in_another_window_raises_it_there() {
+        let mut w = Workspace::from_config(&two_windows());
+        let one = w.windows[0].groups[0].head.id.clone();
+        let roster = w.windows[1].groups[0].members[0].id.clone();
+        w.activate(&one);
+        assert_eq!(
+            w.open_from(&one, &doc(3)),
+            Some(Opened::Raised(roster.clone()))
+        );
+        assert_eq!(w.windows[1].active, Some(roster));
+        assert_eq!(w.windows[0].active, Some(one.clone()));
+        assert_eq!(member_ids(&w, &one).len(), 2);
+        // A new group on a document open in another window raises it there too.
+        let budget = w.windows[0].groups[0].members[0].id.clone();
+        assert_eq!(
+            w.new_group("B", &doc(1), "default"),
+            Some(Opened::Raised(budget.clone()))
+        );
+        assert_eq!(w.windows[0].active, Some(budget));
+        assert_eq!(w.windows[1].groups.len(), 1);
+    }
+
+    #[test]
+    fn rebase_keeps_active_when_the_tab_survives() {
+        let mut w = Workspace::from_config(&two_windows());
+        let minutes = w.windows[0].groups[0].members[1].id.clone();
+        let roster = w.windows[1].groups[0].members[0].id.clone();
+        w.activate(&minutes);
+        w.activate(&roster);
+        w.close_group(&w.windows[1].groups[0].head.id.clone());
+        assert_eq!(w.recent.len(), 1);
+        // The reload drops the Roster from B and renames Minutes.
+        let mut cfg = two_windows();
+        cfg[0].groups[0].tabs[1].title = "Minutes 2026".into();
+        cfg[1].groups[0].tabs.clear();
+        w.rebase(Workspace::from_config(&cfg));
+        assert_eq!(w.windows[0].active, Some(minutes.clone()));
+        assert_eq!(w.find(&minutes).unwrap().2.title, "Minutes 2026");
+        assert_eq!(w.windows[1].active, None);
+        assert_eq!(
+            w.recent.len(),
+            1,
+            "Recent is the session's, not the config's"
+        );
+        // A tab that went away leaves its window with nothing active.
+        let mut cfg = two_windows();
+        cfg[0].groups[0].tabs.clear();
+        w.rebase(Workspace::from_config(&cfg));
+        assert_eq!(w.windows[0].active, None);
+    }
+
+    #[test]
+    fn restore_applies_active_by_window_title_and_rekeys_recent() {
+        let mut w = Workspace::from_config(&two_windows());
+        let budget = w.windows[0].groups[0].members[0].id.clone();
+        let mut recent = Workspace::from_config(&[ConfigWindow {
+            title: "X".into(),
+            groups: vec![cgroup("Old", &folder(9), "default", &[("D", &doc(9))])],
+        }])
+        .windows[0]
+            .groups
+            .clone();
+        recent[0].head.key.id = "bogus".into();
+        recent[0].head.id = "t-bogus".into();
+        let active = BTreeMap::from([
+            ("A".to_string(), budget.clone()),
+            ("B".to_string(), budget.clone()), // not in B: ignored
+            ("Gone".to_string(), budget.clone()),
+        ]);
+        w.restore(active, recent);
+        assert_eq!(w.windows[0].active, Some(budget));
+        assert_eq!(w.windows[1].active, None);
+        assert_eq!(w.recent[0].head.key, identity("default", &folder(9)));
+        assert_eq!(w.recent[0].head.id, tab_id(&w.recent[0].head.key));
+    }
+
     #[test]
     fn opening_a_doc_adds_it_under_the_group() {
-        let mut w = Workspace::default();
+        let mut w = ws();
         let h = head_of(&mut w, 1);
         let d = w.open_from(&h, &doc(1)).unwrap();
         assert!(matches!(d, Opened::Added(_)));
         assert_eq!(member_ids(&w, &h), vec![id(d.clone())]);
-        assert_eq!(w.active, Some(id(d)));
+        assert_eq!(active(&w), Some(id(d)));
     }
 
     #[test]
     fn reopening_an_open_doc_raises_it_even_from_another_group() {
-        let mut w = Workspace::default();
+        let mut w = ws();
         let h1 = head_of(&mut w, 1);
         let h2 = head_of(&mut w, 2);
         let d = id(w.open_from(&h1, &doc(1)).unwrap());
         w.activate(&h2);
         assert_eq!(w.open_from(&h2, &doc(1)), Some(Opened::Raised(d.clone())));
-        assert_eq!(w.active, Some(d));
+        assert_eq!(active(&w), Some(d));
         assert!(member_ids(&w, &h2).is_empty());
     }
 
     #[test]
     fn a_detached_doc_still_counts_as_open() {
-        let mut w = Workspace::default();
+        let mut w = ws();
         let h = head_of(&mut w, 1);
         let d = id(w.open_from(&h, &doc(1)).unwrap());
         w.set_detached(&d, true);
@@ -485,17 +825,17 @@ mod tests {
 
     #[test]
     fn open_from_a_member_joins_the_same_group_flat() {
-        let mut w = Workspace::default();
+        let mut w = ws();
         let h = head_of(&mut w, 1);
         let a = id(w.open_from(&h, &doc(1)).unwrap());
         let b = id(w.open_from(&a, &doc(2)).unwrap());
         assert_eq!(member_ids(&w, &h), vec![a, b]);
-        assert_eq!(w.groups.len(), 1);
+        assert_eq!(groups(&w).len(), 1);
     }
 
     #[test]
     fn non_document_url_is_not_a_member() {
-        let mut w = Workspace::default();
+        let mut w = ws();
         let h = head_of(&mut w, 1);
         assert_eq!(w.open_from(&h, &folder(2)), None);
         assert!(member_ids(&w, &h).is_empty());
@@ -503,45 +843,47 @@ mod tests {
 
     #[test]
     fn new_group_on_an_open_head_raises_it() {
-        let mut w = Workspace::default();
+        let mut w = ws();
         let h1 = head_of(&mut w, 1);
         let _h2 = head_of(&mut w, 2);
         assert_eq!(
-            w.new_group(&folder(1), "default"),
-            Opened::Raised(h1.clone())
+            w.new_group(W, &folder(1), "default"),
+            Some(Opened::Raised(h1.clone()))
         );
-        assert_eq!(w.groups.len(), 2);
-        assert_eq!(w.active, Some(h1.clone()));
+        assert_eq!(groups(&w).len(), 2);
+        assert_eq!(active(&w), Some(h1.clone()));
         // an open member's doc raises the member
         let d = id(w.open_from(&h1, &doc(1)).unwrap());
-        assert_eq!(w.new_group(&doc(1), "default"), Opened::Raised(d));
-        assert_eq!(w.groups.len(), 2);
+        assert_eq!(w.new_group(W, &doc(1), "default"), Some(Opened::Raised(d)));
+        assert_eq!(groups(&w).len(), 2);
+        // a window that does not exist takes nothing
+        assert_eq!(w.new_group("nowhere", &folder(5), "default"), None);
     }
 
     #[test]
     fn a_document_head_occupies_its_doc_key() {
-        let mut w = Workspace::default();
-        let h1 = id(w.new_group(&doc(1), "default"));
+        let mut w = ws();
+        let h1 = id(w.new_group(W, &doc(1), "default").unwrap());
         let h2 = head_of(&mut w, 2);
         assert_eq!(w.open_from(&h2, &doc(1)), Some(Opened::Raised(h1)));
     }
 
     #[test]
     fn closing_the_head_closes_the_group_to_recent() {
-        let mut w = Workspace::default();
+        let mut w = ws();
         let h = head_of(&mut w, 1);
         let d = id(w.open_from(&h, &doc(1)).unwrap());
         w.close_tab(&h);
-        assert!(w.groups.is_empty());
+        assert!(groups(&w).is_empty());
         assert_eq!(w.recent.len(), 1);
         assert_eq!(w.recent[0].head.id, h);
         assert_eq!(w.recent[0].members[0].id, d);
-        assert_eq!(w.active, None);
+        assert_eq!(active(&w), None);
     }
 
     #[test]
     fn recent_is_capped_at_20_newest_first() {
-        let mut w = Workspace::default();
+        let mut w = ws();
         let mut heads = vec![];
         for n in 0..25 {
             heads.push(head_of(&mut w, n));
@@ -556,36 +898,48 @@ mod tests {
 
     #[test]
     fn reopen_recent_skips_members_open_elsewhere() {
-        let mut w = Workspace::default();
+        let mut w = ws();
         let h1 = head_of(&mut w, 1);
         w.open_from(&h1, &doc(1)).unwrap();
         let keep = id(w.open_from(&h1, &doc(2)).unwrap());
         w.close_group(&h1);
         let h2 = head_of(&mut w, 2);
         let elsewhere = id(w.open_from(&h2, &doc(1)).unwrap());
-        let back = w.reopen_recent(0).unwrap();
+        let back = w.reopen_recent(W, 0).unwrap();
         assert_eq!(back, h1);
         assert!(w.recent.is_empty());
         assert_eq!(member_ids(&w, &h1), vec![keep]);
         assert_eq!(member_ids(&w, &h2), vec![elsewhere]);
-        assert_eq!(w.active, Some(h1));
+        assert_eq!(active(&w), Some(h1));
     }
 
     #[test]
     fn reopen_recent_of_a_head_open_elsewhere_raises_it() {
-        let mut w = Workspace::default();
+        let mut w = ws();
         let h1 = head_of(&mut w, 1);
         w.close_group(&h1);
         let h2 = head_of(&mut w, 1);
-        assert_eq!(w.reopen_recent(0), Some(h2.clone()));
-        assert_eq!(w.groups.len(), 1);
-        assert_eq!(w.active, Some(h2));
+        assert_eq!(w.reopen_recent(W, 0), Some(h2.clone()));
+        assert_eq!(groups(&w).len(), 1);
+        assert_eq!(active(&w), Some(h2));
         assert!(w.recent.is_empty());
     }
 
     #[test]
+    fn reopen_recent_into_another_window() {
+        let mut w = Workspace::from_config(&[window("A"), window("B")]);
+        let h = id(w.new_group("A", &folder(1), "default").unwrap());
+        w.close_group(&h);
+        assert_eq!(w.reopen_recent("nowhere", 0), None);
+        assert_eq!(w.recent.len(), 1);
+        assert_eq!(w.reopen_recent("B", 0), Some(h.clone()));
+        assert_eq!(w.windows[1].groups[0].head.id, h);
+        assert_eq!(w.windows[1].active, Some(h));
+    }
+
+    #[test]
     fn forget_recent_drops_the_entry() {
-        let mut w = Workspace::default();
+        let mut w = ws();
         let h = head_of(&mut w, 1);
         w.close_group(&h);
         w.forget_recent(0);
@@ -595,20 +949,20 @@ mod tests {
 
     #[test]
     fn make_own_group_lifts_a_member_to_a_head() {
-        let mut w = Workspace::default();
-        let h = id(w.new_group(&folder(1), "work"));
+        let mut w = ws();
+        let h = id(w.new_group(W, &folder(1), "work").unwrap());
         let d = id(w.open_from(&h, &doc(1)).unwrap());
         w.make_own_group(&d);
-        assert_eq!(w.groups.len(), 2);
+        assert_eq!(groups(&w).len(), 2);
         assert!(member_ids(&w, &h).is_empty());
-        assert_eq!(w.groups[1].head.id, d);
-        assert_eq!(w.groups[1].store, "work");
+        assert_eq!(groups(&w)[1].head.id, d);
+        assert_eq!(groups(&w)[1].store, "work");
         assert_eq!(w.open_from(&h, &doc(1)), Some(Opened::Raised(d)));
     }
 
     #[test]
     fn move_to_group_moves_a_member() {
-        let mut w = Workspace::default();
+        let mut w = ws();
         let h1 = head_of(&mut w, 1);
         let h2 = head_of(&mut w, 2);
         let d = id(w.open_from(&h1, &doc(1)).unwrap());
@@ -619,8 +973,22 @@ mod tests {
     }
 
     #[test]
+    fn moving_the_active_member_to_another_window_follows_it_there() {
+        let mut w = Workspace::from_config(&two_windows());
+        let budget = w.windows[0].groups[0].members[0].id.clone();
+        let one = w.windows[0].groups[0].head.id.clone();
+        let two = w.windows[1].groups[0].head.id.clone();
+        w.activate(&budget);
+        w.move_to_group(&budget, &two);
+        assert_eq!(member_ids(&w, &two).last(), Some(&budget));
+        assert_eq!(w.windows[1].active, Some(budget));
+        // The window it left shows the tab the member's close would have picked.
+        assert_eq!(w.windows[0].active, Some(one));
+    }
+
+    #[test]
     fn activating_a_member_of_a_collapsed_group_expands_it() {
-        let mut w = Workspace::default();
+        let mut w = ws();
         let h = head_of(&mut w, 1);
         let d = id(w.open_from(&h, &doc(1)).unwrap());
         w.set_collapsed(&h, true);
@@ -633,125 +1001,143 @@ mod tests {
 
     #[test]
     fn closing_the_active_tab_activates_its_neighbour() {
-        let mut w = Workspace::default();
+        let mut w = ws();
         let h = head_of(&mut w, 1);
         let a = id(w.open_from(&h, &doc(1)).unwrap());
         let b = id(w.open_from(&h, &doc(2)).unwrap());
         let c = id(w.open_from(&h, &doc(3)).unwrap());
         w.activate(&b);
         w.close_tab(&b);
-        assert_eq!(w.active, Some(a.clone())); // leans up
+        assert_eq!(active(&w), Some(a.clone())); // leans up
         w.activate(&c);
         w.close_tab(&c);
-        assert_eq!(w.active, Some(a.clone()));
+        assert_eq!(active(&w), Some(a.clone()));
         w.close_tab(&a);
-        assert_eq!(w.active, Some(h)); // the head is above the first member
+        assert_eq!(active(&w), Some(h)); // the head is above the first member
     }
 
     #[test]
     fn closing_an_inactive_tab_keeps_the_active_one() {
-        let mut w = Workspace::default();
+        let mut w = ws();
         let h = head_of(&mut w, 1);
         let a = id(w.open_from(&h, &doc(1)).unwrap());
         w.activate(&h);
         w.close_tab(&a);
-        assert_eq!(w.active, Some(h));
+        assert_eq!(active(&w), Some(h));
+    }
+
+    #[test]
+    fn closing_in_one_window_leaves_the_others_active() {
+        let mut w = Workspace::from_config(&two_windows());
+        let roster = w.windows[1].groups[0].members[0].id.clone();
+        let one = w.windows[0].groups[0].head.id.clone();
+        w.activate(&roster);
+        w.activate(&one);
+        w.close_group(&one);
+        assert_eq!(w.windows[0].active, None);
+        assert_eq!(w.windows[1].active, Some(roster));
     }
 
     #[test]
     fn titles_and_serialization_round_trip() {
-        let mut w = Workspace::default();
+        let mut w = ws();
         let h = head_of(&mut w, 1);
         w.set_title(&h, "Projects");
-        let s = serde_json::to_string(&w).unwrap();
-        let back: Workspace = serde_json::from_str(&s).unwrap();
-        assert_eq!(back.find(&h).unwrap().1.title, "Projects");
-        assert_eq!(back.groups[0].store, "default");
-        let mut back = back;
-        let n = head_of(&mut back, 2);
+        let g = w.group_of(&h).unwrap().clone();
+        let s = serde_json::to_string(&g).unwrap();
+        let back: Group = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.head.title, "Projects");
+        assert_eq!(back.store, "default");
+        let n = head_of(&mut w, 2);
         assert_ne!(n, h);
     }
 
     #[test]
     fn identity_is_scoped_by_store_not_by_role() {
-        let mut w = Workspace::default();
-        let h1 = id(w.new_group(&doc(1), "default"));
-        let work = id(w.new_group(&folder(2), "work"));
+        let mut w = ws();
+        let h1 = id(w.new_group(W, &doc(1), "default").unwrap());
+        let work = id(w.new_group(W, &folder(2), "work").unwrap());
         // same doc, other store: a second tab is allowed
         let m = id(w.open_from(&work, &doc(1)).unwrap());
         assert_ne!(m, h1);
         w.make_own_group(&m);
-        assert_eq!(w.groups.len(), 3);
+        assert_eq!(groups(&w).len(), 3);
         // same doc, same store: raised, whether the tab is a head or a member
-        assert_eq!(w.new_group(&doc(1), "work"), Opened::Raised(m));
-        assert_eq!(w.new_group(&doc(1), "default"), Opened::Raised(h1.clone()));
-        assert_eq!(w.new_group(&folder(2), "work"), Opened::Raised(work));
+        assert_eq!(w.new_group(W, &doc(1), "work"), Some(Opened::Raised(m)));
+        assert_eq!(
+            w.new_group(W, &doc(1), "default"),
+            Some(Opened::Raised(h1.clone()))
+        );
+        assert_eq!(
+            w.new_group(W, &folder(2), "work"),
+            Some(Opened::Raised(work))
+        );
         // the same folder in another store is its own head
         assert!(matches!(
-            w.new_group(&folder(2), "default"),
-            Opened::Added(_)
+            w.new_group(W, &folder(2), "default"),
+            Some(Opened::Added(_))
         ));
     }
 
     #[test]
     fn reopen_recent_with_head_open_elsewhere_merges_members_into_it() {
-        let mut w = Workspace::default();
+        let mut w = ws();
         let h1 = head_of(&mut w, 1);
         w.open_from(&h1, &doc(1)).unwrap();
         w.open_from(&h1, &doc(2)).unwrap();
         w.close_group(&h1);
         let h2 = head_of(&mut w, 1);
         let shared = id(w.open_from(&h2, &doc(1)).unwrap());
-        assert_eq!(w.reopen_recent(0), Some(h2.clone()));
+        assert_eq!(w.reopen_recent(W, 0), Some(h2.clone()));
         assert!(w.recent.is_empty());
         let members = member_ids(&w, &h2);
         assert_eq!(members.len(), 2);
         assert_eq!(members[0], shared);
-        assert_eq!(w.active, Some(h2));
+        assert_eq!(active(&w), Some(h2));
     }
 
     #[test]
     fn reopen_recent_with_head_open_as_a_member_leaves_the_entry() {
-        let mut w = Workspace::default();
-        let h1 = id(w.new_group(&doc(5), "default"));
+        let mut w = ws();
+        let h1 = id(w.new_group(W, &doc(5), "default").unwrap());
         let kept = id(w.open_from(&h1, &doc(1)).unwrap());
         w.close_group(&h1);
         let h2 = head_of(&mut w, 2);
         let m = id(w.open_from(&h2, &doc(5)).unwrap());
-        assert_eq!(w.reopen_recent(0), Some(m.clone()));
+        assert_eq!(w.reopen_recent(W, 0), Some(m.clone()));
         assert_eq!(w.recent.len(), 1);
         assert_eq!(w.recent[0].members[0].id, kept);
-        assert_eq!(w.groups.len(), 1);
-        assert_eq!(w.active, Some(m));
+        assert_eq!(groups(&w).len(), 1);
+        assert_eq!(active(&w), Some(m));
     }
 
     #[test]
     fn closing_the_active_member_of_a_collapsed_group_expands_it() {
-        let mut w = Workspace::default();
+        let mut w = ws();
         let h = head_of(&mut w, 1);
         let a = id(w.open_from(&h, &doc(1)).unwrap());
         let b = id(w.open_from(&h, &doc(2)).unwrap());
         w.set_collapsed(&h, true);
         w.close_tab(&b);
-        assert_eq!(w.active, Some(a));
+        assert_eq!(active(&w), Some(a));
         assert!(!w.group_of(&h).unwrap().collapsed);
     }
 
     #[test]
     fn moving_the_active_member_into_a_collapsed_group_expands_it() {
-        let mut w = Workspace::default();
+        let mut w = ws();
         let h1 = head_of(&mut w, 1);
         let h2 = head_of(&mut w, 2);
         let d = id(w.open_from(&h1, &doc(1)).unwrap());
         w.set_collapsed(&h2, true);
         w.move_to_group(&d, &h2);
-        assert_eq!(w.active, Some(d));
+        assert_eq!(active(&w), Some(d));
         assert!(!w.group_of(&h2).unwrap().collapsed);
     }
 
     #[test]
     fn moving_onto_its_own_group_is_a_no_op() {
-        let mut w = Workspace::default();
+        let mut w = ws();
         let h = head_of(&mut w, 1);
         let a = id(w.open_from(&h, &doc(1)).unwrap());
         let b = id(w.open_from(&h, &doc(2)).unwrap());
@@ -762,7 +1148,7 @@ mod tests {
 
     #[test]
     fn make_own_group_of_a_head_is_a_no_op() {
-        let mut w = Workspace::default();
+        let mut w = ws();
         let h = head_of(&mut w, 1);
         w.open_from(&h, &doc(1)).unwrap();
         let before = w.clone();
@@ -772,37 +1158,40 @@ mod tests {
 
     #[test]
     fn moving_across_stores_rekeys_or_refuses_on_collision() {
-        let mut w = Workspace::default();
+        let mut w = ws();
         let h1 = head_of(&mut w, 1);
-        let work = id(w.new_group(&folder(2), "work"));
+        let work = id(w.new_group(W, &folder(2), "work").unwrap());
         let d = id(w.open_from(&h1, &doc(1)).unwrap());
         w.move_to_group(&d, &work);
-        assert_eq!(w.find(&d).unwrap().1.key.store, "work");
-        assert_eq!(member_ids(&w, &work), vec![d.clone()]);
+        // Re-keyed into the work store, the tab's id is that key's.
+        let moved = tab_id(&identity("work", &doc(1)));
+        assert_eq!(w.find(&moved).unwrap().2.key.store, "work");
+        assert_eq!(member_ids(&w, &work), vec![moved.clone()]);
+        assert_eq!(active(&w), Some(moved.clone()));
         // doc 2 is open in both stores: moving the default copy into work collides
         let e = id(w.open_from(&h1, &doc(2)).unwrap());
         let e2 = id(w.open_from(&work, &doc(2)).unwrap());
         w.move_to_group(&e, &work);
         assert_eq!(member_ids(&w, &h1), vec![e]);
-        assert_eq!(member_ids(&w, &work), vec![d, e2]);
+        assert_eq!(member_ids(&w, &work), vec![moved, e2]);
     }
 
     #[test]
     fn closing_the_active_group_activates_the_neighbouring_head() {
-        let mut w = Workspace::default();
+        let mut w = ws();
         let h1 = head_of(&mut w, 1);
         let h2 = head_of(&mut w, 2);
         let h3 = head_of(&mut w, 3);
         w.activate(&h2);
         w.close_group(&h2);
-        assert_eq!(w.active, Some(h3.clone()));
+        assert_eq!(active(&w), Some(h3.clone()));
         w.close_group(&h3);
-        assert_eq!(w.active, Some(h1));
+        assert_eq!(active(&w), Some(h1));
     }
 
     #[test]
     fn ids_are_not_reused_within_a_session() {
-        let mut w = Workspace::default();
+        let mut w = ws();
         let a = head_of(&mut w, 1);
         w.close_group(&a);
         let b = head_of(&mut w, 2);
@@ -812,73 +1201,44 @@ mod tests {
     }
 
     #[test]
-    fn rekey_and_repair_rederives_keys_dedups_and_fixes_next_id() {
-        let mut w = Workspace::default();
+    fn restore_rederives_recent_keys_and_ids_and_drops_bad_members() {
+        let mut w = ws();
         let h1 = head_of(&mut w, 1);
-        let h2 = head_of(&mut w, 2);
-        let a = id(w.open_from(&h1, &doc(1)).unwrap());
-        let b = id(w.open_from(&h2, &doc(2)).unwrap());
-        w.close_group(&h2);
-        let r = head_of(&mut w, 3);
-        w.close_group(&r);
-        // corrupt: wrong keys, a member repeating another's key, a lowered counter, a stale active
-        w.groups[0].head.key.id = "bogus".into();
-        w.groups[0].members[0].key = w.groups[0].head.key.clone();
-        w.recent[0].head.key.id = "bogus".into();
-        let dup = Tab {
-            id: "t-99".into(),
-            home_url: doc(1).to_string(),
-            title: "dup".into(),
-            key: w.groups[0].head.key.clone(),
-            detached: false,
-        };
-        w.groups[0].members.push(dup);
-        w.next_id = 1;
-        w.active = Some("t-500".into());
-        w.rekey_and_repair();
-        assert_eq!(w.groups[0].head.key, identity("default", &folder(1)));
-        assert_eq!(w.recent[0].head.key, identity("default", &folder(3)));
-        assert_eq!(w.recent[1].members[0].key, identity("default", &doc(2)));
-        assert_eq!(member_ids(&w, &h1), vec![a]); // later duplicate dropped, first kept
-        assert_eq!(w.active, None);
-        assert_eq!(w.next_id, 99);
-        let _ = b;
-        assert_eq!(id(w.new_group(&folder(9), "default")), "t-100");
+        w.open_from(&h1, &doc(1)).unwrap();
+        w.open_from(&h1, &doc(2)).unwrap();
+        w.close_group(&h1);
+        let mut recent = w.recent.clone();
+        recent[0].head.key.id = "bogus".into();
+        recent[0].members[1].home_url = "not a url".into();
+        // a member repeating the first one
+        let dup = recent[0].members[0].clone();
+        recent[0].members.push(dup);
+        let mut fresh = ws();
+        fresh.restore(BTreeMap::new(), recent);
+        let g = &fresh.recent[0];
+        assert_eq!(g.head.key, identity("default", &folder(1)));
+        assert_eq!(g.head.id, h1);
+        assert_eq!(g.members.len(), 1);
     }
 
     #[test]
-    fn rekey_and_repair_never_drops_a_head_for_a_duplicate_member() {
-        let mut w = Workspace::default();
-        let h1 = head_of(&mut w, 1);
-        let h2 = id(w.new_group(&doc(1), "default"));
-        let mut m = w.groups[0].head.clone();
-        m.id = "t-77".into();
-        m.home_url = doc(1).to_string();
-        w.groups[0].members.push(m);
-        w.rekey_and_repair();
-        assert!(w.groups[0].members.is_empty());
-        assert_eq!(w.groups[1].head.id, h2);
-        assert_eq!(w.groups[0].head.id, h1);
-    }
-
-    #[test]
-    fn rekey_and_repair_drops_unparseable_members_but_keeps_such_a_head() {
-        let mut w = Workspace::default();
+    fn restore_keeps_a_recent_head_whose_url_no_longer_parses() {
+        let mut w = ws();
         let h = head_of(&mut w, 1);
-        w.open_from(&h, &doc(1)).unwrap();
-        let key = w.groups[0].head.key.clone();
-        w.groups[0].members[0].home_url = "not a url".into();
-        w.groups[0].head.home_url = "also not".into();
-        w.rekey_and_repair();
-        assert!(w.groups[0].members.is_empty());
-        assert_eq!(w.groups[0].head.key, key);
+        w.close_group(&h);
+        let mut recent = w.recent.clone();
+        recent[0].head.home_url = "also not".into();
+        let key = recent[0].head.key.clone();
+        let mut fresh = ws();
+        fresh.restore(BTreeMap::new(), recent);
+        assert_eq!(fresh.recent[0].head.key, key);
     }
 
     // `active` is never a detached tab.
 
     /// Group 1: head h1, members a, b. Group 2: head h2. `active` is b.
     fn two_groups() -> (Workspace, TabId, TabId, TabId, TabId) {
-        let mut w = Workspace::default();
+        let mut w = ws();
         let h1 = head_of(&mut w, 1);
         let a = id(w.open_from(&h1, &doc(1)).unwrap());
         let b = id(w.open_from(&h1, &doc(2)).unwrap());
@@ -893,9 +1253,9 @@ mod tests {
         w.set_detached(&a, true);
         w.set_collapsed(&h1, true);
         w.activate(&a);
-        assert_eq!(w.active, Some(b));
+        assert_eq!(active(&w), Some(b));
         // Nor does it expand the group the docked tab would have been shown in.
-        assert!(w.groups[0].collapsed);
+        assert!(groups(&w)[0].collapsed);
         assert_eq!(w.take_raise(), Some(a));
         assert_eq!(w.take_raise(), None);
     }
@@ -905,7 +1265,7 @@ mod tests {
         let (mut w, h1, a, b, _) = two_groups();
         w.set_detached(&a, true);
         assert_eq!(w.open_from(&h1, &doc(1)), Some(Opened::Raised(a.clone())));
-        assert_eq!(w.active, Some(b));
+        assert_eq!(active(&w), Some(b));
         assert_eq!(w.take_raise(), Some(a));
     }
 
@@ -913,7 +1273,7 @@ mod tests {
     fn detaching_the_active_tab_clears_active() {
         let (mut w, _, _, b, _) = two_groups();
         w.set_detached(&b, true);
-        assert_eq!(w.active, None);
+        assert_eq!(active(&w), None);
     }
 
     #[test]
@@ -921,8 +1281,8 @@ mod tests {
         let (mut w, _, a, b, _) = two_groups();
         w.set_detached(&a, true);
         w.make_own_group(&a);
-        assert_eq!(w.groups[1].head.id, a);
-        assert_eq!(w.active, Some(b));
+        assert_eq!(groups(&w)[1].head.id, a);
+        assert_eq!(active(&w), Some(b));
         assert_eq!(w.take_raise(), Some(a));
     }
 
@@ -932,7 +1292,7 @@ mod tests {
         w.set_detached(&a, true);
         w.move_to_group(&a, &h2);
         assert_eq!(member_ids(&w, &h2), vec![a]);
-        assert_eq!(w.active, Some(b));
+        assert_eq!(active(&w), Some(b));
         assert_eq!(w.take_raise(), None);
     }
 
@@ -941,13 +1301,13 @@ mod tests {
         let (mut w, h1, a, b, _) = two_groups();
         w.set_detached(&a, true);
         w.close_tab(&b);
-        assert_eq!(w.active, Some(h1.clone()));
+        assert_eq!(active(&w), Some(h1.clone()));
         // Every neighbour detached: nothing is active.
         let (mut w, h1, a, b, _) = two_groups();
         w.set_detached(&h1, true);
         w.set_detached(&a, true);
         w.close_tab(&b);
-        assert_eq!(w.active, None);
+        assert_eq!(active(&w), None);
     }
 
     #[test]
@@ -957,21 +1317,36 @@ mod tests {
         w.activate(&b);
         w.set_detached(&h2, true);
         w.close_group(&h1);
-        assert_eq!(w.active, Some(h3.clone()));
+        assert_eq!(active(&w), Some(h3.clone()));
         // Only detached heads remain: nothing is active.
         w.set_detached(&h3, true);
-        assert_eq!(w.active, None);
+        assert_eq!(active(&w), None);
         let (mut w, h1, _, _, h2) = two_groups();
         w.set_detached(&h2, true);
         w.close_group(&h1);
-        assert_eq!(w.active, None);
+        assert_eq!(active(&w), None);
     }
 
     #[test]
     fn loading_clears_an_active_detached_tab() {
         let (mut w, _, _, b, _) = two_groups();
         w.tab_mut(&b).unwrap().detached = true;
-        w.rekey_and_repair();
-        assert_eq!(w.active, None);
+        let mut fresh = w.clone();
+        fresh.windows[0].active = None;
+        fresh.restore(BTreeMap::from([(W.to_string(), b)]), vec![]);
+        assert_eq!(fresh.windows[0].active, None);
+    }
+
+    #[test]
+    fn deactivate_clears_only_its_own_window() {
+        let mut w = Workspace::from_config(&two_windows());
+        let one = w.windows[0].groups[0].head.id.clone();
+        let two = w.windows[1].groups[0].head.id.clone();
+        w.activate(&one);
+        w.activate(&two);
+        assert!(w.is_active(&one) && w.is_active(&two));
+        w.deactivate(&one);
+        assert_eq!(w.windows[0].active, None);
+        assert_eq!(w.windows[1].active, Some(two));
     }
 }

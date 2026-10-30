@@ -50,19 +50,22 @@ fn window_identity(state: tauri::State<state::AppState>) -> WindowIdentity {
     }
 }
 
-/// Applies a reloaded config: remembers it, themes every window, retitles the main window, rebuilds
-/// the menu bar (its Window entry and tab shortcuts), and has the chrome re-read its identity. `allow_insecure` is not applied
-/// here; it is read once at launch.
+/// Applies a reloaded config: remembers it, rebases the workspace on its windows, themes every
+/// window, retitles the main window, brings the webviews, sidebar and menu bar (its Window entry
+/// and tab shortcuts) in line, and has the chrome re-read its identity. `allow_insecure` is not
+/// applied here; it is read once at launch.
 fn apply_config(app: &tauri::AppHandle, cfg: config::Config) {
     app.set_theme(cfg.dark_mode.then_some(tauri::Theme::Dark));
     if let Some(w) = app.get_webview_window(MAIN_WINDOW) {
         let _ = w.set_title(&cfg.window_title());
     }
     let state = app.state::<state::AppState>();
+    let fresh = flotilla_core::model::Workspace::from_config(&cfg.workspace_windows());
+    state.ws.lock().unwrap().rebase(fresh);
     *state.config.lock().unwrap() = cfg;
     *state.menu.lock().unwrap() = None;
     let handle = app.clone();
-    let _ = app.run_on_main_thread(move || menu::refresh(&handle));
+    let _ = app.run_on_main_thread(move || tabs::changed(&handle));
     emit_to_main_chrome(app, "config-reloaded", ());
 }
 
@@ -116,10 +119,10 @@ fn load_state(
         notice.raise(msg);
     }
     let persist = persist::Persist::for_load(path, &loaded);
-    let ws = match loaded {
-        Loaded::Restored(ws) => ws,
-        _ => Default::default(),
-    };
+    let mut ws = flotilla_core::model::Workspace::from_config(&config.workspace_windows());
+    if let Loaded::Restored(s) = loaded {
+        ws.restore(s.active, s.recent);
+    }
     state::AppState {
         ws: std::sync::Mutex::new(ws),
         hole: std::sync::Mutex::new(shell_core::compositing::initial_hole(
@@ -165,13 +168,7 @@ fn on_spine_action(app: &tauri::AppHandle, routed: shell_core::menu::Routed) {
             }
         }
         SpineAction::PopOutTab => {
-            let active = app
-                .state::<state::AppState>()
-                .ws
-                .lock()
-                .unwrap()
-                .active
-                .clone();
+            let active = tabs::shown_active(&app.state::<state::AppState>().ws.lock().unwrap());
             if let Some(id) = active {
                 if let Err(e) = commands::pop_out(app, &id) {
                     tabs::notice(app, e);

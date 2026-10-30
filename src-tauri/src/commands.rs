@@ -9,9 +9,6 @@ use serde::Deserialize;
 use shell_core::compositing::{layout_webviews, HoleRect};
 use tauri::{AppHandle, Manager, State, Url, Webview};
 
-/// The login store every group opens in until per-group logins are configurable.
-pub const DEFAULT_STORE: &str = "default";
-
 /// Content webviews load remote origins, which Tauri already refuses app commands to; this keeps
 /// the commands to the main window's own chrome page regardless.
 fn require_chrome(webview: &Webview) -> Result<(), String> {
@@ -43,7 +40,7 @@ pub fn get_workspace(
     require_chrome(&webview)?;
     let ws = state.ws.lock().unwrap();
     Ok(crate::sidebar::sidebar_dto(
-        &ws,
+        tabs::shown(&ws),
         &state.created.lock().unwrap(),
     ))
 }
@@ -109,11 +106,11 @@ pub fn unload_tab(id: TabId, webview: Webview, state: State<AppState>) -> Result
     let active_moved = {
         let mut ws = state.ws.lock().unwrap();
         let mut created = state.created.lock().unwrap();
-        let was_active = ws.active.as_ref() == Some(&id);
+        let was_active = ws.is_active(&id);
         let next = tabs::after_unload(&ws, &created, &id);
         created.remove(&id);
         if was_active {
-            ws.active = None;
+            ws.deactivate(&id);
             if let Some(n) = next {
                 ws.activate(&n);
             }
@@ -142,14 +139,18 @@ pub fn toggle_group(
     Ok(())
 }
 
-/// Opens `url` as a new group (or raises the tab already showing it). The error is for the
-/// sidebar's error bar.
+/// Opens `url` as a new group in the shown window (or raises the tab already showing it). The
+/// error is for the sidebar's error bar.
 #[tauri::command]
 pub fn new_group(url: String, webview: Webview) -> Result<(), String> {
     require_chrome(&webview)?;
     let url = parse_group_url(&url)?;
-    mutate(webview.app_handle(), |ws| {
-        ws.new_group(&url, DEFAULT_STORE);
+    let app = webview.app_handle();
+    let window = tabs::shown(&app.state::<AppState>().ws.lock().unwrap())
+        .map(|w| w.title.clone())
+        .ok_or("The config has no window to open a group in.")?;
+    mutate(app, |ws| {
+        ws.new_group(&window, &url, crate::config::DEFAULT_STORE);
     });
     Ok(())
 }
@@ -210,8 +211,8 @@ pub fn home(app: &AppHandle, id: &TabId) -> Result<(), String> {
     let state = app.state::<AppState>();
     let (home, retry) = {
         let ws = state.ws.lock().unwrap();
-        let home = ws.find(id).ok_or("unknown tab")?.1.home_url.clone();
-        let retry = ws.active.as_ref() == Some(id)
+        let home = ws.find(id).ok_or("unknown tab")?.2.home_url.clone();
+        let retry = ws.is_active(id)
             && !state.created.lock().unwrap().contains(id)
             && state.failed.lock().unwrap().remove(id);
         (home, retry)
@@ -299,7 +300,7 @@ pub fn set_hole_rect(
 /// ⌘W: closes the active tab (a head closes its group).
 pub fn close_active_tab(app: &AppHandle) {
     mutate(app, |ws| {
-        if let Some(id) = ws.active.clone() {
+        if let Some(id) = tabs::shown_active(ws) {
             ws.close_tab(&id);
         }
     });

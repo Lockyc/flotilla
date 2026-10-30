@@ -1,7 +1,7 @@
 //! The chrome-core DTO for the workspace: what the sidebar renders.
 
 use flotilla_core::identity::{kind, Kind};
-use flotilla_core::model::{TabId, Workspace};
+use flotilla_core::model::{TabId, WindowWs};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use url::Url;
@@ -11,9 +11,9 @@ use url::Url;
 /// first (`head: true`) and named by the head's title. `live` is whether the tab's webview exists
 /// (`created`): the row's dot then offers Unload, and tab cycling skips cold rows. `icon` is the
 /// glyph of the kind of Google page the tab opens on; other pages keep chrome-core's letter tile.
-pub fn sidebar_dto(ws: &Workspace, created: &HashSet<TabId>) -> Value {
-    let tabs: Vec<Value> = ws
-        .groups
+pub fn sidebar_dto(window: Option<&WindowWs>, created: &HashSet<TabId>) -> Value {
+    let groups = window.map_or(&[][..], |w| &w.groups[..]);
+    let tabs: Vec<Value> = groups
         .iter()
         .flat_map(|g| {
             std::iter::once((&g.head, true))
@@ -38,13 +38,13 @@ pub fn sidebar_dto(ws: &Workspace, created: &HashSet<TabId>) -> Value {
                 })
         })
         .collect();
-    let collapsed: Vec<&str> = ws
-        .groups
+    let collapsed: Vec<&str> = groups
         .iter()
         .filter(|g| g.collapsed)
         .map(|g| g.head.id.as_str())
         .collect();
-    json!({ "active": ws.active, "collapsed": collapsed, "tabs": tabs })
+    let active = window.and_then(|w| w.active.as_ref());
+    json!({ "active": active, "collapsed": collapsed, "tabs": tabs })
 }
 
 /// The glyph a tab opening on `home_url` shows, if it is a Google page.
@@ -67,6 +67,7 @@ fn glyph(k: Kind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tabs::testing::{new_group, one_window};
     use flotilla_core::model::Opened;
     use serde_json::json;
     use url::Url;
@@ -77,9 +78,8 @@ mod tests {
 
     #[test]
     fn sidebar_dto_orders_groups_and_marks_heads() {
-        let mut ws = Workspace::default();
-        let Opened::Added(h1) =
-            ws.new_group(&url("https://drive.google.com/drive/folders/f1"), "default")
+        let mut ws = one_window();
+        let Opened::Added(h1) = new_group(&mut ws, "https://drive.google.com/drive/folders/f1")
         else {
             panic!()
         };
@@ -91,8 +91,7 @@ mod tests {
             panic!()
         };
         ws.set_title(&m1, "Budget");
-        let Opened::Added(h2) =
-            ws.new_group(&url("https://drive.google.com/drive/folders/f2"), "default")
+        let Opened::Added(h2) = new_group(&mut ws, "https://drive.google.com/drive/folders/f2")
         else {
             panic!()
         };
@@ -100,7 +99,7 @@ mod tests {
         ws.set_collapsed(&h1, true);
         ws.set_detached(&m1, true);
 
-        let dto = sidebar_dto(&ws, &HashSet::from([h2.clone()]));
+        let dto = sidebar_dto(ws.windows.first(), &HashSet::from([h2.clone()]));
         assert_eq!(dto["active"], json!(h2));
         assert_eq!(dto["collapsed"], json!([h1]));
         let rows: Vec<(String, String, String, bool, bool)> = dto["tabs"]
@@ -178,7 +177,8 @@ mod tests {
 
     #[test]
     fn empty_workspace_has_no_rows_and_no_active() {
-        let dto = sidebar_dto(&Workspace::default(), &HashSet::new());
+        let dto = sidebar_dto(one_window().windows.first(), &HashSet::new());
+        assert_eq!(dto, sidebar_dto(None, &HashSet::new()));
         assert_eq!(dto["active"], Value::Null);
         assert_eq!(dto["collapsed"], json!([]));
         assert_eq!(dto["tabs"], json!([]));

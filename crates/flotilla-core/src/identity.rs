@@ -156,6 +156,20 @@ pub fn identity(store: &str, url: &Url) -> DocKey {
     })
 }
 
+/// 64-bit FNV-1a. Spelled out rather than `DefaultHasher`, whose output may change between Rust
+/// releases: tab ids built from it persist in the session file.
+pub fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, b| {
+        (h ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
+/// A tab's id, `"t-<16 hex>"`: the [`fnv1a`] of its key's store, provider and id, NUL-separated.
+pub fn tab_id(key: &DocKey) -> String {
+    let bytes = [key.store.as_str(), &key.provider, &key.id].join("\0");
+    format!("t-{:016x}", fnv1a(bytes.as_bytes()))
+}
+
 const NOISE_PARAMS: &[&str] = &["usp", "pli", "authuser", "ouid", "resourcekey"];
 
 /// A URL normalised for comparing heads: lowercase host without `www.`, no fragment, no trailing
@@ -272,6 +286,31 @@ mod tests {
         ] {
             assert_eq!(head(&u), None, "{u}");
         }
+    }
+
+    #[test]
+    fn tab_ids_are_the_fnv1a_of_the_key() {
+        assert_eq!(fnv1a(b""), 0xcbf29ce484222325);
+        assert_eq!(fnv1a(b"a"), 0xaf63dc4c8601ec8c);
+        let k = DocKey {
+            store: "default".into(),
+            provider: "google".into(),
+            id: ID.into(),
+        };
+        let id = tab_id(&k);
+        assert_eq!(
+            id,
+            format!(
+                "t-{:016x}",
+                fnv1a(format!("default\0google\0{ID}").as_bytes())
+            )
+        );
+        assert_eq!(id.len(), 18);
+        let other = DocKey {
+            store: "work".into(),
+            ..k
+        };
+        assert_ne!(tab_id(&other), id);
     }
 
     #[test]

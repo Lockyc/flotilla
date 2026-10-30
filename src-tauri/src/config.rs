@@ -3,6 +3,7 @@
 
 use config_core::{Colour, Density, NoExtras, TabDigitKeys};
 use flotilla_core::identity::{identity, DocKey};
+use flotilla_core::model::{ConfigGroup, ConfigTab, ConfigWindow};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -34,10 +35,14 @@ pub struct Config {
     pub allow_insecure: Vec<String>,
     /// Reformat the file in house style after each clean reload.
     pub format_on_save: bool,
-    /// The windows, in file order; `parse` normalises each `colour` to `#rrggbb`.
-    #[serde(rename = "window")]
+    /// The windows, in file order; `parse` normalises each `colour` to `#rrggbb`. A file with no
+    /// `[[window]]` has none; the default (a missing file, or the starter) has [`STARTER_WINDOW`].
+    #[serde(rename = "window", default)]
     pub windows: Vec<FlotillaWindow>,
 }
+
+/// The title of the starter config's one window.
+pub const STARTER_WINDOW: &str = "flotilla";
 
 /// One `[[window]]`: config-core's shared keys, groups headed by a URL, documents as tabs.
 pub type FlotillaWindow = config_core::Window<DocTab, NoExtras, FlotillaGroup>;
@@ -80,7 +85,15 @@ pub struct DocTab {
 impl Default for Config {
     fn default() -> Self {
         Config {
-            windows: Vec::new(),
+            windows: vec![config_core::Window {
+                title: STARTER_WINDOW.into(),
+                width: config_core::default_window_width(),
+                height: config_core::default_window_height(),
+                colour: None,
+                open_on_start: true,
+                groups: vec![],
+                extra: NoExtras,
+            }],
             density: Density::Comfortable,
             dark_mode: false,
             tab_digit_keys: TabDigitKeys::Jump,
@@ -102,6 +115,35 @@ impl Config {
     /// The main window's accent (the first `[[window]]`'s), `None` when neutral.
     pub fn accent(&self) -> Option<String> {
         self.windows.first().and_then(|w| w.colour.clone())
+    }
+
+    /// The windows as the workspace model reads them.
+    pub fn workspace_windows(&self) -> Vec<ConfigWindow> {
+        self.windows
+            .iter()
+            .map(|w| ConfigWindow {
+                title: w.title.clone(),
+                groups: w
+                    .groups
+                    .iter()
+                    .map(|g| ConfigGroup {
+                        name: g.name.clone(),
+                        url: g.extra.url.clone(),
+                        store: g.extra.store.clone(),
+                        collapsed: g.extra.collapsed,
+                        tabs: g
+                            .tabs
+                            .iter()
+                            .map(|t| ConfigTab {
+                                title: t.title.clone(),
+                                url: t.url.clone(),
+                                detached: t.detached,
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+            })
+            .collect()
     }
 }
 
@@ -177,7 +219,8 @@ mod tests {
     use super::*;
 
     /// Every top-level key the app reads; the starter config sets each one.
-    const KEYS: [&str; 6] = [
+    const KEYS: [&str; 7] = [
+        "window",
         "density",
         "dark_mode",
         "tab_digit_keys",
@@ -283,6 +326,39 @@ mod tests {
                 title: "Budget".into(),
                 url: SHEET.into(),
                 detached: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn the_starter_window_is_the_default_and_a_file_without_windows_has_none() {
+        assert_eq!(Config::default().window_title(), STARTER_WINDOW);
+        assert!(parse("dark_mode = true\n").unwrap().windows.is_empty());
+    }
+
+    #[test]
+    fn workspace_windows_mirror_the_config() {
+        let cfg = parse(&format!(
+            "[[window]]\ntitle = \" Rotary \"\n\
+             [[window.group]]\nname = \"A\"\nurl = \"{FOLDER}\"\ncollapsed = true\n\
+             [[window.group.tab]]\ntitle = \"Budget\"\nurl = \"{SHEET}\"\ndetached = true\n"
+        ))
+        .unwrap();
+        assert_eq!(
+            cfg.workspace_windows(),
+            vec![ConfigWindow {
+                title: " Rotary ".into(),
+                groups: vec![ConfigGroup {
+                    name: "A".into(),
+                    url: FOLDER.into(),
+                    store: DEFAULT_STORE.into(),
+                    collapsed: true,
+                    tabs: vec![ConfigTab {
+                        title: "Budget".into(),
+                        url: SHEET.into(),
+                        detached: true,
+                    }],
+                }],
             }]
         );
     }

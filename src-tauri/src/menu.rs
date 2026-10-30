@@ -118,20 +118,17 @@ fn item(label: &str, blocked: Option<&str>) -> Item {
 }
 
 fn any_detached(ws: &Workspace) -> bool {
-    ws.groups
-        .iter()
-        .flat_map(|g| std::iter::once(&g.head).chain(g.members.iter()))
-        .any(|t| t.detached)
+    ws.tabs().any(|t| t.detached)
 }
 
 /// The Group menu for `tab` (the active tab for the menu bar, the clicked row for its context
-/// menu). A tab that is not open counts as none.
+/// menu). A tab that is not open counts as none. A member moves to the other groups of its window.
 pub fn menu_state_for(ws: &Workspace, tab: Option<&TabId>) -> MenuState {
     let found = tab.and_then(|id| ws.find(id));
     let no_tab = found.is_none().then_some(NO_TAB);
-    let is_head = found.is_some_and(|(g, t)| g.head.id == t.id);
+    let is_head = found.is_some_and(|(_, g, t)| g.head.id == t.id);
     let move_targets: Vec<(TabId, String)> = match found {
-        Some((own, _)) if !is_head => ws
+        Some((wi, own, _)) if !is_head => ws.windows[wi]
             .groups
             .iter()
             .filter(|g| g.head.id != own.head.id)
@@ -295,7 +292,7 @@ pub fn refresh(app: &AppHandle) {
     let state = app.state::<AppState>();
     let ms = {
         let ws = state.ws.lock().unwrap();
-        menu_state_for(&ws, ws.active.as_ref())
+        menu_state_for(&ws, crate::tabs::shown_active(&ws).as_ref())
     };
     if !needs_rebuild(&mut state.menu.lock().unwrap(), ms.clone()) {
         return;
@@ -314,7 +311,7 @@ pub fn handle(app: &AppHandle, menu_id: &str) -> bool {
     let Some(a) = action(menu_id) else {
         return false;
     };
-    let pick = |t: Option<TabId>, ws: &Workspace| t.or_else(|| ws.active.clone());
+    let pick = |t: Option<TabId>, ws: &Workspace| t.or_else(|| crate::tabs::shown_active(ws));
     match a {
         Action::NewGroup => {
             // The key focus may be in a content webview; the field is in the chrome's.
@@ -355,7 +352,9 @@ pub fn handle(app: &AppHandle, menu_id: &str) -> bool {
             }
         }),
         Action::Reopen(i) => mutate(app, |ws| {
-            ws.reopen_recent(i);
+            if let Some(window) = crate::tabs::shown(ws).map(|w| w.title.clone()) {
+                ws.reopen_recent(&window, i);
+            }
         }),
         Action::ClearRecent => mutate(app, |ws| ws.recent.clear()),
     }
@@ -365,6 +364,7 @@ pub fn handle(app: &AppHandle, menu_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tabs::testing::{new_group, one_window};
     use flotilla_core::model::Opened;
     use url::Url;
 
@@ -374,9 +374,8 @@ mod tests {
 
     /// One group, "Auction" (head h) with a member m.
     fn one_group() -> (Workspace, TabId, TabId) {
-        let mut ws = Workspace::default();
-        let Opened::Added(h) =
-            ws.new_group(&url("https://drive.google.com/drive/folders/f1"), "default")
+        let mut ws = one_window();
+        let Opened::Added(h) = new_group(&mut ws, "https://drive.google.com/drive/folders/f1")
         else {
             panic!()
         };
@@ -391,9 +390,9 @@ mod tests {
     }
 
     fn add_group(ws: &mut Workspace, folder: &str, name: &str) -> TabId {
-        let Opened::Added(h) = ws.new_group(
-            &url(&format!("https://drive.google.com/drive/folders/{folder}")),
-            "default",
+        let Opened::Added(h) = new_group(
+            ws,
+            &format!("https://drive.google.com/drive/folders/{folder}"),
         ) else {
             panic!()
         };
@@ -519,7 +518,7 @@ mod tests {
     fn close_tab_stays_enabled_with_no_active_tab_while_a_tab_is_popped_out() {
         let (mut ws, _, m) = one_group();
         ws.set_detached(&m, true);
-        ws.active = None;
+        ws.windows[0].active = None;
         let s = menu_state_for(&ws, None);
         assert_eq!(s.close_tab, on("Close Tab"));
         assert_eq!(s.home, off("Home — No tab selected"));

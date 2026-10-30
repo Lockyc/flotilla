@@ -30,10 +30,10 @@ pub fn tab_of(window_label: &str) -> Option<TabId> {
 pub fn pop_out(ws: &mut Workspace, created: &HashSet<TabId>, id: &TabId) -> Result<(), String> {
     match ws.find(id) {
         None => return Err("unknown tab".into()),
-        Some((_, t)) if t.detached => return Err("already popped out".into()),
+        Some((_, _, t)) if t.detached => return Err("already popped out".into()),
         Some(_) => {}
     }
-    if ws.active.as_ref() == Some(id) {
+    if ws.is_active(id) {
         if let Some(n) = tabs::after_unload(ws, created, id) {
             ws.activate(&n);
         }
@@ -62,12 +62,13 @@ pub struct WindowPlan {
 }
 
 pub fn plan(ws: &Workspace, open: &HashSet<TabId>) -> WindowPlan {
-    let out = |id: &TabId| ws.find(id).is_some_and(|(_, t)| t.detached);
+    let out = |id: &TabId| ws.find(id).is_some_and(|(_, _, t)| t.detached);
     let mut close: Vec<TabId> = open.iter().filter(|id| !out(id)).cloned().collect();
     close.sort();
     let open = ws
-        .groups
+        .windows
         .iter()
+        .flat_map(|w| w.groups.iter())
         .flat_map(|g| {
             std::iter::once(&g.head)
                 .chain(g.members.iter())
@@ -127,7 +128,7 @@ fn open(app: &AppHandle, t: &Target) -> Result<(), String> {
     let state = app.state::<AppState>();
     let title = {
         let ws = state.ws.lock().unwrap();
-        ws.find(&t.id).map(|(_, tab)| tab.title.clone())
+        ws.find(&t.id).map(|(_, _, tab)| tab.title.clone())
     }
     .unwrap_or_default();
     let colour = state.config.lock().unwrap().accent();
@@ -166,7 +167,7 @@ fn redock(app: &AppHandle, id: &TabId) {
     {
         let state = app.state::<AppState>();
         let mut ws = state.ws.lock().unwrap();
-        if !ws.find(id).is_some_and(|(_, t)| t.detached) {
+        if !ws.find(id).is_some_and(|(_, _, t)| t.detached) {
             return;
         }
         ws.set_detached(id, false);
@@ -196,6 +197,7 @@ pub fn pop_in(app: &AppHandle, id: &TabId) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tabs::testing::{new_group, one_window};
     use flotilla_core::model::Opened;
     use url::Url;
 
@@ -208,9 +210,8 @@ mod tests {
 
     /// A folder head with two docs; the second doc is active.
     fn ws() -> (Workspace, TabId, TabId, TabId) {
-        let mut ws = Workspace::default();
-        let Opened::Added(h) =
-            ws.new_group(&url("https://drive.google.com/drive/folders/f1"), "default")
+        let mut ws = one_window();
+        let Opened::Added(h) = new_group(&mut ws, "https://drive.google.com/drive/folders/f1")
         else {
             panic!()
         };
@@ -240,23 +241,23 @@ mod tests {
     fn popping_out_the_active_tab_hands_the_main_window_to_a_live_neighbour() {
         let (mut ws, h, _, b) = ws();
         pop_out(&mut ws, &set(&[&h, &b]), &b).unwrap();
-        assert!(ws.find(&b).unwrap().1.detached);
-        assert_eq!(ws.active, Some(h));
+        assert!(ws.find(&b).unwrap().2.detached);
+        assert_eq!(ws.windows[0].active, Some(h));
     }
 
     #[test]
     fn popping_out_the_last_live_tab_leaves_the_main_window_blank() {
         let (mut ws, _, _, b) = ws();
         pop_out(&mut ws, &set(&[&b]), &b).unwrap();
-        assert_eq!(ws.active, None);
+        assert_eq!(ws.windows[0].active, None);
     }
 
     #[test]
     fn popping_out_another_tab_keeps_the_active_one() {
         let (mut ws, _, a, b) = ws();
         pop_out(&mut ws, &set(&[&b]), &a).unwrap();
-        assert!(ws.find(&a).unwrap().1.detached);
-        assert_eq!(ws.active, Some(b));
+        assert!(ws.find(&a).unwrap().2.detached);
+        assert_eq!(ws.windows[0].active, Some(b));
     }
 
     #[test]
@@ -272,14 +273,14 @@ mod tests {
         let (mut ws, _, a, b) = ws();
         ws.set_detached(&a, true);
         assert_eq!(apply(&mut ws, |ws| ws.activate(&a)), Some(a));
-        assert_eq!(ws.active, Some(b));
+        assert_eq!(ws.windows[0].active, Some(b));
     }
 
     #[test]
     fn selecting_a_docked_row_raises_nothing() {
         let (mut ws, h, _, _) = ws();
         assert_eq!(apply(&mut ws, |ws| ws.activate(&h)), None);
-        assert_eq!(ws.active, Some(h));
+        assert_eq!(ws.windows[0].active, Some(h));
     }
 
     #[test]
@@ -288,7 +289,7 @@ mod tests {
         let (mut ws, _, a, b) = ws();
         ws.set_detached(&a, true);
         assert_eq!(apply(&mut ws, |ws| ws.make_own_group(&a)), Some(a));
-        assert_eq!(ws.active, Some(b));
+        assert_eq!(ws.windows[0].active, Some(b));
     }
 
     #[test]
@@ -320,7 +321,7 @@ mod tests {
             )))
         );
         assert_eq!(raised, Some(a));
-        assert_eq!(ws.active, Some(h));
+        assert_eq!(ws.windows[0].active, Some(h));
     }
 
     #[test]

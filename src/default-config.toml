@@ -21,6 +21,10 @@ format_on_save = false
 
 # Windows, each holding groups of documents. flotilla writes these as you work; a hand edit
 # sticks. A document is open once across every window.
+[[window]]
+title = "flotilla"
+
+# Another window, with every key a window, its groups and their documents take:
 #
 # [[window]]
 # title = "Rotary"            # the window's name: sidebar banner, window title, Window menu

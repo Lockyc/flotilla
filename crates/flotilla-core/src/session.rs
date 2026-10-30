@@ -1,15 +1,46 @@
-//! Persisting the workspace: one JSON file the shell points us at. Keys are derived data and are
-//! re-derived on load (`Workspace::rekey_and_repair`), never trusted from disk.
+//! Persisting the run state: one JSON file the shell points us at, holding each window's active
+//! tab and Recent. The windows and groups themselves live in the config. Keys and ids in it are
+//! derived data, re-derived when applied (`Workspace::restore`), never trusted from disk.
 
-use crate::model::Workspace;
+use crate::model::{Group, TabId, Workspace};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::ErrorKind;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const SESSION_VERSION: u32 = 1;
+pub const SESSION_VERSION: u32 = 2;
+
+/// What a session file keeps: each window's active tab by window title, and Recent.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Session {
+    pub active: BTreeMap<String, TabId>,
+    pub recent: Vec<Group>,
+}
+
+impl Session {
+    pub fn of(ws: &Workspace) -> Session {
+        Session {
+            active: ws
+                .windows
+                .iter()
+                .filter_map(|w| Some((w.title.clone(), w.active.clone()?)))
+                .collect(),
+            recent: ws.recent.clone(),
+        }
+    }
+}
+
+/// A version 1 session, from before the workspace lived in the config: the one window's groups,
+/// Recent, and its active tab.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct V1Session {
+    pub groups: Vec<Group>,
+    pub recent: Vec<Group>,
+    pub active: Option<TabId>,
+}
 
 /// What `load` found at the session path.
 ///
@@ -18,7 +49,10 @@ pub const SESSION_VERSION: u32 = 1;
 #[derive(Debug, PartialEq, Eq)]
 pub enum Loaded {
     Fresh,
-    Restored(Workspace),
+    Restored(Session),
+    /// A version 1 file, left in place: its groups are the workspace until they move into the
+    /// config.
+    V1(V1Session),
     /// The file was unparseable or from a newer build; it was moved here, not deleted.
     Quarantined {
         moved_to: PathBuf,
@@ -34,22 +68,27 @@ struct Header {
     version: u32,
 }
 
+#[derive(Deserialize)]
+struct V1File {
+    workspace: V1Session,
+}
+
 pub fn load(path: &Path) -> Loaded {
     let bytes = match fs::read(path) {
         Ok(b) => b,
         Err(e) if e.kind() == ErrorKind::NotFound => return Loaded::Fresh,
         Err(e) => return quarantine(path, format!("cannot read {}: {e}", path.display())),
     };
-    let current =
-        serde_json::from_slice::<Header>(&bytes).is_ok_and(|h| h.version <= SESSION_VERSION);
-    if current {
-        if let Ok(f) = serde_json::from_slice::<File>(&bytes) {
-            let mut ws = f.workspace;
-            ws.rekey_and_repair();
-            return Loaded::Restored(ws);
-        }
-    }
-    quarantine(path, format!("cannot parse {}", path.display()))
+    let parsed = match serde_json::from_slice::<Header>(&bytes).map(|h| h.version) {
+        Ok(SESSION_VERSION) => serde_json::from_slice::<File>(&bytes)
+            .ok()
+            .map(|f| Loaded::Restored(f.session)),
+        Ok(1) => serde_json::from_slice::<V1File>(&bytes)
+            .ok()
+            .map(|f| Loaded::V1(f.workspace)),
+        _ => None,
+    };
+    parsed.unwrap_or_else(|| quarantine(path, format!("cannot parse {}", path.display())))
 }
 
 fn quarantine(path: &Path, reason: String) -> Loaded {
@@ -71,12 +110,12 @@ fn quarantine(path: &Path, reason: String) -> Loaded {
     }
 }
 
-/// Writes `<path>.tmp`, fsyncs it, then renames over `path`, so a crash leaves the old file or the
-/// new one, never half of either.
+/// Writes `ws`'s [`Session`] to `<path>.tmp`, fsyncs it, then renames over `path`, so a crash
+/// leaves the old file or the new one, never half of either.
 pub fn save(path: &Path, ws: &Workspace) -> std::io::Result<()> {
     let file = File {
         version: SESSION_VERSION,
-        workspace: ws.clone(),
+        session: Session::of(ws),
     };
     let json = serde_json::to_vec_pretty(&file).map_err(std::io::Error::other)?;
     let mut tmp = path.as_os_str().to_owned();
@@ -100,46 +139,98 @@ pub fn save(path: &Path, ws: &Workspace) -> std::io::Result<()> {
 #[derive(Serialize, Deserialize)]
 struct File {
     version: u32,
-    workspace: Workspace,
+    #[serde(flatten)]
+    session: Session,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::Opened;
+    use crate::model::{ConfigWindow, Opened};
     use url::Url;
 
+    fn url(s: &str) -> Url {
+        Url::parse(s).unwrap()
+    }
+
+    /// Windows A and B; A shows a docked member, B its head, and one group is in Recent.
     fn sample() -> Workspace {
-        let mut w = Workspace::default();
-        let f = Url::parse("https://drive.google.com/drive/folders/f1").unwrap();
-        let d =
-            Url::parse("https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrSt01/edit").unwrap();
-        let Opened::Added(h) = w.new_group(&f, "work") else {
+        let window = |t: &str| ConfigWindow {
+            title: t.into(),
+            groups: vec![],
+        };
+        let mut w = Workspace::from_config(&[window("A"), window("B")]);
+        let f = url("https://drive.google.com/drive/folders/f1");
+        let d = url("https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrSt01/edit");
+        let Some(Opened::Added(h)) = w.new_group("A", &f, "work") else {
             panic!()
         };
         let Some(Opened::Added(m)) = w.open_from(&h, &d) else {
             panic!()
         };
         w.set_title(&m, "Budget");
-        w.set_detached(&m, true);
-        w.set_collapsed(&h, true);
-        let g2 = Url::parse("https://drive.google.com/drive/folders/f2").unwrap();
-        let Opened::Added(h2) = w.new_group(&g2, "default") else {
+        let g2 = url("https://drive.google.com/drive/folders/f2");
+        let Some(Opened::Added(h2)) = w.new_group("B", &g2, "default") else {
             panic!()
         };
         w.close_group(&h2);
+        let g3 = url("https://drive.google.com/drive/folders/f3");
+        w.new_group("B", &g3, "default").unwrap();
         w.activate(&m);
-        w.set_collapsed(&h, true);
         w
     }
 
     #[test]
-    fn round_trip_preserves_groups_recent_active_collapsed_detached() {
+    fn session_v2_round_trips() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("session.json");
         let w = sample();
         save(&p, &w).unwrap();
-        assert_eq!(load(&p), Loaded::Restored(w));
+        let Loaded::Restored(s) = load(&p) else {
+            panic!()
+        };
+        assert_eq!(s, Session::of(&w));
+        assert_eq!(s.active.len(), 2);
+        assert_eq!(s.recent.len(), 1);
+        // Restored onto the same windows, the run state comes back whole.
+        let mut fresh = w.clone();
+        for win in &mut fresh.windows {
+            win.active = None;
+        }
+        fresh.recent.clear();
+        fresh.restore(s.active, s.recent);
+        assert_eq!(fresh, w);
+        let json = fs::read_to_string(&p).unwrap();
+        assert!(
+            json.contains("\"version\": 2") && !json.contains("\"groups\""),
+            "{json}"
+        );
+    }
+
+    #[test]
+    fn a_v1_session_loads_as_v1() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("session.json");
+        let key = r#"{"store":"default","provider":"head","id":"https://drive.google.com/drive/folders/f1"}"#;
+        let head = format!(
+            r#"{{"id":"t-1","home_url":"https://drive.google.com/drive/folders/f1","title":"Auction","key":{key},"detached":false}}"#
+        );
+        let group = format!(r#"{{"head":{head},"members":[],"collapsed":true,"store":"default"}}"#);
+        fs::write(
+            &p,
+            format!(
+                r#"{{"version":1,"workspace":{{"groups":[{group}],"recent":[],"active":"t-1","next_id":1}}}}"#
+            ),
+        )
+        .unwrap();
+        let Loaded::V1(v1) = load(&p) else { panic!() };
+        assert_eq!(v1.active.as_deref(), Some("t-1"));
+        assert_eq!(v1.groups[0].head.title, "Auction");
+        assert!(v1.groups[0].collapsed);
+        assert!(
+            p.exists(),
+            "a v1 session stays where it is for the migration"
+        );
     }
 
     #[test]
@@ -170,11 +261,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("session.json");
         save(&p, &sample()).unwrap();
-        let v2 = fs::read_to_string(&p)
+        let v3 = fs::read_to_string(&p)
             .unwrap()
-            .replacen("\"version\": 1", "\"version\": 2", 1);
-        assert!(v2.contains("\"version\": 2"));
-        fs::write(&p, v2).unwrap();
+            .replacen("\"version\": 2", "\"version\": 3", 1);
+        assert!(v3.contains("\"version\": 3"));
+        fs::write(&p, v3).unwrap();
         assert!(matches!(load(&p), Loaded::Quarantined { .. }));
         assert!(!p.exists());
     }
@@ -194,20 +285,6 @@ mod tests {
         assert!(r.is_err());
         assert_eq!(fs::read_to_string(&p).unwrap(), before);
         assert!(!dir.path().join("session.json.tmp").exists());
-    }
-
-    #[test]
-    fn load_rekeys_and_repairs_a_tampered_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let p = dir.path().join("session.json");
-        let w = sample();
-        save(&p, &w).unwrap();
-        let mut v: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&p).unwrap()).unwrap();
-        v["workspace"]["groups"][0]["head"]["key"]["id"] = "bogus".into();
-        v["workspace"]["next_id"] = 0.into();
-        fs::write(&p, v.to_string()).unwrap();
-        assert_eq!(load(&p), Loaded::Restored(w));
     }
 
     fn chmod(p: &Path, mode: u32) {

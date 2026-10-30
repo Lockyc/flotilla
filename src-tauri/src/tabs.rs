@@ -3,7 +3,7 @@
 
 use crate::state::AppState;
 use crate::MAIN_WINDOW;
-use flotilla_core::model::{Tab, TabId, Workspace};
+use flotilla_core::model::{Tab, TabId, WindowWs, Workspace};
 use flotilla_core::nav::{self, Decision, Origin};
 use shell_core::compositing::HoleRect;
 use shell_core::tabs::pick_live_neighbour;
@@ -54,11 +54,28 @@ pub struct ViewPlan {
     pub hide: Vec<TabId>,
 }
 
+/// The workspace window the main window shows: the config's first.
+pub fn shown(ws: &Workspace) -> Option<&WindowWs> {
+    ws.windows.first()
+}
+
+/// The main window's active tab.
+pub fn shown_active(ws: &Workspace) -> Option<TabId> {
+    shown(ws).and_then(|w| w.active.clone())
+}
+
+/// Whether `id` is a docked tab of the window the main window shows.
+fn shown_here(ws: &Workspace, id: &TabId) -> bool {
+    ws.find(id).is_some_and(|(wi, _, t)| wi == 0 && !t.detached)
+}
+
 /// The tab to activate after unloading `id`: shell-core's `pick_live_neighbour` over the sidebar's
-/// row order, eligible = has a webview, is visible (not a member of a collapsed group) and is not
-/// popped out. `None` leaves the hole blank; a cold tab is never woken to fill it.
+/// row order in `id`'s window, eligible = has a webview, is visible (not a member of a collapsed
+/// group) and is not popped out. `None` leaves the hole blank; a cold tab is never woken to fill
+/// it.
 pub fn after_unload(ws: &Workspace, created: &HashSet<TabId>, id: &TabId) -> Option<TabId> {
-    let rows: Vec<(&Tab, bool)> = ws
+    let (wi, _, _) = ws.find(id)?;
+    let rows: Vec<(&Tab, bool)> = ws.windows[wi]
         .groups
         .iter()
         .flat_map(|g| {
@@ -75,15 +92,15 @@ pub fn after_unload(ws: &Workspace, created: &HashSet<TabId>, id: &TabId) -> Opt
 
 /// `failed` tabs are not created again (see `AppState::failed`).
 pub fn plan(ws: &Workspace, created: &HashSet<TabId>, failed: &HashSet<TabId>) -> ViewPlan {
-    let here = |id: &TabId| ws.find(id).is_some_and(|(_, t)| !t.detached);
+    let here = |id: &TabId| shown_here(ws, id);
     let mut close: Vec<TabId> = created.iter().filter(|id| !here(id)).cloned().collect();
     close.sort();
-    let show = ws.active.clone().filter(here);
+    let show = shown_active(ws).filter(here);
     let create = show
         .as_ref()
         .filter(|id| !created.contains(*id) && !failed.contains(*id))
         .and_then(|id| ws.find(id))
-        .map(|(g, t)| Target {
+        .map(|(_, g, t)| Target {
             id: t.id.clone(),
             home_url: t.home_url.clone(),
             store: g.store.clone(),
@@ -167,7 +184,7 @@ pub fn push_dto(app: &AppHandle) {
     let dto = {
         let ws = state.ws.lock().unwrap();
         let created = state.created.lock().unwrap();
-        crate::sidebar::sidebar_dto(&ws, &created)
+        crate::sidebar::sidebar_dto(shown(&ws), &created)
     };
     let _ = app.emit_to(MAIN_WINDOW, "workspace", dto);
     crate::menu::refresh(app);
@@ -198,7 +215,7 @@ pub(crate) fn focused_webview(app: &AppHandle) -> Option<tauri::Webview> {
     if window.label() != MAIN_WINDOW {
         return None;
     }
-    let active = app.state::<AppState>().ws.lock().unwrap().active.clone()?;
+    let active = shown_active(&app.state::<AppState>().ws.lock().unwrap())?;
     own_webview(&window, &active)
 }
 
@@ -253,7 +270,7 @@ fn intercept(app: &AppHandle, label: &str, url: &Url, o: LinkOrigin) -> bool {
     let (decision, front) = {
         let state = app.state::<AppState>();
         let mut ws = state.ws.lock().unwrap();
-        let from_popout = ws.find(&id).is_some_and(|(_, t)| t.detached);
+        let from_popout = ws.find(&id).is_some_and(|(_, _, t)| t.detached);
         let mut decision = Decision::PassThrough;
         let raised = crate::detach::apply(&mut ws, |ws| {
             decision = nav::decide(ws, &id, url, origin(o));
@@ -313,7 +330,7 @@ fn retitle(app: &AppHandle, label: &str, title: &str) {
         let mut ws = state.ws.lock().unwrap();
         let adopt = ws
             .find(&id)
-            .is_some_and(|(_, t)| adopt_title(&t.title, title));
+            .is_some_and(|(_, _, t)| adopt_title(&t.title, title));
         if adopt {
             ws.set_title(&id, title);
         }
@@ -325,10 +342,30 @@ fn retitle(app: &AppHandle, label: &str, title: &str) {
     }
 }
 
+/// A workspace of one empty window, `W`, and a way to head a group in it: what the shell's tests
+/// build on.
+#[cfg(test)]
+pub(crate) mod testing {
+    use flotilla_core::model::{ConfigWindow, Opened, Workspace};
+
+    pub fn one_window() -> Workspace {
+        Workspace::from_config(&[ConfigWindow {
+            title: "W".into(),
+            groups: vec![],
+        }])
+    }
+
+    pub fn new_group(ws: &mut Workspace, url: &str) -> Opened {
+        ws.new_group("W", &url::Url::parse(url).unwrap(), "default")
+            .unwrap()
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::testing::{new_group, one_window};
     use super::*;
-    use flotilla_core::model::Opened;
+    use flotilla_core::model::{ConfigWindow, Opened};
     use url::Url;
 
     fn url(s: &str) -> Url {
@@ -340,9 +377,8 @@ mod tests {
 
     /// A folder head with two docs; the second doc is active.
     fn ws() -> (Workspace, TabId, TabId, TabId) {
-        let mut ws = Workspace::default();
-        let Opened::Added(h) =
-            ws.new_group(&url("https://drive.google.com/drive/folders/f1"), "default")
+        let mut ws = one_window();
+        let Opened::Added(h) = new_group(&mut ws, "https://drive.google.com/drive/folders/f1")
         else {
             panic!()
         };
@@ -400,8 +436,7 @@ mod tests {
     #[test]
     fn unload_skips_hidden_and_popped_out_tabs() {
         let (mut ws, h, a, b) = ws();
-        let Opened::Added(h2) =
-            ws.new_group(&url("https://drive.google.com/drive/folders/f2"), "default")
+        let Opened::Added(h2) = new_group(&mut ws, "https://drive.google.com/drive/folders/f2")
         else {
             panic!()
         };
@@ -471,6 +506,25 @@ mod tests {
         // Closing b activated a, which is now popped out: nothing here to show.
         assert_eq!(p.show, None);
         assert_eq!(p.hide, vec![h]);
+    }
+
+    #[test]
+    fn the_main_window_shows_the_first_config_window_only() {
+        let window = |t: &str| ConfigWindow {
+            title: t.into(),
+            groups: vec![],
+        };
+        let mut ws = Workspace::from_config(&[window("A"), window("B")]);
+        let Some(Opened::Added(b)) = ws.new_group(
+            "B",
+            &url("https://drive.google.com/drive/folders/f2"),
+            "default",
+        ) else {
+            panic!()
+        };
+        let p = plan(&ws, &set(&[&b]), &HashSet::new());
+        assert_eq!(p.show, None);
+        assert_eq!(p.close, vec![b]);
     }
 
     #[test]
