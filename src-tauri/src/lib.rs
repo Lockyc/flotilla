@@ -151,6 +151,8 @@ pub fn run() {
             commands::toggle_group,
             commands::new_group,
             commands::home_tab,
+            commands::nav_back,
+            commands::nav_forward,
             commands::unload_tab,
             commands::pop_out_tab,
             commands::pop_in_tab,
@@ -195,6 +197,9 @@ pub fn run() {
             // menu bar); every popped-out tab reopens in its own window.
             tabs::sync(app.handle());
             detach::reconcile(app.handle());
+
+            let nav_handle = app.handle().clone();
+            shell_core::mouse_nav::install(move || tabs::focused_webview(&nav_handle));
 
             // Row context menus' events arrive here too.
             app.on_menu_event(move |app, event| {

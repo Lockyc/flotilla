@@ -22,8 +22,48 @@ function reportRect() {
   invoke("set_hole_rect", { rect: { x: r.x, y: r.y, width: r.width, height: r.height } }).catch(() => {});
 }
 
+// ── Nav pill: back / forward / home, acting on the active tab ───────────────
+const BACK_SVG = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>`;
+const FWD_SVG = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>`;
+const HOME_SVG = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/></svg>`;
+
+let activeId = null; // mirror of the DTO's `active`, which the nav pill acts on
+let navBtns = [];
+
+function navPill() {
+  const pill = document.createElement("div");
+  pill.className = "nav-pill";
+  const wire = (icon, cmd, name) => {
+    const btn = document.createElement("button");
+    btn.className = "nav-btn";
+    btn.innerHTML = icon;
+    btn.dataset.name = name;
+    btn.addEventListener("click", () => {
+      if (activeId) invoke(cmd, { id: activeId }).catch((err) => sb.setError(String(err)));
+    });
+    pill.appendChild(btn);
+    return btn;
+  };
+  navBtns = [
+    wire(BACK_SVG, "nav_back", "Back"),
+    wire(FWD_SVG, "nav_forward", "Forward"),
+    wire(HOME_SVG, "home_tab", "Home"),
+  ];
+  setActive(null);
+  return pill;
+}
+
+function setActive(id) {
+  activeId = id;
+  for (const b of navBtns) {
+    b.disabled = !id;
+    b.title = id ? b.dataset.name : `${b.dataset.name} — no tab open`;
+  }
+}
+
 // chrome-core's window DTO: the identity fields plus Rust's `{ tabs, active, collapsed }`.
 function windowDto(ws) {
+  setActive(ws.active ?? null);
   return {
     title: identity.title,
     colour: identity.colour ?? null,
@@ -33,7 +73,15 @@ function windowDto(ws) {
   };
 }
 
-// The header slot's field: Enter opens the typed or pasted link as a new group.
+// The header slot: the nav pill, then the new-group field.
+function bannerControls() {
+  const row = document.createElement("div");
+  row.id = "banner-controls";
+  row.append(navPill(), newGroupField());
+  return row;
+}
+
+// Enter opens the typed or pasted link as a new group.
 function newGroupField() {
   const input = document.createElement("input");
   input.id = "new-group";
@@ -86,7 +134,7 @@ async function mountChrome() {
       },
     },
     {
-      header: newGroupField(),
+      header: bannerControls(),
       appName: "flotilla",
       storageKey: "flotilla:sidebar-width",
       defaultWidth: identity.default_width,

@@ -185,6 +185,20 @@ pub(crate) fn own_webview(window: &Window, id: &str) -> Option<tauri::Webview> {
         .filter(|wv| wv.window().label() == window.label())
 }
 
+/// The page the mouse's back/forward buttons act on: the focused popped-out window's tab, else the
+/// main window's active tab.
+pub(crate) fn focused_webview(app: &AppHandle) -> Option<tauri::Webview> {
+    let window = app.get_focused_window()?;
+    if let Some(id) = crate::detach::tab_of(window.label()) {
+        return window.get_webview(&label(&id));
+    }
+    if window.label() != MAIN_WINDOW {
+        return None;
+    }
+    let active = app.state::<AppState>().ws.lock().unwrap().active.clone()?;
+    own_webview(&window, &active)
+}
+
 /// Creates tab `t`'s content webview in `window` (the main window, or its popped-out one).
 pub(crate) fn create(window: &Window, t: &Target, hole: HoleRect) -> Result<(), String> {
     let url = Url::parse(&t.home_url).map_err(|e| e.to_string())?;

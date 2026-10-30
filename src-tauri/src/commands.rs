@@ -160,6 +160,26 @@ pub fn home_tab(id: TabId, webview: Webview) -> Result<(), String> {
     home(webview.app_handle(), &id)
 }
 
+/// The Back button: tab `id`'s page steps back through its history. A tab with no webview has none.
+#[tauri::command]
+pub fn nav_back(id: TabId, webview: Webview) -> Result<(), String> {
+    step_history(&webview, &id, "history.back()")
+}
+
+/// The Forward button.
+#[tauri::command]
+pub fn nav_forward(id: TabId, webview: Webview) -> Result<(), String> {
+    step_history(&webview, &id, "history.forward()")
+}
+
+fn step_history(webview: &Webview, id: &TabId, js: &str) -> Result<(), String> {
+    require_chrome(webview)?;
+    match tabs::own_webview(&webview.window(), id) {
+        Some(wv) => wv.eval(js).map_err(|e| e.to_string()),
+        None => Ok(()),
+    }
+}
+
 /// Opens the row menu for tab `id` at the chrome's `(x, y)`: the Group menu acting on that row.
 #[tauri::command]
 pub fn row_menu(
