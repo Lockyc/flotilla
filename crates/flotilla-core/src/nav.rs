@@ -7,7 +7,8 @@ use crate::model::{Opened, TabId, Workspace};
 use url::Url;
 
 /// How the shell was asked to go to the URL; mirrors shell-core's `LinkOrigin` so core stays
-/// tauri-free.
+/// tauri-free. The rule in `decide` is origin-independent; the parameter carries the origin for
+/// callers and logging.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Origin {
     NewWindow,
@@ -15,12 +16,20 @@ pub enum Origin {
     Navigation,
 }
 
+/// What the shell does with the navigation.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Decision {
+    /// The workspace already added or raised a tab for the document; the shell consumes the
+    /// navigation and shows that tab.
     Open(Opened),
+    /// Not ours: shell-core's own routing runs.
     PassThrough,
 }
 
+/// Decides what `url`, requested from tab `from`, does. On `Open` this has already mutated `ws`;
+/// the caller must then consume the navigation (return true from shell-core's intercept) so
+/// WebKit does not also load the URL into the `from` webview. Creating or raising the webviews is
+/// the caller's, deferred off the policy callback.
 pub fn decide(ws: &mut Workspace, from: &TabId, url: &Url, _origin: Origin) -> Decision {
     let Some((group, tab)) = ws.find(from) else {
         return Decision::PassThrough;
@@ -62,6 +71,24 @@ mod tests {
                 Decision::Open(Opened::Added(_))
             ));
         }
+    }
+
+    #[test]
+    fn doc_open_elsewhere_raises_it() {
+        let mut w = Workspace::default();
+        let h = head(&mut w);
+        let Some(Opened::Added(m)) = w.open_from(&h, &doc(A)) else {
+            panic!()
+        };
+        let other = Url::parse("https://drive.google.com/drive/folders/fold2").unwrap();
+        let Opened::Added(h2) = w.new_group(&other, "default") else {
+            panic!()
+        };
+        assert_eq!(
+            decide(&mut w, &h2, &doc(A), Origin::Click),
+            Decision::Open(Opened::Raised(m))
+        );
+        assert!(w.find(&h2).is_some_and(|(g, _)| g.members.is_empty()));
     }
 
     #[test]
