@@ -846,6 +846,25 @@ mod tests {
     }
 
     #[test]
+    fn set_home_moves_a_url_name_with_it() {
+        let sub = "https://drive.google.com/drive/folders/sub";
+        let (ws, writes) = run_with(|ws| {
+            let two = id_of(ws, F2);
+            let mut w = change(ws, |ws| ws.set_title(&two, F2)).1;
+            w.extend(
+                change_rekey(ws, |ws| {
+                    ws.set_home(&two, &url(sub)).map(|n| (two.clone(), n))
+                })
+                .1,
+            );
+            w
+        });
+        assert!(matches!(&writes[1], Write::SetUrl { url: None, new_url, .. } if new_url == sub));
+        assert!(matches!(&writes[2], Write::SetName { name, .. } if name == sub));
+        assert_eq!(ws.windows[0].groups[1].head.title, sub);
+    }
+
+    #[test]
     fn set_home_on_a_doc_rewrites_its_url() {
         let (ws, writes) = run_with(|ws| {
             let budget = id_of(ws, D1);

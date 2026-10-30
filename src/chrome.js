@@ -169,8 +169,9 @@ new ResizeObserver(() => reportRect()).observe(document.getElementById("content-
 
 // ── Rename… : the row's name becomes a field in place ──────────────────────
 // While a name is being edited, workspace pushes are held (a repaint would drop the field) and the
-// latest one applied when the edit ends.
-let renaming = null; // { input, title } while editing
+// latest one applied when the edit ends. Enter or leaving the field saves the name, as in Finder;
+// Escape keeps the old one.
+let renaming = null; // { id, name, input, title } while editing
 let heldDto = null;
 
 function update(dto) {
@@ -178,21 +179,27 @@ function update(dto) {
   else sb.update(windowDto(dto));
 }
 
-function endRename() {
-  if (!renaming) return;
-  renaming.input.remove();
-  renaming.title.style.display = "";
+function endRename(save) {
+  // Cleared before the field is removed: removing it blurs it, which calls back in here.
+  const r = renaming;
+  if (!r) return;
   renaming = null;
+  r.input.remove();
+  r.title.style.display = "";
   if (heldDto) {
     const dto = heldDto;
     heldDto = null;
     sb.update(windowDto(dto));
   }
+  if (save && r.input.value !== r.name) {
+    invoke("rename_tab", { id: r.id, name: r.input.value }).catch((err) => sb.setError(String(err)));
+  }
 }
 
 function beginRename(id, name) {
-  endRename();
-  const row = document.querySelector(`.cc-tab[data-id="${CSS.escape(id)}"]`);
+  endRename(true);
+  // A row hidden by a search is shown again (its group was already expanded by Rust).
+  const row = sb._revealRow(id);
   const title = row && row.querySelector(".cc-title");
   if (!title) return;
   const input = document.createElement("input");
@@ -206,16 +213,13 @@ function beginRename(id, name) {
   }
   input.addEventListener("keydown", (e) => {
     e.stopPropagation();
-    if (e.key === "Escape") endRename();
-    if (e.key !== "Enter") return;
-    const value = input.value;
-    endRename();
-    invoke("rename_tab", { id, name: value }).catch((err) => sb.setError(String(err)));
+    if (e.key === "Escape") endRename(false);
+    if (e.key === "Enter") endRename(true);
   });
-  input.addEventListener("blur", () => endRename());
+  input.addEventListener("blur", () => endRename(true));
   title.style.display = "none";
   title.after(input);
-  renaming = { input, title };
+  renaming = { id, name, input, title };
   input.focus();
   input.select();
 }

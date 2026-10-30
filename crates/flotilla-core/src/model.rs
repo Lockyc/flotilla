@@ -10,7 +10,7 @@
 //! registry is not a separate index: it is derived by scanning the tabs, so it cannot drift from
 //! them.
 
-use crate::identity::{doc_key, identity, tab_id, DocKey};
+use crate::identity::{doc_key, head_key, identity, tab_id, DocKey};
 use serde::{Deserialize, Serialize};
 use shell_core::tabs::pick_live_neighbour;
 use std::collections::BTreeMap;
@@ -621,7 +621,14 @@ impl Workspace {
     /// if it can't.
     pub fn set_home_blocked(&self, id: &TabId, current: Option<&Url>) -> Option<SetHomeBlock> {
         let (_, g, t) = self.find(id)?;
-        let Some(current) = current.filter(|c| c.as_str() != t.home_url) else {
+        // At home when the page is its home, by `head_key`: an address the page decorated on
+        // load (`?tab=…`, `#heading=…`, `/u/0/`) is still home; another view of it is not.
+        let home = Url::parse(&t.home_url).map(|h| head_key(&h));
+        let at_home = |c: &&Url| {
+            home.as_ref()
+                .map_or(c.as_str() == t.home_url, |h| *h == head_key(c))
+        };
+        let Some(current) = current.filter(|c| !at_home(c)) else {
             return Some(SetHomeBlock::AtHome);
         };
         if !matches!(current.scheme(), "http" | "https") {
@@ -633,8 +640,9 @@ impl Workspace {
     }
 
     /// Makes `url` tab `id`'s home: its `home_url`, and so its key and id, change in place. It
-    /// keeps its title, its place, whether it is detached, and its window's selection; a head
-    /// keeps its members. Returns the tab's new id.
+    /// keeps its title (a title that is still the old URL becomes the new one), its place, whether
+    /// it is detached, and its window's selection; a head keeps its members. Returns the tab's new
+    /// id.
     pub fn set_home(&mut self, id: &TabId, url: &Url) -> Result<TabId, SetHomeBlock> {
         if let Some(block) = self
             .set_home_blocked(id, Some(url))
@@ -646,6 +654,10 @@ impl Workspace {
         let store = self.windows[wi].groups[gi].store.clone();
         let fresh = tab(url, "", &store, false);
         let t = self.tab_mut(id).expect("located");
+        // A title that is still the URL moves with it, so the page's title can still replace it.
+        if t.title == t.home_url {
+            t.title = fresh.home_url.clone();
+        }
         t.key = fresh.key;
         t.id = fresh.id.clone();
         t.home_url = fresh.home_url;
@@ -1490,6 +1502,31 @@ mod tests {
         w.deactivate(&one);
         assert_eq!(w.windows[0].active, None);
         assert_eq!(w.windows[1].active, Some(two));
+    }
+
+    #[test]
+    fn set_home_carries_a_title_that_is_still_the_url() {
+        let mut w = ws();
+        let h = head_of(&mut w, 1);
+        // Never named by its page: its title is its URL, and moves with it so a title can follow.
+        let sub = folder(8);
+        let new = w.set_home(&h, &sub).unwrap();
+        assert_eq!(w.find(&new).unwrap().2.title, sub.as_str());
+        // A real name stays.
+        w.set_title(&new, "Bulletins");
+        let newer = w.set_home(&new, &folder(9)).unwrap();
+        assert_eq!(w.find(&newer).unwrap().2.title, "Bulletins");
+    }
+
+    #[test]
+    fn set_home_counts_a_page_google_decorated_as_home() {
+        let w = Workspace::from_config(&two_windows());
+        let budget = w.windows[0].groups[0].members[0].id.clone();
+        let loaded = Url::parse(&format!("{}?tab=t.0#heading=h.x", doc(1))).unwrap();
+        assert_eq!(
+            w.set_home_blocked(&budget, Some(&loaded)),
+            Some(SetHomeBlock::AtHome)
+        );
     }
 
     #[test]

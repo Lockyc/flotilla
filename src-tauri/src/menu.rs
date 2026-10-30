@@ -660,7 +660,13 @@ mod tests {
     fn set_home_disabled_at_home() {
         let (ws, h, m) = one_group();
         // Not loaded, or on the page it opened with: already home.
-        for (tab, current) in [(&m, None), (&m, Some(url(DOC1))), (&h, None)] {
+        let loaded = url(&format!("{DOC1}?tab=t.0#heading=h.x"));
+        for (tab, current) in [
+            (&m, None),
+            (&m, Some(url(DOC1))),
+            (&m, Some(loaded)),
+            (&h, None),
+        ] {
             assert_eq!(
                 menu_state_for(&ws, current.as_ref(), Some(tab)).set_home,
                 off("Set Home to Current Page — Already at its home")

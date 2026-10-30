@@ -178,18 +178,36 @@ pub fn is_tab_id(s: &str) -> bool {
 
 const NOISE_PARAMS: &[&str] = &["usp", "pli", "authuser", "ouid", "resourcekey"];
 
-/// A URL normalised for comparing heads: lowercase host without `www.`, no fragment, no trailing
-/// `/`, and none of the sharing/account query params.
+/// What a Google page adds to its own address once loaded or signed in: the open document tab
+/// (`?tab=t.0`) and the account segment (`/u/<n>`).
+const GOOGLE_NOISE_PARAMS: &[&str] = &["tab"];
+
+/// A URL normalised for comparing pages: lowercase host without `www.`, no fragment, no trailing
+/// `/`, none of the sharing/account query params, and on a Google page none of what it adds to
+/// its address on load. Two addresses with one key are the same page: one head, and a tab at its
+/// home.
 pub fn head_key(url: &Url) -> String {
     let host = url.host_str().unwrap_or("").to_lowercase();
     let host = host.strip_prefix("www.").unwrap_or(&host);
+    let google = google_host(url);
     let port = url.port().map(|p| format!(":{p}")).unwrap_or_default();
-    let path = url.path().trim_end_matches('/');
+    let mut segments: Vec<&str> = url.path().split('/').collect();
+    if google {
+        if let Some(at) = segments
+            .windows(2)
+            .position(|w| w[0] == "u" && w[1].parse::<u32>().is_ok())
+        {
+            segments.drain(at..at + 2);
+        }
+    }
+    let path = segments.join("/");
+    let path = path.trim_end_matches('/');
+    let noise = |k: &str| NOISE_PARAMS.contains(&k) || (google && GOOGLE_NOISE_PARAMS.contains(&k));
     let query: Vec<&str> = url
         .query()
         .unwrap_or("")
         .split('&')
-        .filter(|p| !p.is_empty() && !NOISE_PARAMS.contains(&p.split('=').next().unwrap_or("")))
+        .filter(|p| !p.is_empty() && !noise(p.split('=').next().unwrap_or("")))
         .collect();
     let query = if query.is_empty() {
         String::new()
@@ -363,6 +381,27 @@ mod tests {
             head("https://example.com/a?x=2")
         );
         assert_eq!(head("https://example.com/"), "https://example.com");
+    }
+
+    #[test]
+    fn head_key_ignores_what_google_adds_on_load() {
+        const DOC: &str = "https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrSt01/edit";
+        assert_eq!(head(&format!("{DOC}?tab=t.0#heading=h.x")), head(DOC));
+        assert_eq!(
+            head("https://drive.google.com/drive/u/0/folders/X"),
+            head("https://drive.google.com/drive/folders/X")
+        );
+        // Another view of the document is another page.
+        assert_ne!(head(&DOC.replace("/edit", "/view")), head(DOC));
+        // Off Google, `tab` and `/u/<n>` are the page's own.
+        assert_ne!(
+            head("https://example.com/a?tab=2"),
+            head("https://example.com/a")
+        );
+        assert_ne!(
+            head("https://example.com/u/0/a"),
+            head("https://example.com/a")
+        );
     }
 
     fn kind_of(s: &str) -> Option<Kind> {

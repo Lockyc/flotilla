@@ -271,8 +271,22 @@ pub fn mutate(app: &AppHandle, op: impl FnOnce(&mut flotilla_core::model::Worksp
 }
 
 /// Rename…: asks the sidebar showing tab `id` to edit its row's name in place; the field's
-/// result arrives as [`rename_tab`].
+/// result arrives as [`rename_tab`]. A member of a collapsed group is shown first (its group
+/// expands), so there is a row to edit.
 pub fn begin_rename(app: &AppHandle, id: &TabId) {
+    let expanded = crate::write::through(app, |ws| {
+        let head = ws
+            .group_of(id)
+            .filter(|g| g.collapsed && &g.head.id != id)
+            .map(|g| g.head.id.clone());
+        if let Some(head) = &head {
+            ws.set_collapsed(head, false);
+        }
+        head.is_some()
+    });
+    if expanded {
+        tabs::push_dto(app);
+    }
     let state = app.state::<AppState>();
     let found = {
         let ws = state.ws.lock().unwrap();
@@ -322,7 +336,7 @@ pub fn rename_tab(id: TabId, name: String, webview: Webview) -> Result<(), Strin
 /// closes its webview and creates it again, at that same page.
 pub fn set_home(app: &AppHandle, id: &TabId) -> Result<(), String> {
     let current = tabs::current_url(app, id);
-    crate::write::through_rekey(app, |ws| {
+    let new = crate::write::through_rekey(app, |ws| {
         if let Some(block) = ws.set_home_blocked(id, current.as_ref()) {
             return Err(crate::menu::set_home_refusal(block));
         }
@@ -331,6 +345,22 @@ pub fn set_home(app: &AppHandle, id: &TabId) -> Result<(), String> {
             .map(|new| (id.clone(), new))
             .map_err(crate::menu::set_home_refusal)
     })?;
+    // A popped-out tab's window is labelled from its id: its saved bounds move to the new label,
+    // which its reopened pop-out restores from.
+    let detached = app
+        .state::<AppState>()
+        .ws
+        .lock()
+        .unwrap()
+        .find(&new)
+        .is_some_and(|(_, _, t)| t.detached);
+    if detached {
+        shell_core::geometry::persist_as(
+            app,
+            &crate::detach::window_label(id),
+            &crate::detach::window_label(&new),
+        );
+    }
     tabs::changed(app);
     Ok(())
 }
