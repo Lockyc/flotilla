@@ -13,7 +13,7 @@ use std::sync::Mutex;
 /// gate) held across a `WindowSet` call that reaches the host (`materialize`, `apply`,
 /// `open_or_focus`, `rename`, `delete`): the host takes them.
 ///
-/// Lock order: `gate`, then `ws`, then `created`, then `hole`, then `failed`; and `Persist`'s
+/// Lock order: `gate`, then `ws`, then `created`, then `warm`, then `hole`, then `failed`; and `Persist`'s
 /// writer lock before `ws` (the session snapshot is taken inside it). `menu`, `notice` and
 /// `chrome_queue` are each taken alone.
 pub struct AppState {
@@ -23,9 +23,11 @@ pub struct AppState {
     /// Each open window's last-reported content hole, by window label: where its new content
     /// webviews are placed.
     pub hole: Mutex<HashMap<String, HoleRect>>,
-    /// The tabs whose content webview exists in each open window, by window label. Restored tabs
-    /// start absent and are created when first shown.
+    /// The tabs whose content webview exists in each open window, by window label.
     pub created: Mutex<HashMap<String, HashSet<TabId>>>,
+    /// Tabs the session saved as loaded whose webview is not created yet: each is created, hidden,
+    /// when its window next syncs open. Saved as loaded along with `created`.
+    pub warm: Mutex<HashSet<TabId>>,
     /// Tabs whose webview could not be created; not retried (or re-announced) until the tab is
     /// next selected, or sent Home while active.
     pub failed: Mutex<HashSet<TabId>>,

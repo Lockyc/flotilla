@@ -82,18 +82,20 @@ impl WindowHost for FlotillaHost {
     }
 
     /// The window's content webviews went with it; its workspace window keeps its groups and
-    /// active tab, so it reopens as it was.
+    /// active tab, so it reopens as it was. While quitting its record stays: the exit save
+    /// (`persist::save_now`) may run after this, and saves its tabs as loaded from it.
     fn closed(&self, app: &AppHandle, label: &str) {
+        if app.state::<WindowSet>().is_quitting() {
+            return;
+        }
         let state = app.state::<AppState>();
         forget(
             &mut state.created.lock().unwrap(),
             &mut state.hole.lock().unwrap(),
             label,
         );
-        if !app.state::<WindowSet>().is_quitting() {
-            crate::menu::invalidate(app);
-            crate::menu::refresh(app);
-        }
+        crate::menu::invalidate(app);
+        crate::menu::refresh(app);
     }
 
     fn retitled(&self, app: &AppHandle, label: &str, old: &str, decl: &WindowDecl) {

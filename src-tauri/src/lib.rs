@@ -204,14 +204,17 @@ fn load_state(
     }
     let persist = persist::Persist::for_load(path, &loaded);
     let mut ws = flotilla_core::model::Workspace::from_config(&config.workspace_windows());
+    let mut warm = std::collections::HashSet::new();
     if let Loaded::Restored(s) = loaded {
         ws.restore(s.active, s.recent, s.incoming);
+        warm.extend(s.loaded);
     }
     state::AppState {
         gate: Default::default(),
         ws: std::sync::Mutex::new(ws),
         hole: Default::default(),
         created: Default::default(),
+        warm: std::sync::Mutex::new(warm),
         failed: Default::default(),
         menu: Default::default(),
         config: std::sync::Mutex::new(config),

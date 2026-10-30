@@ -100,6 +100,7 @@ fn migrate_until(
             })
             .collect(),
         incoming: BTreeMap::new(),
+        loaded: Default::default(),
     };
     session::save_session(session_path, &s).map_err(|e| format!("session: {e}"))?;
     Ok(s)

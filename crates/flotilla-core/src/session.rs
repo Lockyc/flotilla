@@ -5,7 +5,7 @@
 
 use crate::model::{Group, Incoming, TabId, Workspace};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::ErrorKind;
 use std::io::Write;
@@ -15,13 +15,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub const SESSION_VERSION: u32 = 2;
 
 /// What a session file keeps: each window's active tab and non-empty Incoming queue by window
-/// title (the workspace's `stray` queues among them), and Recent.
+/// title (the workspace's `stray` queues among them), Recent, and the tabs that were loaded (had
+/// a webview), which relaunch loads again.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Session {
     pub active: BTreeMap<String, TabId>,
     pub recent: Vec<Group>,
     #[serde(default)]
     pub incoming: BTreeMap<String, Vec<Incoming>>,
+    #[serde(default)]
+    pub loaded: BTreeSet<TabId>,
 }
 
 impl Session {
@@ -41,6 +44,19 @@ impl Session {
                 .map(|w| (w.title.clone(), w.incoming.clone()))
                 .chain(ws.stray.clone())
                 .collect(),
+            loaded: BTreeSet::new(),
+        }
+    }
+
+    /// `ws`'s session with `loaded`, those of them still open in it.
+    pub fn with_loaded<'a>(ws: &Workspace, loaded: impl IntoIterator<Item = &'a TabId>) -> Session {
+        Session {
+            loaded: loaded
+                .into_iter()
+                .filter(|id| ws.find(id).is_some())
+                .cloned()
+                .collect(),
+            ..Session::of(ws)
         }
     }
 }
@@ -123,9 +139,13 @@ fn quarantine(path: &Path, reason: String) -> Loaded {
     }
 }
 
-/// Writes `ws`'s [`Session`] ([`save_session`]).
-pub fn save(path: &Path, ws: &Workspace) -> std::io::Result<()> {
-    save_session(path, &Session::of(ws))
+/// Writes `ws`'s [`Session`] with the `loaded` tabs ([`Session::with_loaded`], [`save_session`]).
+pub fn save<'a>(
+    path: &Path,
+    ws: &Workspace,
+    loaded: impl IntoIterator<Item = &'a TabId>,
+) -> std::io::Result<()> {
+    save_session(path, &Session::with_loaded(ws, loaded))
 }
 
 /// Writes `session` to `path` ([`write_atomic`]).
@@ -230,7 +250,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("session.json");
         let w = sample();
-        save(&p, &w).unwrap();
+        save(&p, &w, []).unwrap();
         let Loaded::Restored(s) = load(&p) else {
             panic!()
         };
@@ -253,6 +273,29 @@ mod tests {
     }
 
     #[test]
+    fn session_keeps_the_loaded_tabs_still_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("session.json");
+        let w = sample();
+        let open: Vec<TabId> = w.tabs().map(|t| t.id.clone()).collect();
+        let gone = "0000000000000000".to_string();
+        save(&p, &w, [&open[0], &gone]).unwrap();
+        let Loaded::Restored(s) = load(&p) else {
+            panic!()
+        };
+        assert_eq!(s.loaded, BTreeSet::from([open[0].clone()]));
+        // A session from before `loaded` reads as nothing loaded.
+        let json = fs::read_to_string(&p).unwrap();
+        let mut old: serde_json::Value = serde_json::from_str(&json).unwrap();
+        old.as_object_mut().unwrap().remove("loaded");
+        fs::write(&p, old.to_string()).unwrap();
+        let Loaded::Restored(s) = load(&p) else {
+            panic!()
+        };
+        assert!(s.loaded.is_empty());
+    }
+
+    #[test]
     fn session_round_trips_incoming() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("session.json");
@@ -260,7 +303,7 @@ mod tests {
         let doc = "https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrSt02/edit";
         w.receive("B", None, doc, "default").unwrap();
         w.receive("B", None, "mailto:x", "default").unwrap();
-        save(&p, &w).unwrap();
+        save(&p, &w, []).unwrap();
         let Loaded::Restored(s) = load(&p) else {
             panic!()
         };
@@ -371,7 +414,7 @@ mod tests {
     fn newer_version_is_quarantined() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("session.json");
-        save(&p, &sample()).unwrap();
+        save(&p, &sample(), []).unwrap();
         let v3 = fs::read_to_string(&p)
             .unwrap()
             .replacen("\"version\": 2", "\"version\": 3", 1);
@@ -387,11 +430,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("session.json");
         let w = sample();
-        save(&p, &w).unwrap();
+        save(&p, &w, []).unwrap();
         assert!(!dir.path().join("session.json.tmp").exists());
         let before = fs::read_to_string(&p).unwrap();
         fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o555)).unwrap();
-        let r = save(&p, &Workspace::default());
+        let r = save(&p, &Workspace::default(), []);
         fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
         assert!(r.is_err());
         assert_eq!(fs::read_to_string(&p).unwrap(), before);
@@ -433,7 +476,7 @@ mod tests {
     fn save_creates_a_missing_parent() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("a/b/session.json");
-        save(&p, &sample()).unwrap();
+        save(&p, &sample(), []).unwrap();
         assert!(matches!(load(&p), Loaded::Restored(_)));
     }
 

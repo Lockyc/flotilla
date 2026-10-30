@@ -52,8 +52,11 @@ pub struct ViewPlan {
     /// Created webviews whose tab is no longer open here (closed, popped out, or moved to another
     /// window).
     pub close: Vec<TabId>,
-    /// The active tab, when it has no webview yet. No other tab is ever created.
+    /// The active tab, when it has no webview yet.
     pub create: Option<Target>,
+    /// The window's other `warm` tabs (loaded when the session was saved) without a webview yet,
+    /// in row order: created hidden. No other tab is ever created.
+    pub warm: Vec<Target>,
     pub show: Option<TabId>,
     /// Every other remaining webview.
     pub hide: Vec<TabId>,
@@ -101,13 +104,15 @@ pub fn after_unload(ws: &Workspace, created: &HashSet<TabId>, id: &TabId) -> Opt
 
 /// The plan for the workspace window titled `title`, given the tabs whose webview exists in its
 /// OS window (`created`) and those whose label is still held by a webview on its way out
-/// (`closing`). `failed` tabs are not created again (see `AppState::failed`).
+/// (`closing`). `failed` tabs are not created again (see `AppState::failed`); `warm` ones are
+/// created though not active (see `AppState::warm`).
 pub fn plan(
     ws: &Workspace,
     title: &str,
     created: &HashSet<TabId>,
     failed: &HashSet<TabId>,
     closing: &HashSet<TabId>,
+    warm: &HashSet<TabId>,
 ) -> ViewPlan {
     let here = |id: &TabId| {
         window(ws, title).is_some_and(|w| {
@@ -124,14 +129,30 @@ pub fn plan(
         .as_ref()
         .filter(|id| !created.contains(*id) && !failed.contains(*id));
     let wait = wanted.is_some_and(|id| closing.contains(id));
+    let target = |(_, g, t): (usize, &flotilla_core::model::Group, &Tab)| Target {
+        id: t.id.clone(),
+        home_url: t.home_url.clone(),
+        store: g.store.clone(),
+    };
     let create = wanted
         .filter(|_| !wait)
         .and_then(|id| ws.find(id))
-        .map(|(_, g, t)| Target {
-            id: t.id.clone(),
-            home_url: t.home_url.clone(),
-            store: g.store.clone(),
-        });
+        .map(target);
+    let warm: Vec<Target> = window(ws, title)
+        .into_iter()
+        .flat_map(|w| &w.groups)
+        .flat_map(|g| std::iter::once(&g.head).chain(&g.members))
+        .map(|t| &t.id)
+        .filter(|id| {
+            warm.contains(*id)
+                && here(id)
+                && Some(*id) != show.as_ref()
+                && !created.contains(*id)
+                && !failed.contains(*id)
+                && !closing.contains(*id)
+        })
+        .filter_map(|id| ws.find(id).map(target))
+        .collect();
     // While waiting, the webview under the active tab's label is the closing one: not shown.
     let show = show.filter(|_| !wait);
     let mut hide: Vec<TabId> = created
@@ -143,6 +164,7 @@ pub fn plan(
     ViewPlan {
         close,
         create,
+        warm,
         show,
         hide,
         wait,
@@ -250,9 +272,11 @@ fn sync_window(app: &AppHandle, label: &str, title: &str) -> bool {
         let created_all = state.created.lock().unwrap();
         let created = created_all.get(label).cloned().unwrap_or_default();
         let closing: HashSet<TabId> = alive.difference(&created).cloned().collect();
+        let mut warm = state.warm.lock().unwrap();
+        warm.retain(|id| ws.find(id).is_some());
         let mut failed = state.failed.lock().unwrap();
         failed.retain(|id| ws.find(id).is_some());
-        plan(&ws, title, &created, &failed, &closing)
+        plan(&ws, title, &created, &failed, &closing, &warm)
     };
     let forget = |id: &TabId| {
         if let Some(c) = state.created.lock().unwrap().get_mut(label) {
@@ -265,7 +289,8 @@ fn sync_window(app: &AppHandle, label: &str, title: &str) -> bool {
         }
         forget(id);
     }
-    if let Some(t) = &plan.create {
+    for t in plan.create.iter().chain(&plan.warm) {
+        state.warm.lock().unwrap().remove(&t.id);
         let hole = hole_of(app, label);
         match create(&window, t, hole) {
             Ok(()) => {
@@ -283,7 +308,7 @@ fn sync_window(app: &AppHandle, label: &str, title: &str) -> bool {
             }
         }
     }
-    for id in &plan.hide {
+    for id in plan.hide.iter().chain(plan.warm.iter().map(|t| &t.id)) {
         if let Some(wv) = own_webview(&window, id) {
             let _ = wv.hide();
         }
@@ -645,7 +670,7 @@ mod tests {
     #[test]
     fn a_failed_tab_is_not_retried_until_cleared() {
         let (ws, _, _, b) = ws();
-        let p = plan(&ws, "W", &none(), &set(&[&b]), &none());
+        let p = plan(&ws, "W", &none(), &set(&[&b]), &none(), &none());
         assert_eq!(p.create, None);
         assert_eq!(p.show, Some(b));
     }
@@ -727,7 +752,7 @@ mod tests {
     #[test]
     fn a_restored_workspace_creates_only_the_active_tab() {
         let (ws, _, _, b) = ws();
-        let p = plan(&ws, "W", &none(), &none(), &none());
+        let p = plan(&ws, "W", &none(), &none(), &none(), &none());
         assert_eq!(
             p,
             ViewPlan {
@@ -737,6 +762,7 @@ mod tests {
                     home_url: DOC_B.into(),
                     store: "default".into(),
                 }),
+                warm: vec![],
                 show: Some(b),
                 hide: vec![],
                 wait: false,
@@ -745,14 +771,39 @@ mod tests {
     }
 
     #[test]
+    fn a_restored_workspace_also_creates_its_loaded_tabs_hidden() {
+        let (ws, h, a, b) = ws();
+        // h and b were loaded; b is active, so only h is created warm.
+        let warm = set(&[&h, &b]);
+        let p = plan(&ws, "W", &none(), &none(), &none(), &warm);
+        assert_eq!(p.create.map(|t| t.id), Some(b.clone()));
+        assert_eq!(p.warm.iter().map(|t| &t.id).collect::<Vec<_>>(), [&h]);
+        assert_eq!(p.show, Some(b.clone()));
+        // Once created, a warm tab is not created again; a failed one is not retried.
+        assert!(plan(&ws, "W", &set(&[&h]), &none(), &none(), &warm)
+            .warm
+            .is_empty());
+        assert!(plan(&ws, "W", &none(), &set(&[&h]), &none(), &warm)
+            .warm
+            .is_empty());
+        // A warm tab in another window, or popped out, is not created here.
+        let mut ws = ws;
+        ws.set_detached(&h, true);
+        assert!(plan(&ws, "W", &none(), &none(), &none(), &set(&[&h, &a]))
+            .warm
+            .iter()
+            .all(|t| t.id == a));
+    }
+
+    #[test]
     fn each_window_creates_only_its_active_tab() {
         let (ws, a, b) = two_windows();
-        let pa = plan(&ws, "A", &none(), &none(), &none());
-        let pb = plan(&ws, "B", &none(), &none(), &none());
+        let pa = plan(&ws, "A", &none(), &none(), &none(), &none());
+        let pb = plan(&ws, "B", &none(), &none(), &none(), &none());
         assert_eq!(pa.create.map(|t| t.id), Some(a.clone()));
         assert_eq!(pb.create.map(|t| t.id), Some(b.clone()));
         // A webview of B's tab in A's window (it moved there, say) is closed in A.
-        let p = plan(&ws, "A", &set(&[&a, &b]), &none(), &none());
+        let p = plan(&ws, "A", &set(&[&a, &b]), &none(), &none(), &none());
         assert_eq!(p.close, vec![b]);
         assert_eq!(p.show, Some(a));
     }
@@ -760,13 +811,13 @@ mod tests {
     #[test]
     fn a_tab_whose_label_is_still_closing_waits_to_be_recreated() {
         let (ws, _, _, b) = ws();
-        let p = plan(&ws, "W", &none(), &none(), &set(&[&b]));
+        let p = plan(&ws, "W", &none(), &none(), &set(&[&b]), &none());
         assert!(p.wait);
         assert_eq!(p.create, None);
         // The webview under its label is the closing one: it is not shown.
         assert_eq!(p.show, None);
         // Once the old webview has gone, it is created.
-        let p = plan(&ws, "W", &none(), &none(), &none());
+        let p = plan(&ws, "W", &none(), &none(), &none(), &none());
         assert!(!p.wait);
         assert_eq!(p.create.map(|t| t.id), Some(b));
     }
@@ -787,7 +838,7 @@ mod tests {
             forward(true, "A", "A", None),
             Some(Forward::Window("A".into()))
         );
-        let p = plan(&ws, "A", &none(), &none(), &none());
+        let p = plan(&ws, "A", &none(), &none(), &none(), &none());
         assert_eq!(p.create.map(|t| t.id), Some(new));
     }
 
@@ -795,7 +846,7 @@ mod tests {
     fn selecting_a_created_tab_hides_the_others_without_creating() {
         let (mut ws, h, a, b) = ws();
         ws.activate(&a);
-        let p = plan(&ws, "W", &set(&[&h, &a, &b]), &none(), &none());
+        let p = plan(&ws, "W", &set(&[&h, &a, &b]), &none(), &none(), &none());
         assert_eq!(p.create, None);
         assert_eq!(p.show, Some(a));
         let mut hide = vec![h, b];
@@ -809,7 +860,7 @@ mod tests {
         let (mut ws, h, a, b) = ws();
         ws.close_tab(&b);
         ws.set_detached(&a, true);
-        let p = plan(&ws, "W", &set(&[&h, &a, &b]), &none(), &none());
+        let p = plan(&ws, "W", &set(&[&h, &a, &b]), &none(), &none(), &none());
         let mut close = vec![a, b];
         close.sort();
         assert_eq!(p.close, close);
@@ -822,7 +873,7 @@ mod tests {
     fn nothing_open_shows_nothing() {
         let (mut ws, h, a, b) = ws();
         ws.close_group(&h);
-        let p = plan(&ws, "W", &set(&[&h, &a, &b]), &none(), &none());
+        let p = plan(&ws, "W", &set(&[&h, &a, &b]), &none(), &none(), &none());
         assert_eq!(p.show, None);
         assert_eq!(p.create, None);
         assert_eq!(p.close.len(), 3);
