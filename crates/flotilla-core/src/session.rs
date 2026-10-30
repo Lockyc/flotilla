@@ -127,14 +127,44 @@ pub fn save(path: &Path, ws: &Workspace) -> std::io::Result<()> {
     save_session(path, &Session::of(ws))
 }
 
-/// Writes `session` to `<path>.tmp`, fsyncs it, then renames over `path`, so a crash leaves the
-/// old file or the new one, never half of either.
+/// Writes `session` to `path` ([`write_atomic`]).
 pub fn save_session(path: &Path, session: &Session) -> std::io::Result<()> {
     let file = File {
         version: SESSION_VERSION,
         session: session.clone(),
     };
     let json = serde_json::to_vec_pretty(&file).map_err(std::io::Error::other)?;
+    write_atomic(path, &json)
+}
+
+pub const MANIFEST_VERSION: u32 = 1;
+
+/// `windows.json`, the file link routers read to offer flotilla's windows and groups:
+/// `{"version":1,"windows":[{"title","colour","groups":[<group name>…]}]}`, windows in config
+/// order and each one's groups in sidebar order. `colours` is each config window's title and
+/// accent; a window missing from it is neutral (`null`).
+pub fn windows_manifest(ws: &Workspace, colours: &[(String, Option<String>)]) -> String {
+    let windows: Vec<serde_json::Value> = ws
+        .windows
+        .iter()
+        .map(|w| {
+            let colour = colours
+                .iter()
+                .find(|(t, _)| t.trim() == w.title.trim())
+                .and_then(|(_, c)| c.clone());
+            let groups: Vec<&str> = w.groups.iter().map(|g| g.head.title.as_str()).collect();
+            serde_json::json!({ "title": w.title, "colour": colour, "groups": groups })
+        })
+        .collect();
+    serde_json::to_string_pretty(
+        &serde_json::json!({ "version": MANIFEST_VERSION, "windows": windows }),
+    )
+    .expect("a JSON value serialises")
+}
+
+/// Writes `bytes` to `<path>.tmp`, fsyncs it, then renames over `path`, so a crash leaves the old
+/// file or the new one, never half of either.
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".tmp");
     let tmp = PathBuf::from(tmp);
@@ -143,7 +173,7 @@ pub fn save_session(path: &Path, session: &Session) -> std::io::Result<()> {
             fs::create_dir_all(dir)?;
         }
         let mut f = fs::File::create(&tmp)?;
-        f.write_all(&json)?;
+        f.write_all(bytes)?;
         f.sync_all()?;
         fs::rename(&tmp, path)
     })();
@@ -244,6 +274,42 @@ mod tests {
         }
         fresh.restore(s.active, s.recent, s.incoming);
         assert_eq!(fresh, w);
+    }
+
+    #[test]
+    fn windows_manifest_lists_windows_and_groups_in_order() {
+        let mut w = sample();
+        let f4 = url("https://drive.google.com/drive/folders/f4");
+        let Some(Opened::Added(h4)) = w.new_group("A", &f4, "default") else {
+            panic!()
+        };
+        w.set_title(&w.windows[0].groups[0].head.id.clone(), "Rotary (interim)");
+        w.set_title(&h4, "Bulletins");
+        let colours = [
+            ("B".to_string(), None),
+            (" A ".to_string(), Some("#17458f".to_string())),
+        ];
+        let m: serde_json::Value = serde_json::from_str(&windows_manifest(&w, &colours)).unwrap();
+        assert_eq!(
+            m,
+            serde_json::json!({
+                "version": 1,
+                "windows": [
+                    { "title": "A", "colour": "#17458f", "groups": ["Rotary (interim)", "Bulletins"] },
+                    { "title": "B", "colour": null, "groups": ["https://drive.google.com/drive/folders/f3"] },
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn write_atomic_replaces_the_file_and_leaves_no_temp() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("sub/windows.json");
+        write_atomic(&p, b"one").unwrap();
+        write_atomic(&p, b"two").unwrap();
+        assert_eq!(fs::read_to_string(&p).unwrap(), "two");
+        assert!(!dir.path().join("sub/windows.json.tmp").exists());
     }
 
     #[test]

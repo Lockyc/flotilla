@@ -774,6 +774,17 @@ impl Workspace {
         }
     }
 
+    /// Queues `link` under window `window` as one that can't be opened, for `problem`, unless it
+    /// is queued in any window already. `None`, and nothing done, when there is no such window or
+    /// the link is blank.
+    pub fn reject(&mut self, window: &str, link: &str, problem: String) -> Option<Handed> {
+        let wi = self.window_index(window)?;
+        if link.trim().is_empty() {
+            return None;
+        }
+        Some(self.enqueue(wi, link, Some(problem)))
+    }
+
     /// Opens Incoming item `id` into the group `head` belongs to ([`Self::open_from`]), and on
     /// success takes it off the queue. `None`, the item kept, when there is no such item, it is
     /// not a web link, or `open_from` opens nothing.
@@ -1939,6 +1950,25 @@ mod tests {
             w.receive("V", None, " mailto:x ", "default"),
             Some(Handed::AlreadyQueued(id))
         );
+    }
+
+    #[test]
+    fn reject_queues_a_link_with_the_reason_given() {
+        let (mut w, _) = fleet();
+        let link = "flotilla://open?window=W";
+        let id = queued(w.reject(W, link, format!("No link in {link}")));
+        let item = &w.windows[0].incoming[0];
+        assert_eq!((item.id.as_str(), item.link.as_str()), (id.as_str(), link));
+        assert_eq!(
+            item.problem.as_deref(),
+            Some("No link in flotilla://open?window=W")
+        );
+        assert_eq!(
+            w.reject("V", link, "again".into()),
+            Some(Handed::AlreadyQueued(id))
+        );
+        assert_eq!(w.reject("nowhere", link, "x".into()), None);
+        assert_eq!(w.reject(W, " ", "x".into()), None);
     }
 
     #[test]
