@@ -2,8 +2,9 @@
 // navigation to an icon rail, which opens over the file list while hovered or focused.
 // Drive's shell is a grid whose first column holds two cells, the New button's and the nav list's,
 // found by their `guidedhelpid`s (Drive's class names are generated). The cells shrink to the rail
-// and the content cell beside them takes the freed width through a negative margin, so Drive's own
-// grid template is never rewritten. Anything else leaves the page untouched.
+// and the content cell beside them takes whatever width Drive's column does not give back through a
+// negative margin, so Drive's own grid template is never rewritten. Anything else leaves the page
+// untouched.
 (function () {
   if (location.hostname !== "drive.google.com" || window.top !== window) return;
 
@@ -19,13 +20,16 @@
   // the file list.
   var SHUT = "[" + GRID + "]>[" + CELL + "]";
   var OPEN = "[" + GRID + "][" + OPEN_ATTR + "]>[" + CELL + "]";
+  // A cell stays the rail's width open or shut, so the file list never reflows; its children keep
+  // their measured widths, clipped while shut and overflowing over the file list while open.
   var CSS =
     SHUT + "{width:" + RAIL + "px!important;min-width:0!important;max-width:none!important;" +
     "overflow:hidden!important;position:relative!important;z-index:3!important;" +
     "-webkit-mask-image:linear-gradient(to right,#000 " + (RAIL - 16) + "px,transparent " + RAIL + "px);" +
     "mask-image:linear-gradient(to right,#000 " + (RAIL - 16) + "px,transparent " + RAIL + "px)}" +
-    OPEN + "{width:var(--flotilla-rail-w)!important;overflow:visible!important;" +
-    "-webkit-mask-image:none;mask-image:none;background:var(--flotilla-rail-bg)!important}" +
+    SHUT + ">*{width:var(--flotilla-rail-w)!important;min-width:var(--flotilla-rail-w)!important}" +
+    OPEN + "{overflow:visible!important;-webkit-mask-image:none;mask-image:none}" +
+    OPEN + ">*{background:var(--flotilla-rail-bg)!important}" +
     "[" + GRID + "]>[" + CONTENT + "]{margin-left:var(--flotilla-rail-margin)!important}";
 
   var marked = [];
@@ -108,16 +112,21 @@
       }
     }
     if (!content) return;
-    var margin = parseFloat(getComputedStyle(content).marginLeft) || 0;
-    grid.style.setProperty("--flotilla-rail-bg", background(cells[1]));
-    grid.style.setProperty("--flotilla-rail-margin",
-      margin - (content.getBoundingClientRect().left - g.left - RAIL) + "px");
     cells.forEach(function (c) {
-      c.style.setProperty("--flotilla-rail-w", c.getBoundingClientRect().width + "px");
+      for (var j = 0; j < c.children.length; j++) {
+        var child = c.children[j];
+        child.style.setProperty("--flotilla-rail-w", child.getBoundingClientRect().width + "px");
+      }
     });
+    grid.style.setProperty("--flotilla-rail-bg", background(cells[1]));
     mark(grid, GRID);
     mark(cells[0], CELL);
     mark(cells[1], CELL);
+    // Measured with the cells shut: Drive's first column may shrink with them, leaving less (or
+    // nothing) for the margin to take.
+    var margin = parseFloat(getComputedStyle(content).marginLeft) || 0;
+    grid.style.setProperty("--flotilla-rail-margin",
+      margin - (content.getBoundingClientRect().left - g.left - RAIL) + "px");
     mark(content, CONTENT);
     railGrid = grid;
   }
