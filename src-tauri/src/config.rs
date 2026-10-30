@@ -1,7 +1,7 @@
 //! flotilla's app-wide config: one TOML file of settings, hot-reloaded. The workspace itself is
 //! not configured here; it forms as you work and lives in the session file.
 
-use config_core::Density;
+use config_core::{Colour, Density};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
@@ -19,6 +19,11 @@ const CONFIG_DIR: &str = "flotilla";
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
+    /// The window's name, empty for none. Hot-reloads.
+    pub title: String,
+    /// The window's `#rgb` / `#rrggbb` accent, empty for neutral; `parse` normalises it to
+    /// `#rrggbb`. Hot-reloads.
+    pub colour: String,
     /// Chrome sizing. Hot-reloads.
     pub density: Density,
     /// Forces a dark appearance. Hot-reloads.
@@ -34,6 +39,8 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Config {
+            title: String::new(),
+            colour: String::new(),
             density: Density::Comfortable,
             dark_mode: false,
             auto_update: true,
@@ -43,9 +50,31 @@ impl Default for Config {
     }
 }
 
+impl Config {
+    /// The window's title: its name, or the app's when it has none.
+    pub fn window_title(&self) -> String {
+        if self.title.is_empty() {
+            "flotilla".into()
+        } else {
+            self.title.clone()
+        }
+    }
+
+    /// The window's accent, `None` when neutral.
+    pub fn accent(&self) -> Option<String> {
+        (!self.colour.is_empty()).then(|| self.colour.clone())
+    }
+}
+
 /// Parses config source; the message is what the sidebar shows.
 pub fn parse(src: &str) -> Result<Config, String> {
-    toml::from_str(src).map_err(|e| format!("config: {}", e.message()))
+    let mut cfg: Config = toml::from_str(src).map_err(|e| format!("config: {}", e.message()))?;
+    if !cfg.colour.is_empty() {
+        cfg.colour = Colour::parse(&cfg.colour)
+            .map_err(|e| format!("config: {e}"))?
+            .hex();
+    }
+    Ok(cfg)
 }
 
 /// Where the config lives: `$FLOTILLA_CONFIG` if set, else `~/.config/flotilla/config.toml`.
@@ -73,7 +102,9 @@ mod tests {
     use super::*;
 
     /// Every key the app reads; the starter config documents each one.
-    const KEYS: [&str; 5] = [
+    const KEYS: [&str; 7] = [
+        "title",
+        "colour",
         "density",
         "dark_mode",
         "auto_update",
@@ -99,10 +130,13 @@ mod tests {
     #[test]
     fn every_key_takes_effect() {
         let cfg = parse(
-            "density = \"compact\"\ndark_mode = true\nauto_update = false\n\
+            "title = \"rotary\"\ncolour = \"#17458F\"\n\
+             density = \"compact\"\ndark_mode = true\nauto_update = false\n\
              allow_insecure = [\"10.0.0.1\"]\nformat_on_save = true\n",
         )
         .unwrap();
+        assert_eq!(cfg.window_title(), "rotary");
+        assert_eq!(cfg.accent().as_deref(), Some("#17458f"));
         assert_eq!(cfg.density, Density::Compact);
         assert!(cfg.dark_mode && cfg.format_on_save && !cfg.auto_update);
         assert_eq!(cfg.allow_insecure, vec!["10.0.0.1".to_string()]);
@@ -111,6 +145,12 @@ mod tests {
     #[test]
     fn a_mistyped_key_is_an_error_and_a_missing_file_is_the_default() {
         assert!(parse("densty = \"compact\"").is_err());
+        assert!(parse("colour = \"blue\"").is_err());
+        let unnamed = Config::default();
+        assert_eq!(
+            (unnamed.window_title().as_str(), unnamed.accent()),
+            ("flotilla", None)
+        );
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(
             load(&dir.path().join("none.toml")).unwrap(),

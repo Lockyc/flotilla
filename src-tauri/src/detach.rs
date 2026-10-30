@@ -124,15 +124,16 @@ pub fn reconcile(app: &AppHandle) {
 /// Opens tab `t`'s detached window with its page loaded from `home_url`, and docks the tab again
 /// when the window closes.
 fn open(app: &AppHandle, t: &Target) -> Result<(), String> {
+    let state = app.state::<AppState>();
     let title = {
-        let state = app.state::<AppState>();
         let ws = state.ws.lock().unwrap();
         ws.find(&t.id).map(|(_, tab)| tab.title.clone())
     }
     .unwrap_or_default();
+    let colour = state.config.lock().unwrap().accent();
     let spec = DetachSpec {
         title,
-        colour: None,
+        colour,
         width: FIRST_SIZE.0,
         height: FIRST_SIZE.1,
         panes: vec![],

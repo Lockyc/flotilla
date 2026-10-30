@@ -1,5 +1,11 @@
 # flotilla config — app-wide settings. Edit and save; flotilla hot-reloads.
 
+# The window's name, shown in the sidebar and the Window menu. Empty for none.
+title = ""
+
+# The window's accent colour, "#rgb" or "#rrggbb". Empty for neutral.
+colour = ""
+
 # Chrome sizing: "comfortable" or "compact".
 density = "comfortable"
 

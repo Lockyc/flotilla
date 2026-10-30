@@ -37,8 +37,8 @@ struct WindowIdentity {
 fn window_identity(state: tauri::State<state::AppState>) -> WindowIdentity {
     let cfg = state.config.lock().unwrap();
     WindowIdentity {
-        title: "flotilla".into(),
-        colour: None,
+        title: cfg.title.clone(),
+        colour: cfg.accent(),
         default_width: DEFAULT_SIDEBAR_W,
         density: cfg.density.as_str(),
         sidebar_drag: true,
@@ -46,11 +46,19 @@ fn window_identity(state: tauri::State<state::AppState>) -> WindowIdentity {
     }
 }
 
-/// Applies a reloaded config: remembers it, themes every window, and has the chrome re-read its
-/// identity. `allow_insecure` is not applied here; it is read once at launch.
+/// Applies a reloaded config: remembers it, themes every window, retitles the main window and its
+/// Window-menu entry, and has the chrome re-read its identity. `allow_insecure` is not applied
+/// here; it is read once at launch.
 fn apply_config(app: &tauri::AppHandle, cfg: config::Config) {
     app.set_theme(cfg.dark_mode.then_some(tauri::Theme::Dark));
-    *app.state::<state::AppState>().config.lock().unwrap() = cfg;
+    if let Some(w) = app.get_webview_window(MAIN_WINDOW) {
+        let _ = w.set_title(&cfg.window_title());
+    }
+    let state = app.state::<state::AppState>();
+    *state.config.lock().unwrap() = cfg;
+    *state.menu.lock().unwrap() = None;
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || menu::refresh(&handle));
     emit_to_main_chrome(app, "config-reloaded", ());
 }
 
@@ -157,6 +165,7 @@ pub fn run() {
             };
             shell_core::web::insecure::set_allowlist(cfg.allow_insecure.clone());
             app.set_theme(cfg.dark_mode.then_some(tauri::Theme::Dark));
+            let window_title = cfg.window_title();
             app.manage(load_state(app, cfg, config_error));
             watch_config(app.handle().clone(), cfg_path.clone());
 
@@ -167,7 +176,7 @@ pub fn run() {
                 MAIN_WINDOW,
                 WebviewUrl::App("index.html".into()),
             )
-            .title("flotilla")
+            .title(window_title)
             .inner_size(FIRST_RUN_SIZE.0, FIRST_RUN_SIZE.1)
             .hidden_title(true)
             .title_bar_style(TitleBarStyle::Overlay)
@@ -209,7 +218,7 @@ pub fn run() {
                     }
                     return;
                 }
-                // Window ▸ flotilla: the only window the spine lists.
+                // Window ▸ <the main window>: the only window the spine lists.
                 if shell_core::menu::selected_window(id) == Some(MAIN_WINDOW) {
                     tabs::bring_main_forward(app);
                     return;

@@ -238,11 +238,15 @@ pub fn row_menu(app: &AppHandle, ms: &MenuState, tab: &TabId) -> tauri::Result<M
 /// and Group menus, the Group menu acting on the active tab.
 fn build_app_menu(app: &AppHandle, ms: &MenuState) -> tauri::Result<Menu<Wry>> {
     let path = crate::config::config_path();
+    let (title, colour) = {
+        let cfg = app.state::<AppState>().config.lock().unwrap().clone();
+        (cfg.window_title(), cfg.accent())
+    };
     let windows = [shell_core::menu::WindowEntry {
         id: MAIN_WINDOW.into(),
-        title: "flotilla".into(),
+        title,
         open: true,
-        colour: None,
+        colour,
     }];
     let spine = shell_core::menu::build_spine(
         app,

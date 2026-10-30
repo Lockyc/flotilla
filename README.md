@@ -47,6 +47,8 @@ Settings are app-wide, in `~/.config/flotilla/config.toml` (or the file `FLOTILL
 
 | Key | Default | What it does |
 |---|---|---|
+| `title` | `""` | The window's name, shown in the sidebar banner, the window title and **Window** menu. Empty for none. Hot-reloads. |
+| `colour` | `""` | `#rgb` / `#rrggbb` accent for the sidebar, the **Window** menu swatch and popped-out windows. Empty for neutral. Hot-reloads. |
 | `density` | `"comfortable"` | Chrome sizing: `comfortable` or `compact` (type and spacing scaled down). Hot-reloads. |
 | `dark_mode` | `false` | Force a dark appearance so pages honouring `prefers-color-scheme` render dark. Hot-reloads. |
 | `auto_update` | `true` | Check for a new release on launch and every 6 hours. `false` stops the automatic checks; **Check for Updates…** still works. Read at launch (restart to change). |

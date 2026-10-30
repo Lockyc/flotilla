@@ -8,10 +8,13 @@ html, body { margin: 0; height: 100vh; overflow: hidden; background: #1e1e1e; }
 /* `width` is the resize-controlled sidebar width, set inline by the controller. */
 #sidebar { width: var(--cc-sidebar-w, 240px); flex: none; }
 
-/* The banner row is the new-group field's alone: the window name already sits in the title-bar strip. */
-#cc-banner .cc-name { display: none; }
+/* The banner: the window's name (config `title`) when it has one, then the new-group field on a row
+   of its own. */
+#cc-banner { flex-wrap: wrap; }
+#cc-banner .cc-name:empty { display: none; }
 #new-group {
-  flex: 1;
+  order: 1;
+  flex: 1 0 100%;
   min-width: 0;
   font: inherit;
   font-size: 12px;
