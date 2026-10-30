@@ -81,10 +81,13 @@ impl Workspace {
     /// nothing on disk that is derivable: re-derives every tab's key (groups and recent) from its
     /// `home_url` and group store, drops later open members whose key now repeats an earlier
     /// open tab's (heads are never dropped), clears `active` if it no longer names an open tab,
-    /// and raises `next_id` to at least every restored id (dropped duplicates included) so a new tab never reuses one.
+    /// and raises `next_id` to at least every restored id (dropped tabs included) so a new tab never reuses one.
     pub fn rekey_and_repair(&mut self) {
         for g in self.groups.iter_mut().chain(self.recent.iter_mut()) {
             let store = g.store.clone();
+            // A member whose URL no longer parses cannot be keyed or opened: dropped. A head
+            // with such a URL keeps the group and its persisted key.
+            g.members.retain(|m| Url::parse(&m.home_url).is_ok());
             for t in std::iter::once(&mut g.head).chain(g.members.iter_mut()) {
                 if let Ok(url) = Url::parse(&t.home_url) {
                     t.key = identity(&store, &url);
@@ -826,5 +829,18 @@ mod tests {
         assert!(w.groups[0].members.is_empty());
         assert_eq!(w.groups[1].head.id, h2);
         assert_eq!(w.groups[0].head.id, h1);
+    }
+
+    #[test]
+    fn rekey_and_repair_drops_unparseable_members_but_keeps_such_a_head() {
+        let mut w = Workspace::default();
+        let h = head_of(&mut w, 1);
+        w.open_from(&h, &doc(1)).unwrap();
+        let key = w.groups[0].head.key.clone();
+        w.groups[0].members[0].home_url = "not a url".into();
+        w.groups[0].head.home_url = "also not".into();
+        w.rekey_and_repair();
+        assert!(w.groups[0].members.is_empty());
+        assert_eq!(w.groups[0].head.key, key);
     }
 }
