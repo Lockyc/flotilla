@@ -34,11 +34,10 @@ Links to other sites leave flotilla for your default browser. Content runs in WK
 
 Download `flotilla-<version>-macos.zip` from the [latest release](https://github.com/Lockyc/flotilla/releases/latest), unzip, and move `flotilla.app` to `/Applications`. macOS only.
 
-To build from source (needs Rust and the Tauri CLI, `cargo install tauri-cli --version ^2`):
+In **Claude Code**, run `/flotilla:install` — it checks prerequisites (offering to install any that are missing), builds flotilla from source into `~/.flotilla` and installs `flotilla.app` to `/Applications`. Without Claude Code (needs Rust and Xcode Command Line Tools):
 
 ```sh
-git clone https://github.com/Lockyc/flotilla && cd flotilla
-just install      # builds a release .app, installs it to /Applications, relaunches
+curl -fsSL https://raw.githubusercontent.com/Lockyc/flotilla/main/install.sh | bash
 ```
 
 ## Updates
