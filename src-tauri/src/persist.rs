@@ -47,7 +47,8 @@ impl Persist {
         self.generation.load(Ordering::SeqCst) == ticket
     }
 
-    /// Writes `ws` now. A no-op when this run does not persist.
+    /// Writes the workspace `snapshot` returns, taken inside the writer lock. A no-op (and no
+    /// snapshot) when this run does not persist.
     pub fn save(&self, snapshot: impl FnOnce() -> Workspace) -> std::io::Result<()> {
         let Some(path) = &self.path else {
             return Ok(());

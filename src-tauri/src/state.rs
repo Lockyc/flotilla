@@ -9,6 +9,9 @@ use std::sync::Mutex;
 /// Lock discipline: `ws` is never held while calling a webview API (`add_child`, `navigate`,
 /// `close`, show/hide): lock, copy or decide, drop, then act. WebKit runs `intercept` on the main
 /// thread from inside those calls' callbacks, and it locks `ws`.
+///
+/// Lock order: `ws`, then `created`, then `failed`; and `Persist`'s writer lock before `ws` (the
+/// session snapshot is taken inside it).
 pub struct AppState {
     pub ws: Mutex<Workspace>,
     /// The chrome's last-reported content hole, where new content webviews are placed.
@@ -17,7 +20,7 @@ pub struct AppState {
     /// created when first shown.
     pub created: Mutex<HashSet<TabId>>,
     /// Tabs whose webview could not be created; not retried (or re-announced) until the tab is
-    /// next selected. Lock order: `ws`, then `created`, then `failed`.
+    /// next selected, or sent Home while active.
     pub failed: Mutex<HashSet<TabId>>,
     pub persist: Persist,
     /// The launch-time notice for the error bar (a quarantined or unpersistable session).
