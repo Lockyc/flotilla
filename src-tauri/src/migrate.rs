@@ -99,6 +99,7 @@ fn migrate_until(
                 g
             })
             .collect(),
+        incoming: BTreeMap::new(),
     };
     session::save_session(session_path, &s).map_err(|e| format!("session: {e}"))?;
     Ok(s)
@@ -333,7 +334,7 @@ mod tests {
         assert_eq!(saved, s);
         // It restores onto the workspace the config builds.
         let mut ws = Workspace::from_config(&cfg.workspace_windows());
-        ws.restore(s.active, s.recent);
+        ws.restore(s.active, s.recent, s.incoming);
         assert_eq!(ws.windows[0].active, Some(id(BUDGET)));
         assert_eq!(ws.recent[0].head.id, id(OLD));
     }

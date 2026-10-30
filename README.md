@@ -25,6 +25,7 @@ A macOS workspace for work that spreads across many documents. Each piece of wor
 - **Restored on relaunch.** Every group comes back with its head, its documents and its popped-out windows. Only the active tab loads straight away.
 - **Unload, remove and reopen.** **⌘W** unloads the active tab, keeping its row; the live dot unloads any row. A row's bin removes the tab, and **⌘⇧⌫** closes its whole group, popped-out windows included. A closed group (or a removed head, which takes its group with it) is kept: choosing it under **Group ▸ Recent** reopens it with its documents, docked in the focused window; **Recent ▸ Clear Recent** empties the list.
 - **Find things in the sidebar.** Groups list their documents beneath them, each marked as a Doc, Sheet, Slides deck, Form or Drive folder, and search covers every group. Right-click a row, or use the **Group** menu, for Home, Rename…, Set Home to Current Page, Make Own Group, Move to Group, Remove Tab and Close Group.
+- **Links sent from other apps.** `open -a flotilla <link>`, or a link router, hands flotilla a link, and the last focused window takes it. A folder or page opens as a new group, and a document already open is brought up. Any other document waits under **Incoming** at the top of the sidebar until you **Add to** the active group, **Add to group…**, open it as a **New group**, or **Dismiss** it. A link aimed at a window and group ([below](#for-link-routers)) joins that group directly. The queue is kept across relaunches.
 - **Names and homes are yours.** A new group or document is named by its page's title once it loads; after that the name stays as written, wherever the tab navigates. **Rename…** edits it in place. **Set Home to Current Page** makes the page a tab has browsed to its home, so Home and relaunch land there; a group keeps its documents.
 
 Links to other sites leave flotilla for your default browser. Content runs in WKWebView (Safari's engine), so Chrome extensions and Docs offline mode are not available.
@@ -82,6 +83,16 @@ A document is open once across every window: two heads or tabs naming the same d
 | `auto_update` | `true` | Check for a new release on launch and every 6 hours. `false` stops the automatic checks; **Check for Updates…** still works. Read at launch (restart to change). |
 | `allow_insecure` | `[]` | Hosts whose self-signed or invalid TLS certificate is accepted. Read at launch (restart to change). |
 | `format_on_save` | `false` | Reformat the config in house style on each clean reload. A file that fails to parse is left untouched. |
+
+## For link routers
+
+flotilla takes `flotilla://open?window=<title>&group=<name>&url=<link>`, every value percent-encoded. `window` names the window to take the link (else the last focused one), and `group` the group in it a document joins (else it waits under Incoming). Launch it with `open -b au.lsjc.flotilla '<that URL>'`.
+
+The windows and their groups are published in `~/Library/Application Support/au.lsjc.flotilla/windows.json`, written at launch and whenever they change. Windows are in config order and groups in sidebar order; `colour` is `null` for a window without one:
+
+```json
+{"version":1,"windows":[{"title":"Rotary","colour":"#17458f","groups":["Rotary (interim)","Bulletins"]}]}
+```
 
 ## Build
 

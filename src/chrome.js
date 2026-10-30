@@ -133,6 +133,11 @@ async function mountChrome() {
       onBannerMenu({ x, y }) {
         invoke("banner_menu", { x, y }).catch((err) => sb.setError(String(err)));
       },
+      // An Incoming row's button: Add to the active group, Add to group… (a menu at the button),
+      // New group, or Dismiss.
+      onIncomingAction(id, action, { x, y }) {
+        invoke("incoming_action", { id, action, x, y }).catch((err) => sb.setError(String(err)));
+      },
       onToggleGroup(group, collapsed) {
         invoke("toggle_group", { head: group, collapsed }).catch(() => {});
       },

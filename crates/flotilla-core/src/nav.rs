@@ -26,6 +26,18 @@ pub enum Decision {
     PassThrough,
 }
 
+/// The URL a typed or pasted new-group address names. Only web pages can head a group.
+pub fn parse_group_url(input: &str) -> Result<Url, String> {
+    let s = input.trim();
+    if s.is_empty() {
+        return Err("Paste a folder or page link to open it as a group.".into());
+    }
+    match Url::parse(s) {
+        Ok(u) if matches!(u.scheme(), "http" | "https") && u.host_str().is_some() => Ok(u),
+        _ => Err(format!("Not a web link: {s}")),
+    }
+}
+
 /// Decides what `url`, requested from tab `from`, does. On `Open` this has already mutated `ws`;
 /// the caller must then consume the navigation (return true from shell-core's intercept) so
 /// WebKit does not also load the URL into the `from` webview. Creating or raising the webviews is
@@ -165,6 +177,23 @@ mod tests {
             decide(&mut w, &h, &u, Origin::Navigation),
             Decision::PassThrough
         );
+    }
+
+    #[test]
+    fn group_urls_must_be_web_links() {
+        assert_eq!(
+            parse_group_url("  https://drive.google.com/drive/folders/f1 ")
+                .unwrap()
+                .as_str(),
+            "https://drive.google.com/drive/folders/f1"
+        );
+        assert!(parse_group_url("").is_err());
+        assert_eq!(
+            parse_group_url("drive.google.com/x").unwrap_err(),
+            "Not a web link: drive.google.com/x"
+        );
+        assert!(parse_group_url("file:///etc/passwd").is_err());
+        assert!(parse_group_url("javascript:alert(1)").is_err());
     }
 
     #[test]

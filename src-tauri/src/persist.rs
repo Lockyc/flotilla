@@ -1,8 +1,9 @@
-//! Saving the session: debounced after each change, and once more at exit.
+//! Saving the session, and `windows.json` with it: debounced after each change, and once more at
+//! exit.
 
 use flotilla_core::model::Workspace;
 use flotilla_core::session::{self, Loaded};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -48,17 +49,31 @@ impl Persist {
         self.generation.load(Ordering::SeqCst) == ticket
     }
 
-    /// Writes the workspace `snapshot` returns, taken inside the writer lock. A no-op (and no
-    /// snapshot) when this run does not persist.
-    pub fn save(&self, snapshot: impl FnOnce() -> Workspace) -> std::io::Result<()> {
+    /// Writes the session of the workspace `snapshot` returns, then `windows.json` beside it from
+    /// that workspace and the config's window accents ([`session::windows_manifest`]), both taken
+    /// inside the writer lock. A no-op (and no snapshot) when this run does not persist. The
+    /// error is the error bar's text, naming which file failed.
+    pub fn save<C: Fn(&str) -> Option<String>>(
+        &self,
+        snapshot: impl FnOnce() -> (Workspace, C),
+    ) -> Result<(), String> {
         let Some(path) = &self.path else {
             return Ok(());
         };
         // Snapshot under the writer lock: a writer that waited here then writes the state as of
         // now, never one older than what the writer before it wrote.
         let _w = self.writing.lock().unwrap();
-        session::save(path, &snapshot())
+        let (ws, colour_of) = snapshot();
+        session::save(path, &ws).map_err(|e| format!("Couldn't save the session: {e}"))?;
+        let manifest = session::windows_manifest(&ws, colour_of);
+        session::write_atomic(&manifest_path(path), manifest.as_bytes())
+            .map_err(|e| format!("Couldn't publish the window list: {e}"))
     }
+}
+
+/// `windows.json`, beside the session file.
+fn manifest_path(session: &Path) -> PathBuf {
+    session.with_file_name("windows.json")
 }
 
 /// The error-bar text for what `session::load` found, if the user needs telling.
@@ -104,8 +119,13 @@ pub fn mark_dirty(app: &AppHandle) {
 /// in the error bar.
 pub fn save_now(app: &AppHandle) {
     let state = app.state::<crate::state::AppState>();
-    if let Err(e) = state.persist.save(|| state.ws.lock().unwrap().clone()) {
-        crate::tabs::notice(app, format!("Couldn't save the session: {e}"));
+    let snapshot = || {
+        let ws = state.ws.lock().unwrap().clone();
+        let cfg = state.config.lock().unwrap().clone();
+        (ws, move |title: &str| cfg.colour_of(title))
+    };
+    if let Err(msg) = state.persist.save(snapshot) {
+        crate::tabs::notice(app, msg);
     }
 }
 
@@ -125,6 +145,10 @@ mod tests {
         ws
     }
 
+    fn neutral(_: &str) -> Option<String> {
+        None
+    }
+
     #[test]
     fn only_the_latest_change_is_due() {
         let p = Persist::new(Some(PathBuf::from("/nonexistent/session.json")));
@@ -140,8 +164,33 @@ mod tests {
         let path = dir.path().join("session.json");
         let p = Persist::new(Some(path.clone()));
         let ws = sample();
-        p.save(|| ws.clone()).unwrap();
+        p.save(|| (ws.clone(), neutral)).unwrap();
         assert_eq!(session::load(&path), Loaded::Restored(Session::of(&ws)));
+    }
+
+    #[test]
+    fn save_writes_the_windows_manifest_beside_the_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = Persist::new(Some(dir.path().join("session.json")));
+        let ws = sample();
+        let blue = |_: &str| Some("#17458f".to_string());
+        p.save(|| (ws.clone(), blue)).unwrap();
+        let written = std::fs::read_to_string(dir.path().join("windows.json")).unwrap();
+        assert_eq!(written, session::windows_manifest(&ws, blue));
+    }
+
+    #[test]
+    fn each_file_names_its_own_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory where windows.json goes: the session saves, the manifest can't.
+        std::fs::create_dir(dir.path().join("windows.json")).unwrap();
+        let p = Persist::new(Some(dir.path().join("session.json")));
+        let e = p.save(|| (sample(), neutral)).unwrap_err();
+        assert!(e.starts_with("Couldn't publish the window list: "), "{e}");
+        let p = Persist::new(Some(dir.path().join("windows.json/x/session.json")));
+        std::fs::write(dir.path().join("windows.json/x"), "").unwrap();
+        let e = p.save(|| (sample(), neutral)).unwrap_err();
+        assert!(e.starts_with("Couldn't save the session: "), "{e}");
     }
 
     /// The snapshot is taken inside the writer lock, so a write that waited on another can never
@@ -152,7 +201,7 @@ mod tests {
         let p = Persist::new(Some(dir.path().join("session.json")));
         p.save(|| {
             assert!(p.writing.try_lock().is_err());
-            sample()
+            (sample(), neutral)
         })
         .unwrap();
     }
@@ -161,8 +210,10 @@ mod tests {
     fn an_unpersistable_run_never_writes() {
         let p = Persist::new(None);
         assert_eq!(p.schedule(), None);
-        p.save(|| panic!("an unpersistable run must not even snapshot"))
-            .unwrap();
+        p.save::<fn(&str) -> Option<String>>(|| {
+            panic!("an unpersistable run must not even snapshot")
+        })
+        .unwrap();
     }
 
     #[test]

@@ -1,8 +1,9 @@
 //! Persisting the run state: one JSON file the shell points us at, holding each window's active
-//! tab and Recent. The windows and groups themselves live in the config. Keys and ids in it are
-//! derived data, re-derived when applied (`Workspace::restore`), never trusted from disk.
+//! tab and Incoming queue, and Recent. The windows and groups themselves live in the config. Keys
+//! and ids in it are derived data, re-derived when applied (`Workspace::restore`), never trusted
+//! from disk.
 
-use crate::model::{Group, TabId, Workspace};
+use crate::model::{Group, Incoming, TabId, Workspace};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
@@ -13,11 +14,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const SESSION_VERSION: u32 = 2;
 
-/// What a session file keeps: each window's active tab by window title, and Recent.
+/// What a session file keeps: each window's active tab and non-empty Incoming queue by window
+/// title (the workspace's `stray` queues among them), and Recent.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Session {
     pub active: BTreeMap<String, TabId>,
     pub recent: Vec<Group>,
+    #[serde(default)]
+    pub incoming: BTreeMap<String, Vec<Incoming>>,
 }
 
 impl Session {
@@ -29,6 +33,13 @@ impl Session {
                 .filter_map(|w| Some((w.title.clone(), w.active.clone()?)))
                 .collect(),
             recent: ws.recent.clone(),
+            incoming: ws
+                .windows
+                .iter()
+                .filter(|w| !w.incoming.is_empty())
+                .map(|w| (w.title.clone(), w.incoming.clone()))
+                .chain(ws.stray.clone())
+                .collect(),
         }
     }
 }
@@ -116,14 +127,41 @@ pub fn save(path: &Path, ws: &Workspace) -> std::io::Result<()> {
     save_session(path, &Session::of(ws))
 }
 
-/// Writes `session` to `<path>.tmp`, fsyncs it, then renames over `path`, so a crash leaves the
-/// old file or the new one, never half of either.
+/// Writes `session` to `path` ([`write_atomic`]).
 pub fn save_session(path: &Path, session: &Session) -> std::io::Result<()> {
     let file = File {
         version: SESSION_VERSION,
         session: session.clone(),
     };
     let json = serde_json::to_vec_pretty(&file).map_err(std::io::Error::other)?;
+    write_atomic(path, &json)
+}
+
+pub const MANIFEST_VERSION: u32 = 1;
+
+/// `windows.json`, the file link routers read to offer flotilla's windows and groups:
+/// `{"version":1,"windows":[{"title","colour","groups":[<group name>…]}]}`, windows in config
+/// order and each one's groups in sidebar order. `colour_of` is the accent of the config window
+/// titled so; `None` is neutral (`null`).
+pub fn windows_manifest(ws: &Workspace, colour_of: impl Fn(&str) -> Option<String>) -> String {
+    let windows: Vec<serde_json::Value> = ws
+        .windows
+        .iter()
+        .map(|w| {
+            let colour = colour_of(&w.title);
+            let groups: Vec<&str> = w.groups.iter().map(|g| g.head.title.as_str()).collect();
+            serde_json::json!({ "title": w.title, "colour": colour, "groups": groups })
+        })
+        .collect();
+    serde_json::to_string_pretty(
+        &serde_json::json!({ "version": MANIFEST_VERSION, "windows": windows }),
+    )
+    .expect("a JSON value serialises")
+}
+
+/// Writes `bytes` to `<path>.tmp`, fsyncs it, then renames over `path`, so a crash leaves the old
+/// file or the new one, never half of either.
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".tmp");
     let tmp = PathBuf::from(tmp);
@@ -132,7 +170,7 @@ pub fn save_session(path: &Path, session: &Session) -> std::io::Result<()> {
             fs::create_dir_all(dir)?;
         }
         let mut f = fs::File::create(&tmp)?;
-        f.write_all(&json)?;
+        f.write_all(bytes)?;
         f.sync_all()?;
         fs::rename(&tmp, path)
     })();
@@ -204,13 +242,79 @@ mod tests {
             win.active = None;
         }
         fresh.recent.clear();
-        fresh.restore(s.active, s.recent);
+        fresh.restore(s.active, s.recent, s.incoming);
         assert_eq!(fresh, w);
         let json = fs::read_to_string(&p).unwrap();
         assert!(
             json.contains("\"version\": 2") && !json.contains("\"groups\""),
             "{json}"
         );
+    }
+
+    #[test]
+    fn session_round_trips_incoming() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("session.json");
+        let mut w = sample();
+        let doc = "https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrSt02/edit";
+        w.receive("B", None, doc, "default").unwrap();
+        w.receive("B", None, "mailto:x", "default").unwrap();
+        save(&p, &w).unwrap();
+        let Loaded::Restored(s) = load(&p) else {
+            panic!()
+        };
+        assert_eq!(s.incoming.len(), 1, "an empty queue is not written");
+        assert_eq!(s.incoming["B"].len(), 2);
+        let mut fresh = w.clone();
+        for win in &mut fresh.windows {
+            win.incoming.clear();
+        }
+        fresh.restore(s.active, s.recent, s.incoming);
+        assert_eq!(fresh, w);
+    }
+
+    #[test]
+    fn windows_manifest_lists_windows_and_groups_in_order() {
+        let mut w = sample();
+        let f4 = url("https://drive.google.com/drive/folders/f4");
+        let Some(Opened::Added(h4)) = w.new_group("A", &f4, "default") else {
+            panic!()
+        };
+        w.set_title(&w.windows[0].groups[0].head.id.clone(), "Rotary (interim)");
+        w.set_title(&h4, "Bulletins");
+        let colour_of = |t: &str| (t == "A").then(|| "#17458f".to_string());
+        let m: serde_json::Value = serde_json::from_str(&windows_manifest(&w, colour_of)).unwrap();
+        assert_eq!(
+            m,
+            serde_json::json!({
+                "version": 1,
+                "windows": [
+                    { "title": "A", "colour": "#17458f", "groups": ["Rotary (interim)", "Bulletins"] },
+                    { "title": "B", "colour": null, "groups": ["https://drive.google.com/drive/folders/f3"] },
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn write_atomic_replaces_the_file_and_leaves_no_temp() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("sub/windows.json");
+        write_atomic(&p, b"one").unwrap();
+        write_atomic(&p, b"two").unwrap();
+        assert_eq!(fs::read_to_string(&p).unwrap(), "two");
+        assert!(!dir.path().join("sub/windows.json.tmp").exists());
+    }
+
+    #[test]
+    fn a_session_without_incoming_loads_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("session.json");
+        fs::write(&p, r#"{"version":2,"active":{},"recent":[]}"#).unwrap();
+        let Loaded::Restored(s) = load(&p) else {
+            panic!()
+        };
+        assert!(s.incoming.is_empty());
     }
 
     #[test]

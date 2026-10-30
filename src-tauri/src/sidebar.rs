@@ -1,10 +1,60 @@
 //! The chrome-core DTO for the workspace: what the sidebar renders.
 
 use flotilla_core::identity::{kind, Kind};
-use flotilla_core::model::{TabId, WindowWs};
+use flotilla_core::model::{TabId, WindowWs, Workspace};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use url::Url;
+
+/// The Incoming row actions, as chrome-core's `onIncomingAction` reports them
+/// ([`crate::commands::incoming_action`]).
+pub const ADD_ACTIVE: &str = "add-active";
+pub const ADD: &str = "add";
+pub const NEW: &str = "new";
+pub const DISMISS: &str = "dismiss";
+
+const NO_GROUP: &str = "No group is open";
+
+/// Window `title`'s whole chrome DTO: [`sidebar_dto`] plus its [`incoming_dto`].
+pub fn window_dto(ws: &Workspace, title: &str, created: &HashSet<TabId>) -> Value {
+    let mut dto = sidebar_dto(crate::tabs::window(ws, title), created);
+    dto["incoming"] = incoming_dto(ws, title);
+    dto
+}
+
+/// Window `window`'s Incoming queue as chrome-core's `incoming` rows: the link as the title, its
+/// kind's glyph, the reason a rejected link can't be opened, and the actions. Add to the active
+/// tab's group (named), Add to group… and New group are disabled with the reason on a rejected
+/// link, and the adds while the window has no group to add to.
+pub fn incoming_dto(ws: &Workspace, window: &str) -> Value {
+    let Some(w) = crate::tabs::window(ws, window) else {
+        return json!([]);
+    };
+    let active = ws.active_group(window).map(|g| g.head.title.as_str());
+    let add_active = active.map_or_else(|| "Add to active group".into(), |t| format!("Add to {t}"));
+    let no_group = |none: bool| none.then_some(NO_GROUP);
+    let action = |id: &str, label: &str, disabled: Option<&str>| json!({ "id": id, "label": label, "disabled": disabled });
+    let rows: Vec<Value> = w
+        .incoming
+        .iter()
+        .map(|item| {
+            let rejected = item.problem.as_deref();
+            json!({
+                "id": item.id,
+                "title": item.link,
+                "icon": icon_of(&item.link),
+                "problem": item.problem,
+                "actions": [
+                    action(ADD_ACTIVE, &add_active, rejected.or(no_group(active.is_none()))),
+                    action(ADD, "Add to group…", rejected.or(no_group(w.groups.is_empty()))),
+                    action(NEW, "New group", rejected),
+                    action(DISMISS, "Dismiss", None),
+                ],
+            })
+        })
+        .collect();
+    Value::Array(rows)
+}
 
 /// The tab-list part of chrome-core's window DTO (`tabs`, `active`, `collapsed`); `chrome.js` adds
 /// the window identity fields. Each group is a run of rows keyed by its head's id, the head row
@@ -177,6 +227,112 @@ mod tests {
         ] {
             assert!(src.join(glyph(k)).is_file(), "{}", glyph(k));
         }
+    }
+
+    const DOC: &str = "https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrSt01/edit";
+
+    /// Each row's actions as (id, label, disabled reason).
+    fn actions(row: &Value) -> Vec<(String, String, Option<String>)> {
+        row["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| {
+                (
+                    a["id"].as_str().unwrap().to_string(),
+                    a["label"].as_str().unwrap().to_string(),
+                    a["disabled"].as_str().map(str::to_string),
+                )
+            })
+            .collect()
+    }
+
+    fn act(id: &str, label: &str, disabled: Option<&str>) -> (String, String, Option<String>) {
+        (id.into(), label.into(), disabled.map(str::to_string))
+    }
+
+    #[test]
+    fn incoming_rows_carry_their_actions() {
+        let mut ws = one_window();
+        let Opened::Added(h) = new_group(&mut ws, "https://drive.google.com/drive/folders/f1")
+        else {
+            panic!()
+        };
+        ws.set_title(&h, "Fleet");
+        ws.receive("W", None, DOC, "default").unwrap();
+        ws.receive("W", None, "mailto:x", "default").unwrap();
+
+        let dto = incoming_dto(&ws, "W");
+        let rows = dto.as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["title"], json!(DOC));
+        assert_eq!(rows[0]["icon"], json!("icons/doc.svg"));
+        assert_eq!(rows[0]["problem"], Value::Null);
+        assert_eq!(
+            actions(&rows[0]),
+            [
+                act(ADD_ACTIVE, "Add to Fleet", None),
+                act(ADD, "Add to group…", None),
+                act(NEW, "New group", None),
+                act(DISMISS, "Dismiss", None),
+            ]
+        );
+        let why = "Not a web link: mailto:x";
+        assert_eq!(rows[1]["problem"], json!(why));
+        assert_eq!(
+            actions(&rows[1]),
+            [
+                act(ADD_ACTIVE, "Add to Fleet", Some(why)),
+                act(ADD, "Add to group…", Some(why)),
+                act(NEW, "New group", Some(why)),
+                act(DISMISS, "Dismiss", None),
+            ]
+        );
+        assert_eq!(incoming_dto(&ws, "nowhere"), json!([]));
+    }
+
+    #[test]
+    fn incoming_with_no_group_disables_the_adds() {
+        let mut ws = one_window();
+        ws.receive("W", None, DOC, "default").unwrap();
+        assert_eq!(
+            actions(&incoming_dto(&ws, "W")[0]),
+            [
+                act(ADD_ACTIVE, "Add to active group", Some("No group is open")),
+                act(ADD, "Add to group…", Some("No group is open")),
+                act(NEW, "New group", None),
+                act(DISMISS, "Dismiss", None),
+            ]
+        );
+        // A group, but no tab active: only Add to group… is offered.
+        let Opened::Added(_) = new_group(&mut ws, "https://drive.google.com/drive/folders/f1")
+        else {
+            panic!()
+        };
+        ws.windows[0].active = None;
+        let a = actions(&incoming_dto(&ws, "W")[0]);
+        assert_eq!(
+            a[0],
+            act(ADD_ACTIVE, "Add to active group", Some("No group is open"))
+        );
+        assert_eq!(a[1], act(ADD, "Add to group…", None));
+    }
+
+    #[test]
+    fn the_window_dto_carries_its_own_queue() {
+        let window = |t: &str| flotilla_core::model::ConfigWindow {
+            title: t.into(),
+            groups: vec![],
+        };
+        let mut ws = flotilla_core::model::Workspace::from_config(&[window("A"), window("B")]);
+        ws.receive("B", None, DOC, "default").unwrap();
+        let none = HashSet::new();
+        assert_eq!(window_dto(&ws, "A", &none)["incoming"], json!([]));
+        assert_eq!(
+            window_dto(&ws, "B", &none)["incoming"],
+            incoming_dto(&ws, "B")
+        );
+        assert_eq!(window_dto(&ws, "B", &none)["tabs"], json!([]));
     }
 
     #[test]

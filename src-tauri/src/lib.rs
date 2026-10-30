@@ -1,7 +1,7 @@
 //! flotilla's Tauri shell: one OS window per config `[[window]]` (shell-core's `WindowSet`), each
 //! with a sidebar listing that window's groups and a content hole showing its active tab's webview.
 //! The workspace is built from the config and written back to it; the session (each window's
-//! active tab and Recent) is loaded at setup and saved as it changes.
+//! active tab and Incoming queue, and Recent) is loaded at setup and saved as it changes.
 
 mod commands;
 mod config;
@@ -203,7 +203,7 @@ fn load_state(
     let persist = persist::Persist::for_load(path, &loaded);
     let mut ws = flotilla_core::model::Workspace::from_config(&config.workspace_windows());
     if let Loaded::Restored(s) = loaded {
-        ws.restore(s.active, s.recent);
+        ws.restore(s.active, s.recent, s.incoming);
     }
     state::AppState {
         gate: Default::default(),
@@ -328,6 +328,7 @@ pub fn run() {
             commands::row_menu,
             commands::rename_tab,
             commands::banner_menu,
+            commands::incoming_action,
             commands::set_hole_rect,
             commands::shell_home_create_config,
             commands::shell_home_edit_config,
@@ -364,6 +365,8 @@ pub fn run() {
             tabs::sync(handle);
             detach::reconcile(handle);
             commands::open_early_links(handle);
+            // `windows.json` reflects the config in force from launch, not from the first change.
+            persist::mark_dirty(handle);
 
             let nav_handle = handle.clone();
             shell_core::mouse_nav::install(move || tabs::focused_webview(&nav_handle));
