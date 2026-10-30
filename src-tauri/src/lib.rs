@@ -1,12 +1,14 @@
 //! flotilla's Tauri shell. Currently an empty workspace window: the shared chrome with no tabs.
 
+mod persist;
 mod sidebar;
+mod state;
 
 use serde::Serialize;
 use tauri::{Emitter, Manager, TitleBarStyle, WebviewUrl};
 
 /// The single workspace window's label.
-const MAIN_WINDOW: &str = "main";
+pub(crate) const MAIN_WINDOW: &str = "main";
 
 /// First-run window size; shell-core's geometry plugin restores the saved bounds afterwards.
 const FIRST_RUN_SIZE: (f64, f64) = (1400.0, 900.0);

@@ -1,0 +1,165 @@
+//! Saving the session: debounced after each change, and once more at exit.
+
+use flotilla_core::model::Workspace;
+use flotilla_core::session::{self, Loaded};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
+use std::time::Duration;
+use tauri::{AppHandle, Emitter, Manager};
+
+/// How long after the last change the session is written.
+pub const DEBOUNCE: Duration = Duration::from_millis(500);
+
+/// The session file and the debounce counter. `path` is `None` when nothing may be saved this run
+/// (`Loaded::Unpersistable`, or no app data dir): saving would overwrite a file that was never read.
+pub struct Persist {
+    path: Option<PathBuf>,
+    generation: AtomicU64,
+    /// Serialises writers: the debounce thread and the exit save share `<path>.tmp`.
+    writing: Mutex<()>,
+}
+
+impl Persist {
+    pub fn new(path: Option<PathBuf>) -> Self {
+        Self {
+            path,
+            generation: AtomicU64::new(0),
+            writing: Mutex::new(()),
+        }
+    }
+
+    /// Records a change. The ticket it returns is due only if no later change arrives before the
+    /// debounce elapses; `None` when this run does not persist.
+    pub fn schedule(&self) -> Option<u64> {
+        self.path.as_ref()?;
+        Some(self.generation.fetch_add(1, Ordering::SeqCst) + 1)
+    }
+
+    /// Whether `ticket` is still the latest change.
+    pub fn due(&self, ticket: u64) -> bool {
+        self.generation.load(Ordering::SeqCst) == ticket
+    }
+
+    /// Writes `ws` now. A no-op when this run does not persist.
+    pub fn save(&self, ws: &Workspace) -> std::io::Result<()> {
+        let Some(path) = &self.path else {
+            return Ok(());
+        };
+        let _w = self.writing.lock().unwrap();
+        session::save(path, ws)
+    }
+}
+
+/// The error-bar text for what `session::load` found, if the user needs telling.
+pub fn load_notice(loaded: &Loaded) -> Option<String> {
+    match loaded {
+        Loaded::Fresh | Loaded::Restored(_) => None,
+        Loaded::Quarantined { moved_to } => {
+            let name = moved_to
+                .file_name()
+                .map_or_else(|| moved_to.display().to_string(), |n| n.to_string_lossy().into_owned());
+            Some(format!(
+                "Couldn't read the last session — saved it as {name} and started fresh."
+            ))
+        }
+        Loaded::Unpersistable { reason } => Some(unpersistable_notice(reason)),
+    }
+}
+
+/// The error-bar text for a run that will not save, naming why.
+pub fn unpersistable_notice(reason: &str) -> String {
+    format!("Couldn't use the last session ({reason}). Changes this session won't be saved.")
+}
+
+/// Saves the session `DEBOUNCE` after the last call. Safe from any thread; the save itself runs on
+/// a worker thread, which locks `ws` only to clone it.
+pub fn mark_dirty(app: &AppHandle) {
+    let state = app.state::<crate::state::AppState>();
+    let Some(ticket) = state.persist.schedule() else {
+        return;
+    };
+    let app = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(DEBOUNCE);
+        let state = app.state::<crate::state::AppState>();
+        if state.persist.due(ticket) {
+            save_now(&app);
+        }
+    });
+}
+
+/// Writes the session immediately (the exit path, and the end of a debounce). A failure is shown
+/// in the error bar.
+pub fn save_now(app: &AppHandle) {
+    let state = app.state::<crate::state::AppState>();
+    let ws = state.ws.lock().unwrap().clone();
+    if let Err(e) = state.persist.save(&ws) {
+        let _ = app.emit_to(
+            crate::MAIN_WINDOW,
+            "notice",
+            format!("Couldn't save the session: {e}"),
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flotilla_core::model::Opened;
+    use url::Url;
+
+    fn sample() -> Workspace {
+        let mut ws = Workspace::default();
+        let f = Url::parse("https://drive.google.com/drive/folders/f1").unwrap();
+        let Opened::Added(_) = ws.new_group(&f, "default") else {
+            panic!()
+        };
+        ws
+    }
+
+    #[test]
+    fn only_the_latest_change_is_due() {
+        let p = Persist::new(Some(PathBuf::from("/nonexistent/session.json")));
+        let first = p.schedule().unwrap();
+        let second = p.schedule().unwrap();
+        assert!(!p.due(first));
+        assert!(p.due(second));
+    }
+
+    #[test]
+    fn save_round_trips_through_session_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.json");
+        let p = Persist::new(Some(path.clone()));
+        let ws = sample();
+        p.save(&ws).unwrap();
+        assert_eq!(session::load(&path), Loaded::Restored(ws));
+    }
+
+    #[test]
+    fn an_unpersistable_run_never_writes() {
+        let p = Persist::new(None);
+        assert_eq!(p.schedule(), None);
+        p.save(&sample()).unwrap();
+    }
+
+    #[test]
+    fn notices_name_the_quarantine_file_and_the_reason() {
+        assert_eq!(load_notice(&Loaded::Fresh), None);
+        assert_eq!(load_notice(&Loaded::Restored(Workspace::default())), None);
+        let q = Loaded::Quarantined {
+            moved_to: PathBuf::from("/x/au.lsjc.flotilla/session.json.bad-1700000000"),
+        };
+        assert_eq!(
+            load_notice(&q).unwrap(),
+            "Couldn't read the last session — saved it as session.json.bad-1700000000 and started fresh."
+        );
+        let u = Loaded::Unpersistable {
+            reason: "cannot read session.json: permission denied".into(),
+        };
+        let text = load_notice(&u).unwrap();
+        assert!(text.contains("cannot read session.json: permission denied"));
+        assert!(text.contains("won't be saved"));
+    }
+}
