@@ -65,6 +65,14 @@ chrome-dev: (_core-patch "dev" "chrome")
 [group("chrome")]
 chrome-pin: (_core-patch "pin" "chrome")
 
+# Build flotilla against local ../config-core (uncommitted edits included): activate the [patch], `just run`
+[group("config")]
+config-dev: (_core-patch "dev" "config")
+
+# Re-pin config-core to ../config-core's pushed HEAD + deactivate the patch (run after pushing config-core)
+[group("config")]
+config-pin: (_core-patch "pin" "config")
+
 # Build flotilla against local ../shell-core (uncommitted edits included): activate the [patch], `just run`
 [group("shell")]
 shell-dev: (_core-patch "dev" "shell")
@@ -82,6 +90,15 @@ icon:
 [group("dist")]
 build:
     cd src-tauri && cargo tauri build
+
+# Run on dev with the src-tauri/Cargo.toml version bump committed and pushed (see CLAUDE.md ›
+# Releases). `notes` is a notes file; omitted, the notes are the commit subjects since the previous
+# tag. Refuses without the Apple signing/notary env AND the updater key; nothing is tagged, pushed
+# or published until the notarized build succeeds. DRY_RUN=1 prints the side effects instead.
+# Release: gate → notarized build → tag v<version> → fast-forward main → push → GitHub release
+[group("dist")]
+release notes="": gate
+    bash scripts/release.sh "{{notes}}"
 
 # Build a release .app and install/replace it in /Applications, then relaunch
 [group("dist")]
