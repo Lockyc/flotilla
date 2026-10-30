@@ -848,6 +848,11 @@ dependencies = [
 [[package]]
 name = "flotilla-core"
 version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "url",
+]
 
 [[package]]
 name = "fnv"
