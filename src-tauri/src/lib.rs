@@ -37,7 +37,11 @@ struct WindowIdentity {
 fn window_identity(state: tauri::State<state::AppState>) -> WindowIdentity {
     let cfg = state.config.lock().unwrap();
     WindowIdentity {
-        title: cfg.title.clone(),
+        title: cfg
+            .windows
+            .first()
+            .map(|w| w.title.trim().to_string())
+            .unwrap_or_default(),
         colour: cfg.accent(),
         default_width: DEFAULT_SIDEBAR_W,
         density: cfg.density.as_str(),

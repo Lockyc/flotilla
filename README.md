@@ -44,12 +44,35 @@ flotilla updates itself. On launch, every 6 hours while open, and via **flotilla
 
 ## Config
 
-Settings are app-wide, in `~/.config/flotilla/config.toml` (or the file `FLOTILLA_CONFIG` names). **Config ▸ Edit Config** opens it, writing a starter file first if there is none. Saving hot-reloads; a file that doesn't parse keeps the last good config and shows the error in the sidebar. Groups never go in the config: they live in the session.
+The config is `~/.config/flotilla/config.toml` (or the file `FLOTILLA_CONFIG` names): app-wide settings, then your windows with their groups and documents. **Config ▸ Edit Config** opens it, writing a starter file first if there is none. Saving hot-reloads; a file that doesn't parse keeps the last good config and shows the error in the sidebar.
+
+```toml
+[[window]]
+  title  = "Rotary"
+  colour = "#17458f"
+  [[window.group]]
+    name = "Rotary (interim)"
+    url  = "https://drive.google.com/drive/folders/0AExampleFolderRoot"
+    [[window.group.tab]]
+      title = "Rotary Example – Budget"
+      url   = "https://docs.google.com/spreadsheets/d/1ExampleSheetId0000000000000000000000000000/edit"
+```
+
+A document is open once across every window: two heads or tabs naming the same document in the same `store` are a config error.
 
 | Key | Default | What it does |
 |---|---|---|
-| `title` | `""` | The window's name, shown in the sidebar banner, the window title and **Window** menu. Empty for none. Hot-reloads. |
-| `colour` | `""` | `#rgb` / `#rrggbb` accent for the sidebar, the **Window** menu swatch and popped-out windows. Empty for neutral. Hot-reloads. |
+| `[[window]]` `title` | required | The window's name, shown in the sidebar banner, the window title and **Window** menu. Unique. |
+| `[[window]]` `colour` | none | `#rgb` / `#rrggbb` accent for the sidebar, the **Window** menu swatch and popped-out windows. |
+| `[[window]]` `width`, `height` | `1500`, `1000` | The window's size on its first open. |
+| `[[window]]` `open_on_start` | `true` | `false` leaves the window closed at launch until opened from the **Window** menu. |
+| `[[window.group]]` `name` | required | The group's name in the sidebar. Unique within its window. |
+| `[[window.group]]` `url` | required | The group's head and Home: a Drive folder or a document. |
+| `[[window.group]]` `store` | `"default"` | The login store the group's documents open in; another store is another account. |
+| `[[window.group]]` `collapsed` | `false` | Shows the head alone. |
+| `[[window.group.tab]]` `title` | required | The document's name in the sidebar. |
+| `[[window.group.tab]]` `url` | required | The document, and its Home. |
+| `[[window.group.tab]]` `detached` | `false` | Popped out; reopens in its own window. |
 | `density` | `"comfortable"` | Chrome sizing: `comfortable` or `compact` (type and spacing scaled down). Hot-reloads. |
 | `dark_mode` | `false` | Force a dark appearance so pages honouring `prefers-color-scheme` render dark. Hot-reloads. |
 | `tab_digit_keys` | `"jump"` | What ⌘1/⌘2 do: `jump` — ⌘1–⌘9 go to that tab; `cycle` — ⌘1 next tab, ⌘2 previous, ⌘3–⌘9 go to that tab. **Tab ▸ Cycle Tabs with ⌘1/⌘2** flips it. Hot-reloads. |

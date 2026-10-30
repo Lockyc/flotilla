@@ -1,10 +1,4 @@
-# flotilla config — app-wide settings. Edit and save; flotilla hot-reloads.
-
-# The window's name, shown in the sidebar and the Window menu. Empty for none.
-title = ""
-
-# The window's accent colour, "#rgb" or "#rrggbb". Empty for neutral.
-colour = ""
+# flotilla config — app-wide settings, then your windows. Edit and save; flotilla hot-reloads.
 
 # Chrome sizing: "comfortable" or "compact".
 density = "comfortable"
@@ -24,3 +18,24 @@ allow_insecure = []
 
 # Reformat this file in house style on each clean reload.
 format_on_save = false
+
+# Windows, each holding groups of documents. flotilla writes these as you work; a hand edit
+# sticks. A document is open once across every window.
+#
+# [[window]]
+# title = "Rotary"            # the window's name: sidebar banner, window title, Window menu
+# colour = "#17458f"          # optional accent, "#rgb" or "#rrggbb"
+# width = 1500                # optional size of its first open
+# height = 1000
+# open_on_start = true        # optional; false leaves it closed until opened from the Window menu
+#
+# [[window.group]]
+# name = "Rotary (interim)"   # the group's name in the sidebar
+# url = "https://drive.google.com/drive/folders/0AExampleFolderRoot"  # its head and Home
+# store = "default"           # optional login store; another store is another account
+# collapsed = false           # optional; true shows the head alone
+#
+# [[window.group.tab]]
+# title = "Budget"            # the document's name in the sidebar
+# url = "https://docs.google.com/spreadsheets/d/1ExampleSheetId0000000000000000000000000000/edit"
+# detached = false            # optional; true reopens it in its own window

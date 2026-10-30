@@ -6,22 +6,10 @@
 //! raises the existing tab. The registry is not a separate index: it is derived by scanning the
 //! tabs, so it cannot drift from them.
 
-use crate::identity::{doc_key, head_doc_key, head_key, DocKey, HEAD_PROVIDER};
+use crate::identity::{doc_key, identity, DocKey};
 use serde::{Deserialize, Serialize};
 use shell_core::tabs::pick_live_neighbour;
 use url::Url;
-
-/// A tab's identity within its group's login `store`: the document it opens (`head_doc_key`, which
-/// for a member is its `doc_key`), else (a head that is not a document) its `head_key`. The one
-/// rule every operation compares by, so a document is the same identity whether it heads a group
-/// or is a member, and the same URL in two stores is two.
-fn identity(store: &str, url: &Url) -> DocKey {
-    head_doc_key(store, url).unwrap_or_else(|| DocKey {
-        store: store.to_string(),
-        provider: HEAD_PROVIDER.to_string(),
-        id: head_key(url),
-    })
-}
 
 /// Closed groups kept in `Workspace::recent`; the oldest is dropped past this.
 pub const RECENT_CAP: usize = 20;

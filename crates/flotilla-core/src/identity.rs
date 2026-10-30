@@ -143,6 +143,19 @@ pub fn head_doc_key(store: &str, url: &Url) -> Option<DocKey> {
     })
 }
 
+/// A tab's identity within its group's login `store`: the document it opens (`head_doc_key`, which
+/// for a member is its `doc_key`), else (a head that is not a document) its `head_key`. The one
+/// rule open-once compares by — in the workspace and across the config's windows — so a document
+/// is the same identity whether it heads a group or is a member, and the same URL in two stores
+/// is two.
+pub fn identity(store: &str, url: &Url) -> DocKey {
+    head_doc_key(store, url).unwrap_or_else(|| DocKey {
+        store: store.to_string(),
+        provider: HEAD_PROVIDER.to_string(),
+        id: head_key(url),
+    })
+}
+
 const NOISE_PARAMS: &[&str] = &["usp", "pli", "authuser", "ouid", "resourcekey"];
 
 /// A URL normalised for comparing heads: lowercase host without `www.`, no fragment, no trailing
