@@ -8,7 +8,8 @@ html, body { margin: 0; height: 100vh; overflow: hidden; background: #1e1e1e; }
 /* `width` is the resize-controlled sidebar width, set inline by the controller. */
 #sidebar { width: var(--cc-sidebar-w, 240px); flex: none; }
 
-/* The header slot's new-group field, sharing the banner row with the window name. */
+/* The banner row is the new-group field's alone: the window name already sits in the title-bar strip. */
+#cc-banner .cc-name { display: none; }
 #new-group {
   flex: 1;
   min-width: 0;
