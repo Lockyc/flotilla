@@ -5,6 +5,7 @@
 use crate::state::AppState;
 use crate::tabs;
 use flotilla_core::model::{Opened, TabId};
+use flotilla_core::nav::parse_group_url;
 use serde::Deserialize;
 use shell_core::compositing::{layout_webviews, HoleRect};
 use shell_core::windows::WindowSet;
@@ -19,18 +20,6 @@ fn require_chrome(webview: &Webview) -> Result<String, String> {
     }
     tabs::title_of_label(webview.app_handle(), label)
         .ok_or_else(|| "forbidden: not the chrome".into())
-}
-
-/// The URL a typed or pasted new-group address names. Only web pages can head a group.
-pub fn parse_group_url(input: &str) -> Result<Url, String> {
-    let s = input.trim();
-    if s.is_empty() {
-        return Err("Paste a folder or page link to open it as a group.".into());
-    }
-    match Url::parse(s) {
-        Ok(u) if matches!(u.scheme(), "http" | "https") && u.host_str().is_some() => Ok(u),
-        _ => Err(format!("Not a web link: {s}")),
-    }
 }
 
 /// The calling window's sidebar DTO, for the chrome's first paint (later ones arrive as
@@ -549,22 +538,5 @@ mod tests {
         assert_eq!(hole_caller(&tabs::label(&d, TAB), &d, false), None);
         // A window the set does not list (the home surface, the window form).
         assert_eq!(hole_caller("other", "other", false), None);
-    }
-
-    #[test]
-    fn group_urls_must_be_web_links() {
-        assert_eq!(
-            parse_group_url("  https://drive.google.com/drive/folders/f1 ")
-                .unwrap()
-                .as_str(),
-            "https://drive.google.com/drive/folders/f1"
-        );
-        assert!(parse_group_url("").is_err());
-        assert_eq!(
-            parse_group_url("drive.google.com/x").unwrap_err(),
-            "Not a web link: drive.google.com/x"
-        );
-        assert!(parse_group_url("file:///etc/passwd").is_err());
-        assert!(parse_group_url("javascript:alert(1)").is_err());
     }
 }

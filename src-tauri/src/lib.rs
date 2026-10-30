@@ -203,7 +203,7 @@ fn load_state(
     let persist = persist::Persist::for_load(path, &loaded);
     let mut ws = flotilla_core::model::Workspace::from_config(&config.workspace_windows());
     if let Loaded::Restored(s) = loaded {
-        ws.restore(s.active, s.recent);
+        ws.restore(s.active, s.recent, s.incoming);
     }
     state::AppState {
         gate: Default::default(),

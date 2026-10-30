@@ -1,8 +1,8 @@
 //! Persisting the run state: one JSON file the shell points us at, holding each window's active
-//! tab and Recent. The windows and groups themselves live in the config. Keys and ids in it are
+//! tab and Incoming queue, and Recent. The windows and groups themselves live in the config. Keys and ids in it are
 //! derived data, re-derived when applied (`Workspace::restore`), never trusted from disk.
 
-use crate::model::{Group, TabId, Workspace};
+use crate::model::{Group, Incoming, TabId, Workspace};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
@@ -13,11 +13,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const SESSION_VERSION: u32 = 2;
 
-/// What a session file keeps: each window's active tab by window title, and Recent.
+/// What a session file keeps: each window's active tab and non-empty Incoming queue by window
+/// title, and Recent.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Session {
     pub active: BTreeMap<String, TabId>,
     pub recent: Vec<Group>,
+    #[serde(default)]
+    pub incoming: BTreeMap<String, Vec<Incoming>>,
 }
 
 impl Session {
@@ -29,6 +32,12 @@ impl Session {
                 .filter_map(|w| Some((w.title.clone(), w.active.clone()?)))
                 .collect(),
             recent: ws.recent.clone(),
+            incoming: ws
+                .windows
+                .iter()
+                .filter(|w| !w.incoming.is_empty())
+                .map(|w| (w.title.clone(), w.incoming.clone()))
+                .collect(),
         }
     }
 }
@@ -204,13 +213,46 @@ mod tests {
             win.active = None;
         }
         fresh.recent.clear();
-        fresh.restore(s.active, s.recent);
+        fresh.restore(s.active, s.recent, s.incoming);
         assert_eq!(fresh, w);
         let json = fs::read_to_string(&p).unwrap();
         assert!(
             json.contains("\"version\": 2") && !json.contains("\"groups\""),
             "{json}"
         );
+    }
+
+    #[test]
+    fn session_round_trips_incoming() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("session.json");
+        let mut w = sample();
+        let doc = "https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrSt02/edit";
+        w.receive("B", None, doc, "default").unwrap();
+        w.receive("B", None, "mailto:x", "default").unwrap();
+        save(&p, &w).unwrap();
+        let Loaded::Restored(s) = load(&p) else {
+            panic!()
+        };
+        assert_eq!(s.incoming.len(), 1, "an empty queue is not written");
+        assert_eq!(s.incoming["B"].len(), 2);
+        let mut fresh = w.clone();
+        for win in &mut fresh.windows {
+            win.incoming.clear();
+        }
+        fresh.restore(s.active, s.recent, s.incoming);
+        assert_eq!(fresh, w);
+    }
+
+    #[test]
+    fn a_session_without_incoming_loads_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("session.json");
+        fs::write(&p, r#"{"version":2,"active":{},"recent":[]}"#).unwrap();
+        let Loaded::Restored(s) = load(&p) else {
+            panic!()
+        };
+        assert!(s.incoming.is_empty());
     }
 
     #[test]

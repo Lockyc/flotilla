@@ -4,13 +4,14 @@
 //!
 //! The windows and their groups are built from the config ([`Workspace::from_config`]) and
 //! replaced on each reload ([`Workspace::rebase`]); the session adds each window's active tab and
-//! Recent ([`Workspace::restore`]). Two levels only: a group's head (any URL, usually a Drive
+//! Incoming queue, and Recent ([`Workspace::restore`]). Two levels only: a group's head (any URL, usually a Drive
 //! folder) and flat members (documents). A document is open at most once across every window,
 //! detached tabs included; opening it again raises the existing tab in its own window. The
 //! registry is not a separate index: it is derived by scanning the tabs, so it cannot drift from
 //! them.
 
-use crate::identity::{doc_key, head_key, identity, tab_id, DocKey};
+use crate::identity::{doc_key, fnv1a, head_key, identity, tab_id, DocKey};
+use crate::nav::parse_group_url;
 use serde::{Deserialize, Serialize};
 use shell_core::tabs::pick_live_neighbour;
 use std::collections::BTreeMap;
@@ -53,6 +54,44 @@ pub struct WindowWs {
     /// The tab the window shows. Never a detached tab: activating one leaves this as it is and
     /// asks for its window instead ([`Workspace::take_raise`]).
     pub active: Option<TabId>,
+    /// Links handed to this window, waiting to be placed, oldest first. Run state: the session
+    /// keeps it, and a config reload carries it over ([`Workspace::rebase`]).
+    pub incoming: Vec<Incoming>,
+}
+
+/// A link handed to a window ([`Workspace::receive`]) and waiting under its Incoming.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Incoming {
+    /// `"in-<16 hex>"`: the hash [`tab_id`] takes of the link's document key, else the [`fnv1a`]
+    /// of its trimmed text. The same link has the same id, so it is queued once across windows.
+    pub id: String,
+    pub link: String,
+    /// Why the link can't be opened, shown on its row: it is not a web link.
+    pub problem: Option<String>,
+}
+
+/// The [`Incoming::id`] of `link` handed in `store`.
+fn incoming_id(store: &str, link: &str) -> String {
+    let link = link.trim();
+    match Url::parse(link).ok().and_then(|u| doc_key(store, &u)) {
+        Some(key) => format!("in-{}", &tab_id(&key)["t-".len()..]),
+        None => format!("in-{:016x}", fnv1a(link.as_bytes())),
+    }
+}
+
+/// What [`Workspace::receive`] did with a handed link.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Handed {
+    /// It was open already, in whichever window: that tab is raised.
+    Raised(TabId),
+    /// Not a document: it heads a new group in the window.
+    Grouped(TabId),
+    /// A document aimed at a group of the window: it joined it.
+    Joined(TabId),
+    /// Queued under the window's Incoming, as the item with this id.
+    Queued(String),
+    /// Already waiting under some window's Incoming, as the item with this id.
+    AlreadyQueued(String),
 }
 
 /// A config `[[window]]` as the model reads it; the shell maps its config onto these.
@@ -182,6 +221,7 @@ impl Workspace {
                     })
                     .collect(),
                 active: None,
+                incoming: vec![],
             })
             .collect();
         Workspace {
@@ -193,9 +233,13 @@ impl Workspace {
     /// Adopts a reloaded config's windows. Each window keeps its active tab when a window of the
     /// same title still holds it docked; when it went (a hand edit), its group's docked head takes
     /// over, else the nearest following group's docked head, else the nearest preceding one's.
-    /// Recent is the session's and stays.
+    /// Recent and the Incoming queues are the session's and stay ([`Self::adopt_incoming`]).
     pub fn rebase(&mut self, fresh: Workspace) {
-        let old = std::mem::replace(&mut self.windows, fresh.windows);
+        let mut old = std::mem::replace(&mut self.windows, fresh.windows);
+        self.adopt_incoming(
+            old.iter_mut()
+                .map(|o| (o.title.clone(), std::mem::take(&mut o.incoming))),
+        );
         for w in &mut self.windows {
             let Some(o) = old.iter().find(|o| o.title == w.title) else {
                 w.active = None;
@@ -227,13 +271,35 @@ impl Workspace {
         }
     }
 
+    /// Queues `queues` (window title → items, oldest first) after what each window holds: under
+    /// the window of that title, else under the first window, so a link is never dropped while a
+    /// window exists. An item whose id is queued already is left out.
+    fn adopt_incoming(&mut self, queues: impl IntoIterator<Item = (String, Vec<Incoming>)>) {
+        for (title, items) in queues {
+            let wi = self.window_index(&title).unwrap_or(0);
+            for item in items {
+                if self.queued(&item.id) || wi >= self.windows.len() {
+                    continue;
+                }
+                self.windows[wi].incoming.push(item);
+            }
+        }
+    }
+
     /// Applies a saved session: each window's active tab by title (when that window holds it
-    /// docked), and Recent with every key and id re-derived from its URL and store, members whose
-    /// URL no longer parses or whose identity repeats in the group dropped.
-    pub fn restore(&mut self, active: BTreeMap<String, TabId>, mut recent: Vec<Group>) {
+    /// docked), its Incoming queue ([`Self::adopt_incoming`]), and Recent with every key and id
+    /// re-derived from its URL and store, members whose URL no longer parses or whose identity
+    /// repeats in the group dropped.
+    pub fn restore(
+        &mut self,
+        active: BTreeMap<String, TabId>,
+        mut recent: Vec<Group>,
+        incoming: BTreeMap<String, Vec<Incoming>>,
+    ) {
         for w in &mut self.windows {
             w.active = active.get(&w.title).cloned().filter(|a| docked_in(w, a));
         }
+        self.adopt_incoming(incoming);
         for g in &mut recent {
             let store = g.store.clone();
             g.members.retain(|m| Url::parse(&m.home_url).is_ok());
@@ -605,6 +671,118 @@ impl Workspace {
     }
 }
 
+impl Workspace {
+    /// Whether an item with id `id` is queued in any window.
+    fn queued(&self, id: &str) -> bool {
+        self.incoming_at(id).is_some()
+    }
+
+    /// The window index and queue position of the Incoming item `id`.
+    fn incoming_at(&self, id: &str) -> Option<(usize, usize)> {
+        self.windows.iter().enumerate().find_map(|(wi, w)| {
+            w.incoming
+                .iter()
+                .position(|i| i.id == id)
+                .map(|ii| (wi, ii))
+        })
+    }
+
+    /// Queues `link` under window `wi`, unless it is queued in any window already.
+    fn enqueue(&mut self, wi: usize, store: &str, link: &str, problem: Option<String>) -> Handed {
+        let id = incoming_id(store, link);
+        if self.queued(&id) {
+            return Handed::AlreadyQueued(id);
+        }
+        self.windows[wi].incoming.push(Incoming {
+            id: id.clone(),
+            link: link.trim().to_string(),
+            problem,
+        });
+        Handed::Queued(id)
+    }
+
+    /// Takes a link handed to window `window` in `store`. A link that is not a web link is queued
+    /// with its reason; one open already, in any window, is raised; a document joins the group
+    /// of that window whose head is titled `group`, else is queued; anything else heads a new
+    /// group in the window. `None` only when there is no such window.
+    pub fn receive(
+        &mut self,
+        window: &str,
+        group: Option<&str>,
+        link: &str,
+        store: &str,
+    ) -> Option<Handed> {
+        let wi = self.window_index(window)?;
+        let url = match parse_group_url(link) {
+            Ok(url) => url,
+            Err(problem) => return Some(self.enqueue(wi, store, link, Some(problem))),
+        };
+        if let Some(id) = self.open_doc(&identity(store, &url)) {
+            self.activate(&id);
+            return Some(Handed::Raised(id));
+        }
+        if doc_key(store, &url).is_none() {
+            let opened = self.new_group(window, &url, store)?;
+            return Some(Handed::Grouped(opened_id(opened)));
+        }
+        let head = group.and_then(|name| {
+            self.windows[wi]
+                .groups
+                .iter()
+                .find(|g| g.head.title == name.trim())
+                .map(|g| g.head.id.clone())
+        });
+        match head.and_then(|h| self.open_from(&h, &url)) {
+            Some(opened) => Some(Handed::Joined(opened_id(opened))),
+            None => Some(self.enqueue(wi, store, link, None)),
+        }
+    }
+
+    /// Opens Incoming item `id` into the group `head` belongs to ([`Self::open_from`]), and on
+    /// success takes it off the queue. `None`, the item kept, when there is no such item, it is
+    /// not a web link, or `open_from` opens nothing.
+    pub fn add_incoming(&mut self, id: &str, head: &TabId) -> Option<Opened> {
+        let (wi, ii) = self.incoming_at(id)?;
+        let url = parse_group_url(&self.windows[wi].incoming[ii].link).ok()?;
+        let opened = self.open_from(head, &url)?;
+        self.windows[wi].incoming.remove(ii);
+        Some(opened)
+    }
+
+    /// Opens Incoming item `id` as a new group in `store` in its own window ([`Self::new_group`])
+    /// and takes it off the queue. `None`, the item kept, when there is no such item or it is not
+    /// a web link.
+    pub fn incoming_as_group(&mut self, id: &str, store: &str) -> Option<Opened> {
+        let (wi, ii) = self.incoming_at(id)?;
+        let url = parse_group_url(&self.windows[wi].incoming[ii].link).ok()?;
+        let window = self.windows[wi].title.clone();
+        let opened = self.new_group(&window, &url, store)?;
+        self.windows[wi].incoming.remove(ii);
+        Some(opened)
+    }
+
+    pub fn dismiss_incoming(&mut self, id: &str) {
+        if let Some((wi, ii)) = self.incoming_at(id) {
+            self.windows[wi].incoming.remove(ii);
+        }
+    }
+
+    /// The group holding window `window`'s active tab.
+    pub fn active_group(&self, window: &str) -> Option<&Group> {
+        let w = &self.windows[self.window_index(window)?];
+        let a = w.active.as_ref()?;
+        w.groups
+            .iter()
+            .find(|g| &g.head.id == a || g.members.iter().any(|m| &m.id == a))
+    }
+}
+
+fn opened_id(o: Opened) -> TabId {
+    match o {
+        Opened::Added(id) | Opened::Raised(id) => id,
+    }
+}
+
 /// Why Set Home to Current Page can't make the page tab is on its home.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SetHomeBlock {
@@ -934,7 +1112,7 @@ mod tests {
             ("B".to_string(), budget.clone()), // not in B: ignored
             ("Gone".to_string(), budget.clone()),
         ]);
-        w.restore(active, recent);
+        w.restore(active, recent, BTreeMap::new());
         assert_eq!(w.windows[0].active, Some(budget));
         assert_eq!(w.windows[1].active, None);
         assert_eq!(w.recent[0].head.key, identity("default", &folder(9)));
@@ -1368,7 +1546,7 @@ mod tests {
         let dup = recent[0].members[0].clone();
         recent[0].members.push(dup);
         let mut fresh = ws();
-        fresh.restore(BTreeMap::new(), recent);
+        fresh.restore(BTreeMap::new(), recent, BTreeMap::new());
         let g = &fresh.recent[0];
         assert_eq!(g.head.key, identity("default", &folder(1)));
         assert_eq!(g.head.id, h1);
@@ -1384,7 +1562,7 @@ mod tests {
         recent[0].head.home_url = "also not".into();
         let key = recent[0].head.key.clone();
         let mut fresh = ws();
-        fresh.restore(BTreeMap::new(), recent);
+        fresh.restore(BTreeMap::new(), recent, BTreeMap::new());
         assert_eq!(fresh.recent[0].head.key, key);
     }
 
@@ -1487,7 +1665,11 @@ mod tests {
         w.tab_mut(&b).unwrap().detached = true;
         let mut fresh = w.clone();
         fresh.windows[0].active = None;
-        fresh.restore(BTreeMap::from([(W.to_string(), b)]), vec![]);
+        fresh.restore(
+            BTreeMap::from([(W.to_string(), b)]),
+            vec![],
+            BTreeMap::new(),
+        );
         assert_eq!(fresh.windows[0].active, None);
     }
 
@@ -1586,5 +1768,237 @@ mod tests {
         // The same document at another address is still this tab: allowed.
         let view = Url::parse(&doc(1).as_str().replace("/edit", "/view")).unwrap();
         assert_eq!(w.set_home_blocked(&budget, Some(&view)), None);
+    }
+
+    // Incoming: links handed to a window.
+
+    /// Windows `W` and `V`; `W` has a folder head h1 titled "Fleet".
+    fn fleet() -> (Workspace, TabId) {
+        let mut w = Workspace::from_config(&[window(W), window("V")]);
+        let h1 = head_of(&mut w, 1);
+        w.set_title(&h1, "Fleet");
+        (w, h1)
+    }
+
+    fn queue<'a>(w: &'a Workspace, title: &str) -> Vec<&'a str> {
+        let wi = w.window_index(title).unwrap();
+        w.windows[wi]
+            .incoming
+            .iter()
+            .map(|i| i.link.as_str())
+            .collect()
+    }
+
+    fn queued(h: Option<Handed>) -> String {
+        match h {
+            Some(Handed::Queued(id)) => id,
+            other => panic!("not queued: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn receive_queues_a_document() {
+        let (mut w, h1) = fleet();
+        let id = queued(w.receive(W, None, doc(1).as_str(), "default"));
+        assert!(id.starts_with("in-") && id.len() == 19, "{id}");
+        assert_eq!(queue(&w, W), [doc(1).as_str()]);
+        assert!(member_ids(&w, &h1).is_empty());
+        assert_eq!(w.receive("nowhere", None, doc(2).as_str(), "default"), None);
+    }
+
+    #[test]
+    fn receive_queues_each_document_once() {
+        let (mut w, _) = fleet();
+        let a = queued(w.receive(W, None, doc(1).as_str(), "default"));
+        let b = queued(w.receive(W, None, doc(2).as_str(), "default"));
+        assert_ne!(a, b);
+        let again = format!("{}?usp=x", doc(1));
+        assert_eq!(
+            w.receive(W, None, &again, "default"),
+            Some(Handed::AlreadyQueued(a.clone()))
+        );
+        assert_eq!(
+            w.receive("V", None, &again, "default"),
+            Some(Handed::AlreadyQueued(a))
+        );
+        assert_eq!(queue(&w, W), [doc(1).as_str(), doc(2).as_str()]);
+        assert!(queue(&w, "V").is_empty());
+    }
+
+    #[test]
+    fn receive_opens_a_folder_as_a_group_in_that_window() {
+        let (mut w, _) = fleet();
+        let Some(Handed::Grouped(g)) = w.receive("V", None, folder(2).as_str(), "default") else {
+            panic!()
+        };
+        assert_eq!(w.windows[1].groups[0].head.id, g);
+        assert_eq!(w.windows[1].active, Some(g));
+        assert!(queue(&w, "V").is_empty());
+    }
+
+    #[test]
+    fn receive_raises_a_document_open_in_another_window() {
+        let (mut w, h1) = fleet();
+        let m = id(w.open_from(&h1, &doc(1)).unwrap());
+        w.activate(&h1);
+        assert_eq!(
+            w.receive("V", None, doc(1).as_str(), "default"),
+            Some(Handed::Raised(m.clone()))
+        );
+        assert_eq!(active(&w), Some(m));
+        assert!(queue(&w, "V").is_empty());
+        // An open folder is raised too.
+        assert_eq!(
+            w.receive("V", None, folder(1).as_str(), "default"),
+            Some(Handed::Raised(h1))
+        );
+        assert!(w.windows[1].groups.is_empty());
+    }
+
+    #[test]
+    fn receive_into_a_named_group_joins_it() {
+        let (mut w, h1) = fleet();
+        let Some(Handed::Joined(m)) = w.receive(W, Some("Fleet"), doc(1).as_str(), "default")
+        else {
+            panic!()
+        };
+        assert_eq!(member_ids(&w, &h1), vec![m.clone()]);
+        assert_eq!(active(&w), Some(m));
+        assert!(queue(&w, W).is_empty());
+    }
+
+    #[test]
+    fn receive_into_a_missing_group_queues() {
+        let (mut w, h1) = fleet();
+        queued(w.receive(W, Some("Gone"), doc(1).as_str(), "default"));
+        // A group of that name in another window is not this window's.
+        queued(w.receive("V", Some("Fleet"), doc(2).as_str(), "default"));
+        assert!(member_ids(&w, &h1).is_empty());
+        assert_eq!(queue(&w, W), [doc(1).as_str()]);
+        assert_eq!(queue(&w, "V"), [doc(2).as_str()]);
+    }
+
+    #[test]
+    fn receive_queues_a_rejected_link_with_its_reason() {
+        let (mut w, _) = fleet();
+        let id = queued(w.receive(W, None, "mailto:x", "default"));
+        let item = &w.windows[0].incoming[0];
+        assert_eq!(item.id, id);
+        assert_eq!(item.link, "mailto:x");
+        assert_eq!(item.problem.as_deref(), Some("Not a web link: mailto:x"));
+        assert_eq!(
+            w.receive("V", None, " mailto:x ", "default"),
+            Some(Handed::AlreadyQueued(id))
+        );
+    }
+
+    #[test]
+    fn add_incoming_joins_the_group_and_clears_the_row() {
+        let (mut w, h1) = fleet();
+        let a = queued(w.receive(W, None, doc(1).as_str(), "default"));
+        let b = queued(w.receive(W, None, doc(2).as_str(), "default"));
+        let Some(Opened::Added(m)) = w.add_incoming(&a, &h1) else {
+            panic!()
+        };
+        assert_eq!(member_ids(&w, &h1), vec![m.clone()]);
+        assert_eq!(active(&w), Some(m));
+        assert_eq!(queue(&w, W), [doc(2).as_str()]);
+        assert_eq!(w.windows[0].incoming[0].id, b);
+        assert_eq!(w.add_incoming(&a, &h1), None);
+    }
+
+    #[test]
+    fn add_incoming_to_a_closed_group_keeps_it() {
+        let (mut w, h1) = fleet();
+        let a = queued(w.receive(W, None, doc(1).as_str(), "default"));
+        w.close_group(&h1);
+        assert_eq!(w.add_incoming(&a, &h1), None);
+        assert_eq!(queue(&w, W), [doc(1).as_str()]);
+        // A rejected link joins nothing either.
+        let (mut w, h1) = fleet();
+        let r = queued(w.receive(W, None, "mailto:x", "default"));
+        assert_eq!(w.add_incoming(&r, &h1), None);
+        assert_eq!(queue(&w, W), ["mailto:x"]);
+    }
+
+    #[test]
+    fn incoming_as_group_heads_a_group_in_its_window() {
+        let (mut w, _) = fleet();
+        let a = queued(w.receive("V", None, doc(1).as_str(), "work"));
+        let Some(Opened::Added(h)) = w.incoming_as_group(&a, "work") else {
+            panic!()
+        };
+        let g = &w.windows[1].groups[0];
+        assert_eq!((g.head.id.clone(), g.store.as_str()), (h.clone(), "work"));
+        assert_eq!(w.windows[1].active, Some(h));
+        assert!(queue(&w, "V").is_empty());
+        // A rejected item heads nothing and stays.
+        let r = queued(w.receive("V", None, "mailto:x", "work"));
+        assert_eq!(w.incoming_as_group(&r, "work"), None);
+        assert_eq!(queue(&w, "V"), ["mailto:x"]);
+    }
+
+    #[test]
+    fn dismiss_removes_only_that_item() {
+        let (mut w, _) = fleet();
+        let a = queued(w.receive(W, None, doc(1).as_str(), "default"));
+        queued(w.receive(W, None, doc(2).as_str(), "default"));
+        queued(w.receive("V", None, doc(3).as_str(), "default"));
+        w.dismiss_incoming(&a);
+        w.dismiss_incoming("in-nothing");
+        assert_eq!(queue(&w, W), [doc(2).as_str()]);
+        assert_eq!(queue(&w, "V"), [doc(3).as_str()]);
+        // Dismissed, it can be queued again.
+        queued(w.receive(W, None, doc(1).as_str(), "default"));
+    }
+
+    #[test]
+    fn active_group_is_the_group_of_the_windows_active_tab() {
+        let (mut w, h1) = fleet();
+        assert_eq!(w.active_group("V"), None);
+        let m = id(w.open_from(&h1, &doc(1)).unwrap());
+        w.activate(&m);
+        assert_eq!(w.active_group(W).map(|g| g.head.id.clone()), Some(h1));
+        assert_eq!(w.active_group("nowhere"), None);
+    }
+
+    #[test]
+    fn rebase_keeps_the_queue() {
+        let mut w = Workspace::from_config(&two_windows());
+        queued(w.receive("A", None, doc(7).as_str(), "default"));
+        queued(w.receive("B", None, doc(8).as_str(), "default"));
+        let mut cfg = two_windows();
+        cfg.reverse();
+        w.rebase(Workspace::from_config(&cfg));
+        assert_eq!(queue(&w, "A"), [doc(7).as_str()]);
+        assert_eq!(queue(&w, "B"), [doc(8).as_str()]);
+    }
+
+    #[test]
+    fn a_removed_windows_queue_moves_to_the_first() {
+        let mut w = Workspace::from_config(&two_windows());
+        queued(w.receive("A", None, doc(7).as_str(), "default"));
+        queued(w.receive("B", None, doc(8).as_str(), "default"));
+        let cfg = vec![window("C"), two_windows().remove(0)];
+        w.rebase(Workspace::from_config(&cfg));
+        assert_eq!(queue(&w, "C"), [doc(8).as_str()]);
+        assert_eq!(queue(&w, "A"), [doc(7).as_str()]);
+        // On restore too: a saved queue for a window that is gone goes to the first.
+        let mut fresh = Workspace::from_config(&two_windows());
+        let saved = |link: &Url| Incoming {
+            id: format!("in-{}", &tab_id(&identity("default", link))[2..]),
+            link: link.to_string(),
+            problem: None,
+        };
+        fresh.restore(
+            BTreeMap::new(),
+            vec![],
+            BTreeMap::from([
+                ("B".to_string(), vec![saved(&doc(8))]),
+                ("Gone".to_string(), vec![saved(&doc(9))]),
+            ]),
+        );
+        assert_eq!(queue(&fresh, "A"), [doc(9).as_str()]);
+        assert_eq!(queue(&fresh, "B"), [doc(8).as_str()]);
     }
 }
