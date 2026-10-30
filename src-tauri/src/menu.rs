@@ -234,10 +234,9 @@ pub fn row_menu(app: &AppHandle, ms: &MenuState, tab: &TabId) -> tauri::Result<M
     MenuBuilder::new(app).items(&refs(&items)).build()
 }
 
-/// The menu bar: the shell-core spine's App, Config and Window menus around flotilla's Edit, Tab
-/// and Group menus, the Group menu acting on the active tab.
+/// The menu bar: shell-core's App, Edit, Tab, Config and Window menus around flotilla's Group menu,
+/// which acts on the active tab.
 fn build_app_menu(app: &AppHandle, ms: &MenuState) -> tauri::Result<Menu<Wry>> {
-    let path = crate::config::config_path();
     let (title, colour, cycle_digits) = {
         let cfg = app.state::<AppState>().config.lock().unwrap().clone();
         (
@@ -256,42 +255,13 @@ fn build_app_menu(app: &AppHandle, ms: &MenuState) -> tauri::Result<Menu<Wry>> {
         app,
         shell_core::menu::SpineConfig {
             app_name: "flotilla",
-            config_path: &path,
             windows: &windows,
         },
         env!("CARGO_PKG_VERSION"),
         env!("BUILD_GIT_SHA"),
         env!("BUILD_DATE"),
     )?;
-
-    // The Edit submenu owns the clipboard accelerators (⌘C/⌘V/⌘X/⌘A/⌘Z) for content webviews.
-    let edit_menu = SubmenuBuilder::new(app, "Edit")
-        .undo()
-        .redo()
-        .separator()
-        .cut()
-        .copy()
-        .paste()
-        .select_all()
-        .build()?;
-
-    let nav = shell_core::menu::build_tab_nav(app, cycle_digits)?;
-    let nav_refs: Vec<&dyn IsMenuItem<Wry>> =
-        nav.nav.iter().map(|i| i as &dyn IsMenuItem<Wry>).collect();
-    let jump_refs: Vec<&dyn IsMenuItem<Wry>> = nav
-        .jumps
-        .iter()
-        .map(|i| i as &dyn IsMenuItem<Wry>)
-        .collect();
-    let tabs_menu = SubmenuBuilder::new(app, "Tab")
-        .items(&nav_refs)
-        .separator()
-        .item(&spine.close_tab)
-        .item(&spine.pop_out_tab)
-        .item(&spine.find_in_sidebar)
-        .separator()
-        .items(&jump_refs)
-        .build()?;
+    let tabs_menu = shell_core::menu::build_tab_menu(app, &spine, cycle_digits, &[])?;
 
     let group = group_items(app, ms, None, Some(&spine.close_tab))?;
     let group_menu: Submenu<Wry> = SubmenuBuilder::new(app, "Group")
@@ -301,7 +271,7 @@ fn build_app_menu(app: &AppHandle, ms: &MenuState) -> tauri::Result<Menu<Wry>> {
     MenuBuilder::new(app)
         .items(&[
             &spine.submenus[0], // App
-            &edit_menu,
+            &spine.edit,
             &tabs_menu,
             &group_menu,
             &spine.submenus[1], // Config

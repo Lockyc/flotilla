@@ -131,9 +131,59 @@ fn load_state(
     }
 }
 
-/// The popped-out tab whose window has key focus, if one does.
-fn focused_detached(app: &tauri::AppHandle) -> Option<flotilla_core::model::TabId> {
-    detach::tab_of(app.get_focused_window()?.label())
+/// The `nav-tab` payload: step `dir` from `from`, a popped-out tab, or else from the highlight.
+#[derive(Clone, Serialize)]
+struct NavTab {
+    dir: i32,
+    from: Option<flotilla_core::model::TabId>,
+}
+
+/// Runs a spine command where `shell_core::menu::route` sent it. Only the main window has a
+/// sidebar, so every sidebar command goes to its chrome.
+fn on_spine_action(app: &tauri::AppHandle, routed: shell_core::menu::Routed) {
+    use shell_core::menu::{SpineAction, TabNavAction};
+    if routed.from_detached.is_some() {
+        tabs::bring_main_forward(app);
+    }
+    let from = routed.from_detached.as_deref().and_then(detach::tab_of);
+    match routed.action {
+        SpineAction::Nav(TabNavAction::Next) => {
+            emit_to_main_chrome(app, "nav-tab", NavTab { dir: 1, from })
+        }
+        SpineAction::Nav(TabNavAction::Prev) => {
+            emit_to_main_chrome(app, "nav-tab", NavTab { dir: -1, from })
+        }
+        SpineAction::Nav(TabNavAction::Jump(n)) => emit_to_main_chrome(app, "jump-tab", n),
+        SpineAction::CloseTab => commands::close_active_tab(app),
+        SpineAction::DockPoppedOut => {
+            if let Some(id) = detach::tab_of(&routed.target) {
+                detach::pop_in(app, &id);
+            }
+        }
+        SpineAction::PopOutTab => {
+            let active = app
+                .state::<state::AppState>()
+                .ws
+                .lock()
+                .unwrap()
+                .active
+                .clone();
+            if let Some(id) = active {
+                if let Err(e) = commands::pop_out(app, &id) {
+                    tabs::notice(app, e);
+                }
+            }
+        }
+        SpineAction::FindInSidebar => emit_to_main_chrome(app, "find-in-sidebar", ()),
+        SpineAction::CheckUpdates => emit_to_main_chrome(app, "check-update", ()),
+        // Closing a pop-out docks its tab; the workspace window itself stays (flotilla has no
+        // other surface to fall back to).
+        SpineAction::CloseWindow => {
+            if let Some(id) = detach::tab_of(&routed.target) {
+                detach::pop_in(app, &id);
+            }
+        }
+    }
 }
 
 fn emit_to_main_chrome<S: Serialize + Clone>(app: &tauri::AppHandle, event: &str, payload: S) {
@@ -214,50 +264,32 @@ pub fn run() {
                 if shell_core::menu::handle_spine_event(id, &cfg_path) || menu::handle(app, id) {
                     return;
                 }
-                if let Some(action) = shell_core::menu::tab_nav_action(id) {
-                    use shell_core::menu::TabNavAction;
-                    match action {
-                        TabNavAction::Next => emit_to_main_chrome(app, "nav-tab", 1i32),
-                        TabNavAction::Prev => emit_to_main_chrome(app, "nav-tab", -1i32),
-                        TabNavAction::Jump(n) => emit_to_main_chrome(app, "jump-tab", n),
+                // muda flips a check item's tick on click: a failed write rebuilds to undo it; a
+                // saved one reloads the config, which rebuilds anyway.
+                if id == shell_core::menu::ids::TAB_DIGIT_CYCLE {
+                    let state = app.state::<state::AppState>();
+                    let next = state.config.lock().unwrap().tab_digit_keys.toggled();
+                    if let Err(e) = config::write_tab_digit_keys(&cfg_path, next) {
+                        tabs::notice(app, e);
+                        *state.menu.lock().unwrap() = None;
+                        menu::refresh(app);
                     }
                     return;
                 }
-                // Window ▸ <the main window>: the only window the spine lists. muda flips a check
-                // item's tick on click; the rebuild puts it back.
+                // Window ▸ <the main window>: the only window the spine lists.
                 if shell_core::menu::selected_window(id) == Some(MAIN_WINDOW) {
                     tabs::bring_main_forward(app);
                     *app.state::<state::AppState>().menu.lock().unwrap() = None;
                     menu::refresh(app);
                     return;
                 }
-                match id {
-                    shell_core::menu::ids::CHECK_UPDATES => {
-                        emit_to_main_chrome(app, "check-update", ())
-                    }
-                    // In a popped-out window, ⌘W closes it (docking its tab) and ⌘⇧O does nothing.
-                    shell_core::menu::ids::CLOSE_TAB => match focused_detached(app) {
-                        Some(id) => detach::pop_in(app, &id),
-                        None => commands::close_active_tab(app),
-                    },
-                    shell_core::menu::ids::POP_OUT_TAB => {
-                        let active = app
-                            .state::<state::AppState>()
-                            .ws
-                            .lock()
-                            .unwrap()
-                            .active
-                            .clone();
-                        if let (None, Some(id)) = (focused_detached(app), active) {
-                            if let Err(e) = commands::pop_out(app, &id) {
-                                tabs::notice(app, e);
-                            }
-                        }
-                    }
-                    shell_core::menu::ids::FIND_IN_SIDEBAR => {
-                        emit_to_main_chrome(app, "find-in-sidebar", ())
-                    }
-                    _ => {}
+                let focused = app
+                    .get_focused_window()
+                    .map_or_else(|| MAIN_WINDOW.to_string(), |w| w.label().to_string());
+                // Every popped-out tab came from the one main window.
+                let origin_of = |l: &str| detach::tab_of(l).map(|_| MAIN_WINDOW.to_string());
+                if let Some(routed) = shell_core::menu::route(id, &focused, origin_of) {
+                    on_spine_action(app, routed);
                 }
             });
             Ok(())

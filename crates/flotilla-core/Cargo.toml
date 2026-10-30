@@ -8,7 +8,7 @@ publish = false
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 url = "2"
-shell-core = { git = "https://github.com/Lockyc/shell-core", rev = "7241f53e612ba9ac86e702810377212f3bd6b57b", default-features = false }
+shell-core = { git = "https://github.com/Lockyc/shell-core", rev = "147435dcbb9c6144442cd9d23f74561087792f46", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"

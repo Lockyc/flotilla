@@ -172,8 +172,10 @@ listen("config-reloaded", async () => {
   sb.update(windowDto(await invoke("get_workspace")));
 });
 listen("notice",(e) => sb && sb.setError(e.payload));
-// Cycling walks loaded tabs only (the live dot); a cold row loads when clicked.
-listen("nav-tab", (e) => sb && sb.selectByOffset(e.payload, { liveOnly: true }));
+// Cycling walks loaded tabs only (the live dot); a cold row loads when clicked. From a popped-out
+// window, `from` is that tab, which never holds the highlight.
+listen("nav-tab", (e) =>
+  sb && sb.selectByOffset(e.payload.dir, { liveOnly: true, from: e.payload.from ?? undefined }));
 listen("jump-tab", (e) => sb && sb.selectByIndex(e.payload));
 listen("find-in-sidebar", () => sb && sb.focusSearch());
 // Group ▸ New Group… (⌘N).

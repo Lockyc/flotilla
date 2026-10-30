@@ -100,6 +100,14 @@ pub fn create_starter(path: &Path) -> Result<bool, String> {
     config_core::write_default_config(path, DEFAULT_CONFIG).map_err(|e| e.to_string())
 }
 
+/// Saves `tab_digit_keys` (the Cycle Tabs toggle), seeding the starter config first when there is
+/// no file. The watcher's reload then applies it.
+pub fn write_tab_digit_keys(path: &Path, mode: TabDigitKeys) -> Result<(), String> {
+    create_starter(path)?;
+    config_core::set_key(path, "tab_digit_keys", mode.as_str().into())
+        .map_err(|e| format!("config: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,6 +169,19 @@ mod tests {
             load(&dir.path().join("none.toml")).unwrap(),
             Config::default()
         );
+    }
+
+    #[test]
+    fn writing_the_digit_mode_seeds_a_missing_config_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flotilla").join("config.toml");
+        write_tab_digit_keys(&path, TabDigitKeys::Cycle).unwrap();
+        let src = std::fs::read_to_string(&path).unwrap();
+        // The starter's documentation survives; only the value changed.
+        assert!(src.starts_with("# flotilla config"), "{src}");
+        assert!(parse(&src).unwrap().tab_digit_keys.is_cycle());
+        write_tab_digit_keys(&path, TabDigitKeys::Jump).unwrap();
+        assert!(!load(&path).unwrap().tab_digit_keys.is_cycle());
     }
 
     #[test]
