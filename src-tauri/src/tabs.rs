@@ -170,9 +170,12 @@ pub fn push_dto(app: &AppHandle) {
     crate::menu::refresh(app);
 }
 
-/// Shows `msg` in the sidebar's error bar.
+/// Shows `msg` in the sidebar's error bar, or holds it until the chrome mounts.
 pub fn notice(app: &AppHandle, msg: String) {
-    let _ = app.emit_to(MAIN_WINDOW, "notice", msg);
+    let now = app.state::<AppState>().notice.lock().unwrap().raise(msg);
+    if let Some(msg) = now {
+        let _ = app.emit_to(MAIN_WINDOW, "notice", msg);
+    }
 }
 
 /// Tab `id`'s webview, only if it lives in `window` (a popped-out tab's would not).

@@ -48,10 +48,11 @@ pub fn get_workspace(
     ))
 }
 
-/// What the error bar shows at launch (a quarantined or unpersistable session).
+/// The chrome has mounted: what the error bar shows for the notices raised before it could listen
+/// ([`crate::state::Notices`]).
 #[tauri::command]
 pub fn startup_notice(state: State<AppState>) -> Option<String> {
-    state.notice.clone()
+    state.notice.lock().unwrap().mount()
 }
 
 /// Selecting a popped-out tab's row raises its window instead ([`mutate`]).

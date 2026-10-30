@@ -96,10 +96,13 @@ fn load_state(
             },
         ),
     };
-    let notice = match (persist::load_notice(&loaded), config_error) {
-        (Some(a), Some(b)) => Some(format!("{a} {b}")),
-        (a, b) => a.or(b),
-    };
+    let mut notice = state::Notices::default();
+    for msg in [persist::load_notice(&loaded), config_error]
+        .into_iter()
+        .flatten()
+    {
+        notice.raise(msg);
+    }
     let persist = persist::Persist::for_load(path, &loaded);
     let ws = match loaded {
         Loaded::Restored(ws) => ws,
@@ -116,7 +119,7 @@ fn load_state(
         menu: Default::default(),
         config: std::sync::Mutex::new(config),
         persist,
-        notice,
+        notice: std::sync::Mutex::new(notice),
     }
 }
 
