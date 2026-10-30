@@ -8,6 +8,7 @@
 
 use crate::identity::{doc_key, head_key, DocKey};
 use serde::{Deserialize, Serialize};
+use shell_core::tabs::pick_live_neighbour;
 use url::Url;
 
 /// Closed groups kept in `Workspace::recent`; the oldest is dropped past this.
@@ -149,11 +150,10 @@ impl Workspace {
         Some(Opened::Added(id))
     }
 
-    /// Closes a tab. Closing a head closes its group. Closing the active member activates the next
-    /// member, else the previous, else the head.
-    ///
-    /// Not `shell_core::tabs::pick_live_neighbour`: that leans previous-first, and a group's
-    /// order is head, members.
+    /// Closes a tab. Closing a head closes its group (`close_group` then picks the neighbouring
+    /// group's head, the only-tab case). Closing the active member activates the neighbour
+    /// `shell_core::tabs::pick_live_neighbour` picks over the group's order `[head, members...]`
+    /// with every tab eligible (the model tracks no load state): the previous tab, else the next.
     pub fn close_tab(&mut self, id: &TabId) {
         let Some(gi) = self.group_index(id) else {
             return;
@@ -163,16 +163,15 @@ impl Workspace {
         }
         let g = &mut self.groups[gi];
         let at = g.members.iter().position(|m| &m.id == id).unwrap();
+        let eligible = vec![true; g.members.len() + 1];
+        let pick = pick_live_neighbour(at + 1, &eligible);
+        let neighbour = pick.map(|i| match i {
+            0 => g.head.id.clone(),
+            i => g.members[i - 1].id.clone(),
+        });
         g.members.remove(at);
         if self.active.as_ref() == Some(id) {
-            let next = g
-                .members
-                .get(at)
-                .or_else(|| at.checked_sub(1).and_then(|p| g.members.get(p)))
-                .unwrap_or(&g.head)
-                .id
-                .clone();
-            self.active = Some(next);
+            self.active = neighbour;
         }
     }
 
@@ -557,11 +556,12 @@ mod tests {
         let c = id(w.open_from(&h, &doc(3)).unwrap());
         w.activate(&b);
         w.close_tab(&b);
-        assert_eq!(w.active, Some(c.clone())); // next
+        assert_eq!(w.active, Some(a.clone())); // leans up
+        w.activate(&c);
         w.close_tab(&c);
-        assert_eq!(w.active, Some(a.clone())); // else previous
+        assert_eq!(w.active, Some(a.clone()));
         w.close_tab(&a);
-        assert_eq!(w.active, Some(h)); // else head
+        assert_eq!(w.active, Some(h)); // the head is above the first member
     }
 
     #[test]
