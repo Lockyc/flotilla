@@ -3,6 +3,7 @@
 mod persist;
 mod sidebar;
 mod state;
+mod tabs;
 
 use serde::Serialize;
 use tauri::{Emitter, Manager, TitleBarStyle, WebviewUrl};
