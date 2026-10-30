@@ -2,6 +2,7 @@
 //! hole shows the active tab's webview. The session is loaded at setup and saved as it changes.
 
 mod commands;
+mod detach;
 mod menu;
 mod persist;
 mod sidebar;
@@ -86,6 +87,11 @@ pub(crate) fn config_path() -> std::path::PathBuf {
         .join("config.toml")
 }
 
+/// The popped-out tab whose window has key focus, if one does.
+fn focused_detached(app: &tauri::AppHandle) -> Option<flotilla_core::model::TabId> {
+    detach::tab_of(app.get_focused_window()?.label())
+}
+
 fn emit_to_main_chrome<S: Serialize + Clone>(app: &tauri::AppHandle, event: &str, payload: S) {
     let _ = app.emit_to(MAIN_WINDOW, event, payload);
 }
@@ -102,6 +108,8 @@ pub fn run() {
             commands::new_group,
             commands::home_tab,
             commands::unload_tab,
+            commands::pop_out_tab,
+            commands::pop_in_tab,
             commands::row_menu,
             commands::set_hole_rect,
         ])
@@ -121,15 +129,21 @@ pub fn run() {
             .hidden_title(true)
             .title_bar_style(TitleBarStyle::Overlay)
             .build()?;
-            // Closing the window drops its content webviews, which would leave their pages running.
+            // Closing the workspace window quits, popped-out windows and all; they reopen at
+            // launch. Closing it drops its content webviews, which would leave their pages running.
             let closing = window.as_ref().window();
-            window.on_window_event(move |event| {
-                if let tauri::WindowEvent::CloseRequested { .. } = event {
+            window.on_window_event(move |event| match event {
+                tauri::WindowEvent::CloseRequested { .. } => {
+                    detach::mark_quitting();
                     shell_core::web::content::close_window_pages(&closing);
                 }
+                tauri::WindowEvent::Destroyed => closing.app_handle().exit(0),
+                _ => {}
             });
-            // Restore lazily: only the active tab's webview is created now. Builds the menu bar.
+            // Restore lazily: only the active tab's webview is created now (this also builds the
+            // menu bar); every popped-out tab reopens in its own window.
             tabs::sync(app.handle());
+            detach::reconcile(app.handle());
 
             let cfg_path = config_path();
             // Row context menus' events arrive here too.
@@ -151,7 +165,25 @@ pub fn run() {
                     shell_core::menu::ids::CHECK_UPDATES => {
                         emit_to_main_chrome(app, "check-update", ())
                     }
-                    shell_core::menu::ids::CLOSE_TAB => commands::close_active_tab(app),
+                    // In a popped-out window, ⌘W closes it (docking its tab) and ⌘⇧O does nothing.
+                    shell_core::menu::ids::CLOSE_TAB => match focused_detached(app) {
+                        Some(id) => detach::pop_in(app, &id),
+                        None => commands::close_active_tab(app),
+                    },
+                    shell_core::menu::ids::POP_OUT_TAB => {
+                        let active = app
+                            .state::<state::AppState>()
+                            .ws
+                            .lock()
+                            .unwrap()
+                            .active
+                            .clone();
+                        if let (None, Some(id)) = (focused_detached(app), active) {
+                            if let Err(e) = commands::pop_out(app, &id) {
+                                tabs::notice(app, e);
+                            }
+                        }
+                    }
                     shell_core::menu::ids::FIND_IN_SIDEBAR => {
                         emit_to_main_chrome(app, "find-in-sidebar", ())
                     }
@@ -164,8 +196,9 @@ pub fn run() {
         .expect("error while building flotilla")
         .run(|app, event| {
             if let tauri::RunEvent::ExitRequested { .. } = event {
-                if let Some(window) = app.get_window(MAIN_WINDOW) {
-                    shell_core::web::content::close_window_pages(&window);
+                detach::mark_quitting();
+                for window in app.windows().values() {
+                    shell_core::web::content::close_window_pages(window);
                 }
                 persist::save_now(app);
             }

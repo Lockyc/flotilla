@@ -105,10 +105,12 @@ pub fn adopt_title(current: &str, reported: &str) -> bool {
     !reported.trim().is_empty() && current != reported
 }
 
-/// After any workspace change: bring the webviews and the sidebar in line, and schedule a save.
-/// Main thread only.
+/// After any workspace change: bring the webviews, the popped-out windows and the sidebar in line,
+/// and schedule a save. Main thread only. The main window goes first, so a tab just popped out has
+/// released its webview's label before its window recreates it.
 pub fn changed(app: &AppHandle) {
     sync(app);
+    crate::detach::reconcile(app);
     crate::persist::mark_dirty(app);
 }
 
@@ -180,7 +182,8 @@ pub(crate) fn own_webview(window: &Window, id: &str) -> Option<tauri::Webview> {
         .filter(|wv| wv.window().label() == window.label())
 }
 
-fn create(window: &Window, t: &Target, hole: HoleRect) -> Result<(), String> {
+/// Creates tab `t`'s content webview in `window` (the main window, or its popped-out one).
+pub(crate) fn create(window: &Window, t: &Target, hole: HoleRect) -> Result<(), String> {
     let url = Url::parse(&t.home_url).map_err(|e| e.to_string())?;
     let label = label(&t.id);
     let spec = ContentSpec {
@@ -227,16 +230,24 @@ fn intercept(app: &AppHandle, label: &str, url: &Url, o: LinkOrigin) -> bool {
     let Some(id) = tab_id(label) else {
         return false;
     };
-    let decision = {
+    let (decision, raised) = {
         let state = app.state::<AppState>();
         let mut ws = state.ws.lock().unwrap();
-        nav::decide(&mut ws, &id, url, origin(o))
+        let before = ws.active.clone();
+        let decision = nav::decide(&mut ws, &id, url, origin(o));
+        let raised = crate::detach::divert(&mut ws, before);
+        (decision, raised)
     };
     match decision {
         Decision::PassThrough => false,
         Decision::Open(_) => {
             let deferred = app.clone();
-            let _ = app.run_on_main_thread(move || changed(&deferred));
+            let _ = app.run_on_main_thread(move || {
+                if let Some(r) = &raised {
+                    crate::detach::raise(&deferred, r);
+                }
+                changed(&deferred)
+            });
             true
         }
     }

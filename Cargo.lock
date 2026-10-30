@@ -838,7 +838,7 @@ dependencies = [
  "flotilla-core",
  "serde",
  "serde_json",
- "shell-core",
+ "shell-core 0.3.0 (git+https://github.com/Lockyc/shell-core?rev=62bef479f7ccb6d63d248034ef2fe3c722a61580)",
  "tauri",
  "tauri-build",
  "tauri-plugin-process",
@@ -853,7 +853,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
- "shell-core",
+ "shell-core 0.3.0 (git+https://github.com/Lockyc/shell-core?rev=2fc995564fa51dee623661b2ad656b4c77e7c340)",
  "tempfile",
  "url",
 ]
@@ -3227,6 +3227,11 @@ dependencies = [
 name = "shell-core"
 version = "0.3.0"
 source = "git+https://github.com/Lockyc/shell-core?rev=2fc995564fa51dee623661b2ad656b4c77e7c340#2fc995564fa51dee623661b2ad656b4c77e7c340"
+
+[[package]]
+name = "shell-core"
+version = "0.3.0"
+source = "git+https://github.com/Lockyc/shell-core?rev=62bef479f7ccb6d63d248034ef2fe3c722a61580#62bef479f7ccb6d63d248034ef2fe3c722a61580"
 dependencies = [
  "block2",
  "getrandom 0.2.17",

@@ -54,19 +54,43 @@ pub fn startup_notice(state: State<AppState>) -> Option<String> {
     state.notice.clone()
 }
 
+/// Selecting a popped-out tab's row raises its window instead ([`crate::detach::divert`]).
 #[tauri::command]
 pub fn select_tab(id: TabId, webview: Webview, state: State<AppState>) -> Result<(), String> {
     require_chrome(&webview)?;
-    {
-        let mut ws = state.ws.lock().unwrap();
-        if ws.find(&id).is_none() {
-            return Err("unknown tab".into());
-        }
-        ws.activate(&id);
+    if state.ws.lock().unwrap().find(&id).is_none() {
+        return Err("unknown tab".into());
     }
     // An explicit selection is a fresh attempt at a tab whose webview failed to build.
     state.failed.lock().unwrap().remove(&id);
-    tabs::changed(webview.app_handle());
+    crate::detach::raising(webview.app_handle(), |ws| ws.activate(&id));
+    Ok(())
+}
+
+/// The row's pop-out control: tab `id` moves into its own window.
+#[tauri::command]
+pub fn pop_out_tab(id: TabId, webview: Webview) -> Result<(), String> {
+    require_chrome(&webview)?;
+    pop_out(webview.app_handle(), &id)
+}
+
+/// Pops tab `id` out (the row control, ⌘⇧O).
+pub fn pop_out(app: &AppHandle, id: &TabId) -> Result<(), String> {
+    {
+        let state = app.state::<AppState>();
+        let mut ws = state.ws.lock().unwrap();
+        let created = state.created.lock().unwrap();
+        crate::detach::pop_out(&mut ws, &created, id)?;
+    }
+    tabs::changed(app);
+    Ok(())
+}
+
+/// A popped-out row's pop-in control: closes the tab's window, which returns it to its group.
+#[tauri::command]
+pub fn pop_in_tab(id: TabId, webview: Webview) -> Result<(), String> {
+    require_chrome(&webview)?;
+    crate::detach::pop_in(webview.app_handle(), &id);
     Ok(())
 }
 
@@ -120,11 +144,12 @@ pub fn toggle_group(
 /// Opens `url` as a new group (or raises the tab already showing it). The error is for the
 /// sidebar's error bar.
 #[tauri::command]
-pub fn new_group(url: String, webview: Webview, state: State<AppState>) -> Result<(), String> {
+pub fn new_group(url: String, webview: Webview) -> Result<(), String> {
     require_chrome(&webview)?;
     let url = parse_group_url(&url)?;
-    state.ws.lock().unwrap().new_group(&url, DEFAULT_STORE);
-    tabs::changed(webview.app_handle());
+    crate::detach::raising(webview.app_handle(), |ws| {
+        ws.new_group(&url, DEFAULT_STORE);
+    });
     Ok(())
 }
 
@@ -197,15 +222,36 @@ pub struct RectArg {
     pub height: f64,
 }
 
-/// Stores the hole the chrome measured (new webviews are created into it) and moves the existing
-/// content webviews to fill it.
+/// Who reports a content hole: the main window's chrome, or a popped-out window's banner page (its
+/// window's own webview, under a detached label). `None` for anyone else.
+#[derive(Debug, PartialEq, Eq)]
+pub enum HoleCaller {
+    Main,
+    Detached,
+}
+
+pub fn hole_caller(webview: &str, window: &str) -> Option<HoleCaller> {
+    if webview != window {
+        None
+    } else if webview == MAIN_WINDOW {
+        Some(HoleCaller::Main)
+    } else if shell_core::detach::is_detached_label(webview) {
+        Some(HoleCaller::Detached)
+    } else {
+        None
+    }
+}
+
+/// Moves the calling window's content webviews to fill the hole it measured. The main window's
+/// hole is also stored: new webviews are created into it.
 #[tauri::command]
 pub fn set_hole_rect(
     rect: RectArg,
     webview: Webview,
     state: State<AppState>,
 ) -> Result<(), String> {
-    require_chrome(&webview)?;
+    let caller =
+        hole_caller(webview.label(), webview.window().label()).ok_or("forbidden: not a chrome")?;
     if ![rect.x, rect.y, rect.width, rect.height]
         .iter()
         .all(|v| v.is_finite())
@@ -218,7 +264,9 @@ pub fn set_hole_rect(
         width: rect.width,
         height: rect.height,
     };
-    *state.hole.lock().unwrap() = hole;
+    if caller == HoleCaller::Main {
+        *state.hole.lock().unwrap() = hole;
+    }
     layout_webviews(&webview.window(), hole);
     Ok(())
 }
@@ -235,6 +283,17 @@ pub fn close_active_tab(app: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_window_own_page_reports_its_hole() {
+        assert_eq!(hole_caller("main", "main"), Some(HoleCaller::Main));
+        let d = crate::detach::window_label("t-3");
+        assert_eq!(hole_caller(&d, &d), Some(HoleCaller::Detached));
+        // A content webview, in either window.
+        assert_eq!(hole_caller("main:t-3", "main"), None);
+        assert_eq!(hole_caller("main:t-3", &d), None);
+        assert_eq!(hole_caller("other", "other"), None);
+    }
 
     #[test]
     fn group_urls_must_be_web_links() {

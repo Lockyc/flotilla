@@ -57,13 +57,21 @@ async function mountChrome() {
   sb = window.ChromeSidebar.mount(
     document.getElementById("sidebar"),
     {
-      // Clicking the active row again returns it to the page it opened with.
+      // Clicking the active row again returns it to the page it opened with; clicking a popped-out
+      // row raises its window.
       onSelect(id, { wasActive } = {}) {
         invoke(wasActive ? "home_tab" : "select_tab", { id }).catch((err) => sb.setError(String(err)));
       },
       // The live dot: close the tab's webview, keep its row.
       onUnload(id) {
         invoke("unload_tab", { id }).catch((err) => sb.setError(String(err)));
+      },
+      // The icon tile's overlay: into its own window, and back into its group.
+      onPopOut(id) {
+        invoke("pop_out_tab", { id }).catch((err) => sb.setError(String(err)));
+      },
+      onPopIn(id) {
+        invoke("pop_in_tab", { id }).catch((err) => sb.setError(String(err)));
       },
       // Right-click: the Group menu, acting on this row.
       onContextMenu(id, { x, y }) {
