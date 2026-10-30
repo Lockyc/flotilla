@@ -68,6 +68,7 @@ A document is open once across every window: two heads or tabs naming the same d
 | `[[window]]` `colour` | none | `#rgb` / `#rrggbb` accent for the sidebar, the **Window** menu swatch and popped-out windows. |
 | `[[window]]` `width`, `height` | `1500`, `1000` | The window's size on its first open. |
 | `[[window]]` `open_on_start` | `true` | `false` leaves the window closed at launch until opened from the **Window** menu. |
+| `[[window]]` `open_tabs_section` | inherited from global | Whether this window's sidebar pins the **Open** section. |
 | `[[window.group]]` `name` | required | The group's name in the sidebar. Unique within its window. A new group is written named by its URL, then by its page's title once that loads; after that the name stays as written. |
 | `[[window.group]]` `url` | required | The group's head and Home: a Drive folder or a document. |
 | `[[window.group]]` `store` | `"default"` | The login store the group's documents open in; another store is another account. |
@@ -81,6 +82,7 @@ A document is open once across every window: two heads or tabs naming the same d
 | `tab_digit_keys` | `"jump"` | What ⌘1/⌘2 do: `jump` — ⌘1–⌘9 go to that tab; `cycle` — ⌘1 next tab, ⌘2 previous, ⌘3–⌘9 go to that tab. **Tab ▸ Cycle Tabs with ⌘1/⌘2** flips it. Hot-reloads. |
 | `auto_update` | `true` | Check for a new release on launch and every 6 hours. `false` stops the automatic checks; **Check for Updates…** still works. Read as each window opens. |
 | `allow_insecure` | `[]` | Hosts whose self-signed or invalid TLS certificate is accepted. Read at launch (restart to change). |
+| `open_tabs_section` | `false` | Pin an **Open** section above the groups, listing every document that is loaded or popped out. Each keeps its row in its group too, so the list never shuffles; ⌘1–⌘9 and tab cycling ignore the section. It grows to 2/5 of the window, then scrolls on its own; its header collapses it. A window's own `open_tabs_section` overrides it. Hot-reloads. |
 | `format_on_save` | `false` | Reformat the config in house style on each clean reload. A file that fails to parse is left untouched. |
 
 ## For link routers

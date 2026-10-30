@@ -19,6 +19,10 @@ allow_insecure = []
 # Reformat this file in house style on each clean reload.
 format_on_save = false
 
+# Pin an "Open" section atop each sidebar listing the documents loaded or popped out.
+# A window's own open_tabs_section overrides this.
+open_tabs_section = false
+
 # Windows, each holding groups of documents. flotilla writes these as you work; a hand edit
 # sticks. A document is open once across every window.
 [[window]]
@@ -32,6 +36,7 @@ title = "flotilla"
 # width = 1500                # optional size of its first open
 # height = 1000
 # open_on_start = true        # optional; false leaves it closed until opened from the Window menu
+# open_tabs_section = true    # optional; overrides the global open_tabs_section for this window
 #
 # [[window.group]]
 # name = "Club drive"         # the group's name in the sidebar

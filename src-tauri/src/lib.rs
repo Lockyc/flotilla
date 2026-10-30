@@ -22,8 +22,8 @@ use tauri::{Emitter, Manager};
 /// Sidebar width the chrome starts at when none is saved.
 const DEFAULT_SIDEBAR_W: u32 = 240;
 
-/// What the chrome asks for at mount: its window's title and accent, density, drag and update
-/// gates.
+/// What the chrome asks for at mount: its window's title and accent, density, drag, Open section
+/// and update gates.
 #[derive(Serialize)]
 struct WindowIdentity {
     title: String,
@@ -31,6 +31,7 @@ struct WindowIdentity {
     default_width: u32,
     density: &'static str,
     sidebar_drag: bool,
+    open_section: bool,
     auto_update: bool,
 }
 
@@ -44,6 +45,7 @@ fn window_identity(
     let cfg = state.config.lock().unwrap();
     WindowIdentity {
         colour: cfg.colour_of(&title),
+        open_section: cfg.open_section_of(&title),
         title,
         default_width: DEFAULT_SIDEBAR_W,
         density: cfg.density.as_str(),

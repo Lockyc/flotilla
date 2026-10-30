@@ -1,7 +1,7 @@
 //! flotilla's config: one TOML file of app-wide settings and the windows, groups and documents
 //! (`[[window]]` / `[[window.group]]` / `[[window.group.tab]]`), hot-reloaded.
 
-use config_core::{Colour, Density, NoExtras, TabDigitKeys};
+use config_core::{Colour, Density, TabDigitKeys};
 use flotilla_core::identity::{identity, DocKey};
 use flotilla_core::model::{ConfigGroup, ConfigTab, ConfigWindow};
 use serde::Deserialize;
@@ -35,6 +35,8 @@ pub struct Config {
     pub allow_insecure: Vec<String>,
     /// Reformat the file in house style after each clean reload.
     pub format_on_save: bool,
+    /// Pin the Open section in every window whose own `open_tabs_section` is unset. Hot-reloads.
+    pub open_tabs_section: bool,
     /// The windows, in file order; `parse` normalises each `colour` to `#rrggbb`. A file with no
     /// `[[window]]` has none; the default (a missing file, or the starter) has [`STARTER_WINDOW`].
     #[serde(rename = "window", default)]
@@ -45,7 +47,15 @@ pub struct Config {
 pub const STARTER_WINDOW: &str = "flotilla";
 
 /// One `[[window]]`: config-core's shared keys, groups headed by a URL, documents as tabs.
-pub type FlotillaWindow = config_core::Window<DocTab, NoExtras, FlotillaGroup>;
+pub type FlotillaWindow = config_core::Window<DocTab, WindowExtras, FlotillaGroup>;
+
+/// A `[[window]]`'s own keys, beside config-core's.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WindowExtras {
+    /// Overrides the global `open_tabs_section` for this window.
+    pub open_tabs_section: Option<bool>,
+}
 
 /// The login store a group without `store` opens in.
 pub const DEFAULT_STORE: &str = "default";
@@ -95,7 +105,7 @@ impl Default for Config {
                 colour: None,
                 open_on_start: true,
                 groups: vec![],
-                extra: NoExtras,
+                extra: WindowExtras::default(),
             }],
             density: Density::Comfortable,
             dark_mode: false,
@@ -103,6 +113,7 @@ impl Default for Config {
             auto_update: true,
             allow_insecure: Vec::new(),
             format_on_save: false,
+            open_tabs_section: false,
         }
     }
 }
@@ -114,6 +125,16 @@ impl Config {
             .iter()
             .find(|w| w.title.trim() == title.trim())
             .and_then(|w| w.colour.clone())
+    }
+
+    /// Whether the window titled `title` pins the Open section: its own `open_tabs_section`, else
+    /// the global one.
+    pub fn open_section_of(&self, title: &str) -> bool {
+        self.windows
+            .iter()
+            .find(|w| w.title.trim() == title.trim())
+            .and_then(|w| w.extra.open_tabs_section)
+            .unwrap_or(self.open_tabs_section)
     }
 
     /// The windows as the workspace model reads them.
@@ -219,7 +240,7 @@ mod tests {
     use super::*;
 
     /// Every top-level key the app reads; the starter config sets each one.
-    const KEYS: [&str; 7] = [
+    const KEYS: [&str; 8] = [
         "window",
         "density",
         "dark_mode",
@@ -227,15 +248,17 @@ mod tests {
         "auto_update",
         "allow_insecure",
         "format_on_save",
+        "open_tabs_section",
     ];
     /// Every `[[window]]`, `[[window.group]]` and `[[window.group.tab]]` key; the starter
     /// config's commented example documents each one.
-    const WINDOW_KEYS: [&str; 6] = [
+    const WINDOW_KEYS: [&str; 7] = [
         "title",
         "colour",
         "width",
         "height",
         "open_on_start",
+        "open_tabs_section",
         "group",
     ];
     const GROUP_KEYS: [&str; 6] = ["name", "url", "store", "collapsed", "detached", "tab"];
@@ -293,8 +316,9 @@ mod tests {
         let cfg = parse(&format!(
             "density = \"compact\"\ndark_mode = true\ntab_digit_keys = \"cycle\"\n\
              auto_update = false\nallow_insecure = [\"10.0.0.1\"]\nformat_on_save = true\n\
+             open_tabs_section = true\n\
              [[window]]\ntitle = \"Club\"\ncolour = \"#2A6F4E\"\nwidth = 1200\nheight = 800\n\
-             open_on_start = false\n\
+             open_on_start = false\nopen_tabs_section = false\n\
              [[window.group]]\nname = \"Newsletters\"\nurl = \"{FOLDER}\"\nstore = \"club\"\n\
              collapsed = true\ndetached = true\n\
              [[window.group.tab]]\ntitle = \"Budget\"\nurl = \"{SHEET}\"\ndetached = true\n"
@@ -308,6 +332,7 @@ mod tests {
         assert_eq!(w.title, "Club");
         assert_eq!(w.colour.as_deref(), Some("#2a6f4e"));
         assert_eq!((w.width, w.height, w.open_on_start), (1200, 800, false));
+        assert!(cfg.open_tabs_section && !cfg.open_section_of("Club"));
         let g = &w.groups[0];
         assert_eq!(g.name, "Newsletters");
         assert_eq!(
@@ -336,6 +361,20 @@ mod tests {
         assert_eq!(cfg.colour_of(" Club ").as_deref(), Some("#2a6f4e"));
         assert_eq!(cfg.colour_of("Other"), None);
         assert!(parse("dark_mode = true\n").unwrap().windows.is_empty());
+    }
+
+    #[test]
+    fn a_window_inherits_the_open_section_unless_it_sets_its_own() {
+        let cfg = parse(
+            "open_tabs_section = true\n[[window]]\ntitle = \"A\"\n\
+             [[window]]\ntitle = \"B\"\nopen_tabs_section = false\n",
+        )
+        .unwrap();
+        assert!(cfg.open_section_of("A"));
+        assert!(!cfg.open_section_of("B"));
+        let cfg = parse("[[window]]\ntitle = \"A\"\nopen_tabs_section = true\n").unwrap();
+        assert!(cfg.open_section_of("A"));
+        assert!(!Config::default().open_section_of(STARTER_WINDOW));
     }
 
     #[test]
