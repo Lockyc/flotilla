@@ -31,6 +31,7 @@ impl Session {
                 .windows
                 .iter()
                 .filter_map(|w| Some((w.title.clone(), w.active.clone()?)))
+                .chain(ws.stray_active.clone())
                 .collect(),
             recent: ws.recent.clone(),
             incoming: ws

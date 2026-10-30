@@ -133,6 +133,9 @@ pub struct Workspace {
     /// and the first window there is takes them
     /// ([`Workspace::adopt_incoming`]).
     pub stray: BTreeMap<String, Vec<Incoming>>,
+    /// Each window's active tab, by title, from a session restored while the config had no
+    /// window. The session keeps them, and the first rebase onto windows applies them.
+    pub stray_active: BTreeMap<String, TabId>,
     /// The detached tab the last operation activated, whose window the shell is to raise.
     raise: Pending,
 }
@@ -241,9 +244,18 @@ impl Workspace {
     /// Adopts a reloaded config's windows. Each window keeps its active tab when a window of the
     /// same title still holds it docked; when it went (a hand edit), its group's docked head takes
     /// over, else the nearest following group's docked head, else the nearest preceding one's.
-    /// Recent and the Incoming queues are the session's and stay ([`Self::adopt_incoming`]).
+    /// Recent and the Incoming queues are the session's and stay ([`Self::adopt_incoming`]). The
+    /// first rebase onto windows applies `stray_active` as a session's active tabs.
     pub fn rebase(&mut self, fresh: Workspace) {
         let mut old = std::mem::replace(&mut self.windows, fresh.windows);
+        if old.is_empty() && !self.windows.is_empty() {
+            let held = std::mem::take(&mut self.stray_active);
+            for w in &mut self.windows {
+                w.active = held.get(&w.title).cloned().filter(|a| docked_in(w, a));
+            }
+            self.adopt_incoming(std::iter::empty());
+            return;
+        }
         self.adopt_incoming(
             old.iter_mut()
                 .map(|o| (o.title.clone(), std::mem::take(&mut o.incoming))),
@@ -317,7 +329,7 @@ impl Workspace {
     }
 
     /// Applies a saved session: each window's active tab by title (when that window holds it
-    /// docked), its Incoming queue ([`Self::adopt_incoming`]), and Recent with every key and id
+    /// docked; with no window at all, held in `stray_active`), its Incoming queue ([`Self::adopt_incoming`]), and Recent with every key and id
     /// re-derived from its URL and store, groups and members whose URL no longer parses or members
     /// whose identity repeats in the group dropped.
     pub fn restore(
@@ -326,6 +338,9 @@ impl Workspace {
         mut recent: Vec<Group>,
         incoming: BTreeMap<String, Vec<Incoming>>,
     ) {
+        if self.windows.is_empty() {
+            self.stray_active = active.clone();
+        }
         for w in &mut self.windows {
             w.active = active.get(&w.title).cloned().filter(|a| docked_in(w, a));
         }
@@ -2215,5 +2230,25 @@ mod tests {
         w.rebase(Workspace::from_config(&[window("C")]));
         assert_eq!(queue(&w, "C"), [doc(7).as_str(), doc(8).as_str()]);
         assert!(w.stray.is_empty());
+    }
+
+    /// A session restored while the config names no window (it failed to parse at launch) keeps
+    /// each window's active tab, in saves too, until the config's windows come back.
+    #[test]
+    fn a_session_restored_with_no_windows_keeps_their_active_tabs() {
+        let mut saved = Workspace::from_config(&two_windows());
+        let a = saved.windows[0].groups[0].members[1].id.clone();
+        let b = saved.windows[1].groups[0].members[0].id.clone();
+        saved.activate(&a);
+        saved.activate(&b);
+        let s = crate::session::Session::of(&saved);
+        assert_eq!(s.active.len(), 2);
+        let mut w = Workspace::from_config(&[]);
+        w.restore(s.active.clone(), s.recent, s.incoming);
+        assert_eq!(crate::session::Session::of(&w).active, s.active);
+        w.rebase(Workspace::from_config(&two_windows()));
+        assert_eq!(w.windows[0].active, Some(a));
+        assert_eq!(w.windows[1].active, Some(b));
+        assert!(w.stray_active.is_empty());
     }
 }

@@ -338,9 +338,17 @@ pub fn run() {
             let cfg_path = config::config_path();
             // Before the config is read: a version 1 session moves into it.
             let session = load_session(app, &cfg_path);
+            // A file that doesn't parse names no window: links and the session wait for the first
+            // good reload, rather than landing in the starter window.
             let (cfg, config_error) = match config::load(&cfg_path) {
                 Ok(cfg) => (cfg, None),
-                Err(e) => (config::Config::default(), Some(e)),
+                Err(e) => (
+                    config::Config {
+                        windows: Vec::new(),
+                        ..config::Config::default()
+                    },
+                    Some(e),
+                ),
             };
             shell_core::web::insecure::set_allowlist(cfg.allow_insecure.clone());
             app.set_theme(cfg.dark_mode.then_some(tauri::Theme::Dark));
