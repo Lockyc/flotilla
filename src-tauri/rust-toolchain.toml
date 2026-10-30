@@ -3,8 +3,8 @@
 # auto-installs this on first cargo use. (Lives in src-tauri, where `just` runs cargo.)
 #
 # Keep in lockstep with the shared crates' pins (config-core, chrome-core) and the sibling
-# warden app. Both are git dependencies (chrome-core a build-dependency), so their pins do NOT
-# reach this build — this file governs curator's toolchain. Bump a shared crate's rev, then match here.
+# apps (curator, warden, lector). The shared crates are git dependencies (chrome-core a build-dependency), so their pins do NOT
+# reach this build — this file governs flotilla's toolchain. Bump a shared crate's rev, then match here.
 [toolchain]
 channel = "1.96.0"
 components = ["rustfmt", "clippy"]

@@ -9,7 +9,7 @@ description: Agent orientation for flotilla — layout, shared cores, build and 
 
 # flotilla — agent notes
 
-macOS-only Tauri v2 app (Rust + a static web frontend in `src/`) in the curator/warden/lector family. A workspace where any tab can head a group of documents (usually a Google Drive folder); documents opened from it list beneath it, each is open once, and the session restores on relaunch. Early: the window mounts an empty chrome.
+macOS-only Tauri v2 app (Rust + a static web frontend in `src/`) in the same family as curator, warden and lector. A workspace where any tab can head a group of documents (usually a Google Drive folder); documents opened from it list beneath it, each is open once, and the session restores on relaunch. Early: the window mounts an empty chrome.
 
 ## Layout
 
@@ -20,7 +20,7 @@ macOS-only Tauri v2 app (Rust + a static web frontend in `src/`) in the curator/
 
 ## Shared cores
 
-chrome-core and shell-core are pinned by `rev` in `src-tauri/Cargo.toml` (shell-core's build-dep and runtime dep in lockstep). Local-dev loop: `just chrome-dev` / `shell-dev`, re-pin with `chrome-pin` / `shell-pin`; the `[patch]` lines in the root `Cargo.toml` stay commented in git (`just gate` and `.githooks/pre-commit` refuse otherwise). The toolchain is pinned in `rust-toolchain.toml`, in lockstep with curator.
+chrome-core and shell-core are pinned by `rev` in `src-tauri/Cargo.toml` (shell-core's build-dep and runtime dep in lockstep). Local-dev loop: `just chrome-dev` / `shell-dev`, re-pin with `chrome-pin` / `shell-pin`; the `[patch]` lines in the root `Cargo.toml` stay commented in git (`just gate` and `.githooks/pre-commit` refuse otherwise). The toolchain is pinned in `rust-toolchain.toml`, in lockstep with the sibling apps.
 
 ## Commands
 
