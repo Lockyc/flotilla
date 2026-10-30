@@ -70,14 +70,15 @@ pub struct Incoming {
     pub problem: Option<String>,
 }
 
-/// `"in-<16 hex>"`: the hash [`tab_id`] takes of the document key `link` has in no store, else
-/// the [`fnv1a`] of its trimmed text. Store-free, so it is the same whichever window's store the
+/// `"in-<16 hex>"`: the hash [`tab_id`] takes of the [`identity`] `link` has in no store, else
+/// (it is no URL) the [`fnv1a`] of its trimmed text. Keyed by the rule open-once compares by, so
+/// two links to one tab are one item; store-free, so it is the same whichever window's store the
 /// link was handed in, and can be re-derived from the link alone.
 fn incoming_id(link: &str) -> String {
     let link = link.trim();
-    match Url::parse(link).ok().and_then(|u| doc_key("", &u)) {
-        Some(key) => format!("in-{}", &tab_id(&key)["t-".len()..]),
-        None => format!("in-{:016x}", fnv1a(link.as_bytes())),
+    match Url::parse(link) {
+        Ok(u) => format!("in-{}", &tab_id(&identity("", &u))["t-".len()..]),
+        Err(_) => format!("in-{:016x}", fnv1a(link.as_bytes())),
     }
 }
 
@@ -317,8 +318,8 @@ impl Workspace {
 
     /// Applies a saved session: each window's active tab by title (when that window holds it
     /// docked), its Incoming queue ([`Self::adopt_incoming`]), and Recent with every key and id
-    /// re-derived from its URL and store, members whose URL no longer parses or whose identity
-    /// repeats in the group dropped.
+    /// re-derived from its URL and store, groups and members whose URL no longer parses or members
+    /// whose identity repeats in the group dropped.
     pub fn restore(
         &mut self,
         active: BTreeMap<String, TabId>,
@@ -329,6 +330,7 @@ impl Workspace {
             w.active = active.get(&w.title).cloned().filter(|a| docked_in(w, a));
         }
         self.adopt_incoming(incoming);
+        recent.retain(|g| Url::parse(&g.head.home_url).is_ok());
         for g in &mut recent {
             let store = g.store.clone();
             g.members.retain(|m| Url::parse(&m.home_url).is_ok());
@@ -741,7 +743,7 @@ impl Workspace {
     /// Takes a link handed to window `window` in `store`. A link that is not a web link is queued
     /// with its reason; one open already, in any window, is raised; a document joins the group
     /// of that window whose head is titled `group`, else is queued; anything else heads a new
-    /// group in the window. A link raised or joined leaves the queue, wherever it waited. With no
+    /// group in the window. A link opened leaves the queue, wherever it waited. With no
     /// window at all, the link is queued in `stray`, with its reason if it is not a web link.
     /// `None`, and nothing done, when the link is blank, or there is no such window but others.
     pub fn receive(
@@ -769,6 +771,7 @@ impl Workspace {
         }
         if doc_key(store, &url).is_none() {
             let opened = self.new_group(window, &url, store)?;
+            self.dismiss_incoming(&incoming_id(link));
             return Some(Handed::Grouped(opened_id(opened)));
         }
         let head = group.and_then(|name| {
@@ -779,9 +782,13 @@ impl Workspace {
                 .map(|g| g.head.id.clone())
         });
         match head.and_then(|h| self.open_from(&h, &url)) {
+            // The group's store may be another: the document can be open there already.
             Some(opened) => {
                 self.dismiss_incoming(&incoming_id(link));
-                Some(Handed::Joined(opened_id(opened)))
+                Some(match opened {
+                    Opened::Added(id) => Handed::Joined(id),
+                    Opened::Raised(id) => Handed::Raised(id),
+                })
             }
             None => Some(self.enqueue(Some(wi), link, None)),
         }
@@ -1625,16 +1632,19 @@ mod tests {
     }
 
     #[test]
-    fn restore_keeps_a_recent_head_whose_url_no_longer_parses() {
+    fn restore_drops_a_recent_group_whose_head_url_no_longer_parses() {
         let mut w = ws();
-        let h = head_of(&mut w, 1);
-        w.close_group(&h);
+        let h1 = head_of(&mut w, 1);
+        let h2 = head_of(&mut w, 2);
+        w.close_group(&h1);
+        w.close_group(&h2);
         let mut recent = w.recent.clone();
         recent[0].head.home_url = "also not".into();
-        let key = recent[0].head.key.clone();
+        let kept = recent[1].head.id.clone();
         let mut fresh = ws();
         fresh.restore(BTreeMap::new(), recent, BTreeMap::new());
-        assert_eq!(fresh.recent[0].head.key, key);
+        assert_eq!(fresh.recent.len(), 1);
+        assert_eq!(fresh.recent[0].head.id, kept);
     }
 
     // `active` is never a detached tab.
@@ -1895,6 +1905,46 @@ mod tests {
         );
         assert_eq!(queue(&w, W), [doc(1).as_str(), doc(2).as_str()]);
         assert!(queue(&w, "V").is_empty());
+    }
+
+    /// A share link and the document it names are one item, as they are one tab.
+    #[test]
+    fn receive_queues_a_share_link_and_its_document_once() {
+        let mut w = Workspace::from_config(&[]);
+        let share = "https://drive.google.com/open?id=1AbCdEfGhIjKlMnOpQrSt01";
+        let a = queued(w.receive(W, None, share, "default"));
+        w.rebase(Workspace::from_config(&[window(W), window("V")]));
+        assert_eq!(
+            w.receive("V", None, doc(1).as_str(), "default"),
+            Some(Handed::AlreadyQueued(a))
+        );
+    }
+
+    /// A link that waited while no window was open leaves the queue once it opens as a group.
+    #[test]
+    fn receive_dismisses_a_queued_link_it_opens_as_a_group() {
+        let mut w = Workspace::from_config(&[]);
+        queued(w.receive(W, None, "https://example.com/a", "default"));
+        w.rebase(Workspace::from_config(&[window(W)]));
+        assert_eq!(queue(&w, W), ["https://example.com/a"]);
+        let Some(Handed::Grouped(_)) = w.receive(W, None, "https://example.com/a/", "default")
+        else {
+            panic!()
+        };
+        assert!(queue(&w, W).is_empty());
+    }
+
+    /// Aimed at a group on another store, a document already open there is raised, not joined.
+    #[test]
+    fn receive_into_a_group_holding_it_in_its_store_raises_it() {
+        let (mut w, _) = fleet();
+        let work = id(w.new_group(W, &folder(2), "work").unwrap());
+        w.set_title(&work, "Work");
+        let m = id(w.open_from(&work, &doc(1)).unwrap());
+        assert_eq!(
+            w.receive(W, Some("Work"), doc(1).as_str(), "default"),
+            Some(Handed::Raised(m))
+        );
     }
 
     #[test]
