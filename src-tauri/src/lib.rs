@@ -294,13 +294,20 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("error while building flotilla")
-        .run(|app, event| {
-            if let tauri::RunEvent::ExitRequested { .. } = event {
+        .run(|app, event| match event {
+            // `open -a flotilla <url>`, or a link router sending a link here.
+            tauri::RunEvent::Opened { urls } => {
+                for url in &urls {
+                    commands::open_handed(app, url);
+                }
+            }
+            tauri::RunEvent::ExitRequested { .. } => {
                 detach::mark_quitting();
                 for window in app.windows().values() {
                     shell_core::web::content::close_window_pages(window);
                 }
                 persist::save_now(app);
             }
+            _ => {}
         });
 }

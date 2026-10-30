@@ -154,6 +154,21 @@ pub fn new_group(url: String, webview: Webview) -> Result<(), String> {
     Ok(())
 }
 
+/// A link another app handed flotilla (it was opened with flotilla): opened as a group the same way
+/// a pasted one is, and the main window brought forward. A link flotilla can't head a group with
+/// shows its reason in the sidebar.
+pub fn open_handed(app: &AppHandle, url: &Url) {
+    match parse_group_url(url.as_str()) {
+        Ok(url) => {
+            mutate(app, |ws| {
+                ws.new_group(&url, DEFAULT_STORE);
+            });
+            tabs::bring_main_forward(app);
+        }
+        Err(e) => tabs::notice(app, e),
+    }
+}
+
 #[tauri::command]
 pub fn home_tab(id: TabId, webview: Webview) -> Result<(), String> {
     require_chrome(&webview)?;
