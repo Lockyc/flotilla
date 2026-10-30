@@ -1,13 +1,16 @@
 //! The chrome-core DTO for the workspace: what the sidebar renders.
 
+use flotilla_core::identity::{kind, Kind};
 use flotilla_core::model::{TabId, Workspace};
 use serde_json::{json, Value};
 use std::collections::HashSet;
+use url::Url;
 
 /// The tab-list part of chrome-core's window DTO (`tabs`, `active`, `collapsed`); `chrome.js` adds
 /// the window identity fields. Each group is a run of rows keyed by its head's id, the head row
 /// first (`head: true`) and named by the head's title. `live` is whether the tab's webview exists
-/// (`created`): the row's dot then offers Unload, and tab cycling skips cold rows.
+/// (`created`): the row's dot then offers Unload, and tab cycling skips cold rows. `icon` is the
+/// glyph of the kind of Google page the tab opens on; other pages keep chrome-core's letter tile.
 pub fn sidebar_dto(ws: &Workspace, created: &HashSet<TabId>) -> Value {
     let tabs: Vec<Value> = ws
         .groups
@@ -23,6 +26,7 @@ pub fn sidebar_dto(ws: &Workspace, created: &HashSet<TabId>) -> Value {
                         "groupName": g.head.title,
                         "head": head,
                         "detached": t.detached,
+                        "icon": icon_of(&t.home_url),
                         "live": created.contains(&t.id),
                         "attention": null,
                         "presence": null,
@@ -41,6 +45,23 @@ pub fn sidebar_dto(ws: &Workspace, created: &HashSet<TabId>) -> Value {
         .map(|g| g.head.id.as_str())
         .collect();
     json!({ "active": ws.active, "collapsed": collapsed, "tabs": tabs })
+}
+
+/// The glyph a tab opening on `home_url` shows, if it is a Google page.
+fn icon_of(home_url: &str) -> Option<&'static str> {
+    Url::parse(home_url).ok().as_ref().and_then(kind).map(glyph)
+}
+
+/// A kind's glyph, as a path into the chrome page's `src/`.
+fn glyph(k: Kind) -> &'static str {
+    match k {
+        Kind::Doc => "icons/doc.svg",
+        Kind::Sheet => "icons/sheet.svg",
+        Kind::Slides => "icons/slides.svg",
+        Kind::Form => "icons/form.svg",
+        Kind::Folder => "icons/folder.svg",
+        Kind::Drive => "icons/drive.svg",
+    }
 }
 
 #[cfg(test)]
@@ -108,6 +129,8 @@ mod tests {
             ]
         );
         assert_eq!(dto["tabs"][1]["title"], json!("Budget"));
+        assert_eq!(dto["tabs"][0]["icon"], json!("icons/folder.svg"));
+        assert_eq!(dto["tabs"][1]["icon"], json!("icons/doc.svg"));
         // Only h2 has a webview.
         let live: Vec<bool> = dto["tabs"]
             .as_array()
@@ -116,6 +139,41 @@ mod tests {
             .map(|t| t["live"].as_bool().unwrap())
             .collect();
         assert_eq!(live, [false, false, true]);
+    }
+
+    #[test]
+    fn every_kind_has_a_glyph_and_other_pages_keep_the_letter_tile() {
+        for (u, icon) in [
+            (
+                "https://docs.google.com/spreadsheets/d/x",
+                "icons/sheet.svg",
+            ),
+            (
+                "https://docs.google.com/presentation/d/x",
+                "icons/slides.svg",
+            ),
+            ("https://docs.google.com/forms/d/x", "icons/form.svg"),
+            ("https://drive.google.com/file/d/x", "icons/drive.svg"),
+        ] {
+            assert_eq!(icon_of(u), Some(icon), "{u}");
+        }
+        assert_eq!(icon_of("https://example.com/"), None);
+        assert_eq!(icon_of("not a url"), None);
+    }
+
+    #[test]
+    fn glyph_files_exist() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../src");
+        for k in [
+            Kind::Doc,
+            Kind::Sheet,
+            Kind::Slides,
+            Kind::Form,
+            Kind::Folder,
+            Kind::Drive,
+        ] {
+            assert!(src.join(glyph(k)).is_file(), "{}", glyph(k));
+        }
     }
 
     #[test]

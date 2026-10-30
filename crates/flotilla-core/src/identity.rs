@@ -33,16 +33,11 @@ impl Recogniser for Google {
     }
 
     fn document_id(&self, url: &Url) -> Option<String> {
-        if !matches!(url.host_str(), Some("docs.google.com" | "drive.google.com")) {
+        if !google_host(url) {
             return None;
         }
         let segments: Vec<&str> = url.path_segments()?.collect();
-        let at = segments.iter().position(|s| {
-            matches!(
-                *s,
-                "document" | "spreadsheets" | "presentation" | "forms" | "file"
-            )
-        })?;
+        let at = segments.iter().position(|s| editor(s).is_some())?;
         // `/<kind>[/u/N]/d/<id>`
         let mut rest = &segments[at + 1..];
         if let ["u", _, tail @ ..] = rest {
@@ -57,6 +52,52 @@ impl Recogniser for Google {
             _ => false,
         };
         (viewed && valid_file_id(id)).then(|| id.to_string())
+    }
+}
+
+fn google_host(url: &Url) -> bool {
+    matches!(url.host_str(), Some("docs.google.com" | "drive.google.com"))
+}
+
+/// What a Google URL shows, which picks its sidebar glyph.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    Doc,
+    Sheet,
+    Slides,
+    Form,
+    Folder,
+    /// Any other Drive file, or a share link that does not say which it is.
+    Drive,
+}
+
+/// The kind a document path's editor segment (`/<editor>[/u/N]/d/<id>`) names.
+fn editor(segment: &str) -> Option<Kind> {
+    Some(match segment {
+        "document" => Kind::Doc,
+        "spreadsheets" => Kind::Sheet,
+        "presentation" => Kind::Slides,
+        "forms" => Kind::Form,
+        "file" => Kind::Drive,
+        _ => return None,
+    })
+}
+
+/// The kind of Google page `url` is: a document's editor, a Drive view (`/drive/…`) as a folder,
+/// an `open?id=` link as a Drive file; `None` off Google or on any other Google page.
+pub fn kind(url: &Url) -> Option<Kind> {
+    if !google_host(url) {
+        return None;
+    }
+    if let Some(k) = url.path_segments()?.find_map(editor) {
+        return Some(k);
+    }
+    match url.path() {
+        "/open" => Some(Kind::Drive),
+        p if url.host_str() == Some("drive.google.com") && p.starts_with("/drive") => {
+            Some(Kind::Folder)
+        }
+        _ => None,
     }
 }
 
@@ -90,8 +131,7 @@ pub fn doc_key(store: &str, url: &Url) -> Option<DocKey> {
 /// (no member), and a folder's is no document at all. Members still need [`doc_key`].
 pub fn head_doc_key(store: &str, url: &Url) -> Option<DocKey> {
     doc_key(store, url).or_else(|| {
-        let host = url.host_str()?;
-        if !matches!(host, "docs.google.com" | "drive.google.com") || url.path() != "/open" {
+        if !google_host(url) || url.path() != "/open" {
             return None;
         }
         let (_, id) = url.query_pairs().find(|(k, _)| k == "id")?;
@@ -263,5 +303,64 @@ mod tests {
             head("https://example.com/a?x=2")
         );
         assert_eq!(head("https://example.com/"), "https://example.com");
+    }
+
+    fn kind_of(s: &str) -> Option<Kind> {
+        kind(&Url::parse(s).unwrap())
+    }
+
+    #[test]
+    fn kind_names_what_a_google_url_shows() {
+        for (u, k) in [
+            (
+                format!("https://docs.google.com/document/d/{ID}/edit"),
+                Kind::Doc,
+            ),
+            (
+                format!("https://docs.google.com/u/1/document/d/{ID}/edit"),
+                Kind::Doc,
+            ),
+            (
+                format!("https://docs.google.com/spreadsheets/d/{ID}/edit#gid=0"),
+                Kind::Sheet,
+            ),
+            (
+                format!("https://docs.google.com/presentation/d/{ID}/edit"),
+                Kind::Slides,
+            ),
+            (
+                format!("https://docs.google.com/forms/d/{ID}/viewform"),
+                Kind::Form,
+            ),
+            (
+                format!("https://drive.google.com/drive/folders/{ID}"),
+                Kind::Folder,
+            ),
+            (
+                format!("https://drive.google.com/drive/u/0/folders/{ID}"),
+                Kind::Folder,
+            ),
+            (
+                "https://drive.google.com/drive/my-drive".into(),
+                Kind::Folder,
+            ),
+            (
+                format!("https://drive.google.com/file/d/{ID}/view"),
+                Kind::Drive,
+            ),
+            (
+                format!("https://drive.google.com/open?id={ID}"),
+                Kind::Drive,
+            ),
+        ] {
+            assert_eq!(kind_of(&u), Some(k), "{u}");
+        }
+        for u in [
+            "https://example.com/document/d/x",
+            "https://docs.google.com/",
+            "https://www.google.com/",
+        ] {
+            assert_eq!(kind_of(u), None, "{u}");
+        }
     }
 }
