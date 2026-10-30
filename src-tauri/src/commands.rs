@@ -332,8 +332,8 @@ pub fn rename_tab(id: TabId, name: String, webview: Webview) -> Result<(), Strin
 }
 
 /// Set Home to Current Page: tab `id`'s page now becomes its home (`url` in the config, in
-/// place, as `identity::home_url` keeps it), so Home and a reload land there. Its id changes with its document key: the next sync
-/// closes its webview and creates it again, at that same page.
+/// place, as `identity::home_url` keeps it), so Home and a reload land there. Its id changes with
+/// its document key: the next sync closes its webview and creates it again, at that same page.
 pub fn set_home(app: &AppHandle, id: &TabId) -> Result<(), String> {
     let current = tabs::current_url(app, id);
     let new = crate::write::through_rekey(app, |ws| {

@@ -4,7 +4,7 @@
 //! config window (and so the workspace window) by title.
 
 use crate::state::AppState;
-use flotilla_core::identity::is_tab_id;
+use flotilla_core::identity::{is_tab_id, page_title};
 use flotilla_core::model::{Opened, Tab, TabId, WindowWs, Workspace};
 use flotilla_core::nav::{self, Decision, Origin};
 use shell_core::compositing::HoleRect;
@@ -164,11 +164,12 @@ pub fn adopt_title(stored: &str, home_url: &str, reported: &str) -> bool {
 
 /// Gives tab `id` the page's reported title when [`adopt_title`] says so; whether it did.
 pub fn retitled(ws: &mut Workspace, id: &TabId, reported: &str) -> bool {
+    let name = page_title(reported.trim());
     let adopt = ws
         .find(id)
-        .is_some_and(|(_, _, t)| adopt_title(&t.title, &t.home_url, reported));
+        .is_some_and(|(_, _, t)| adopt_title(&t.title, &t.home_url, name));
     if adopt {
-        ws.set_title(id, reported.trim());
+        ws.set_title(id, name);
     }
     adopt
 }
@@ -707,8 +708,9 @@ mod tests {
         let (mut ws, h, _, b) = ws();
         let title = |ws: &Workspace, id: &TabId| ws.find(id).unwrap().2.title.clone();
         assert_eq!(title(&ws, &b), DOC_B);
-        // The page loads: the URL title gives way to the page's.
-        assert!(retitled(&mut ws, &b, "Budget"));
+        // The page loads: the URL title gives way to the page's, without Google's app name.
+        assert!(retitled(&mut ws, &b, "Budget - Google Docs"));
+        assert_eq!(title(&ws, &b), "Budget");
         // The user renames it; navigating inside it reports other titles, which are ignored.
         ws.set_title(&b, "Club budget");
         assert!(!retitled(&mut ws, &b, "Budget – Sheet 2"));

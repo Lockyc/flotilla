@@ -1,31 +1,55 @@
-//! Moving a version 1 session into the config, once. A v1 session file held the one window's
-//! groups; now groups live in the config and the session holds only run state. [`migrate`] writes
-//! the v1 groups into the config's window named by the old top-level `title`, moves the old
-//! top-level `title`/`colour` onto that window, and replaces the session file with a v2 one,
-//! which loads as restored from then on.
+//! A version 1 session file holds its one window's groups; [`migrate`] moves them into the config,
+//! where groups live, and leaves a v2 session (each window's active tab and Recent) in its place.
+//! The window that takes them is the one the v1 config's top-level `title` names; that `title` and
+//! the top-level `colour` move onto it.
 
 use crate::config::{self, STARTER_WINDOW};
 use crate::write::{self, Doc, Write};
 use config_core::toml_edit::DocumentMut;
-use flotilla_core::identity::{identity, tab_id, DocKey};
-use flotilla_core::model::Workspace;
+use flotilla_core::identity::{identity, page_title, tab_id, DocKey};
+use flotilla_core::model::{Group, Workspace};
 use flotilla_core::session::{self, Session, V1Session};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::path::Path;
 use url::Url;
 
 /// Migrates `v1` into the config at `config_path` (seeded with the starter first when missing)
-/// and writes its run state as a v2 session at `session_path`. A group or document the config
-/// already holds is not added again, so a migration cut short and run again adds nothing twice.
+/// and writes its run state as a v2 session at `session_path`.
+///
+/// Every step reads the files as they are, so a migration cut short at any point and run again
+/// ends where an uninterrupted one would: what the config already holds is not added again, the
+/// top-level `title` and `colour` are removed only by the last config write (until then they still
+/// name the window), and after it the window holding the v1 groups is found by them.
 pub fn migrate(config_path: &Path, session_path: &Path, v1: &V1Session) -> Result<Session, String> {
-    config::create_starter(config_path)?;
-    let (title, colour) = take_root_window_keys(config_path)?;
-    let title = title
-        .map(|t| t.trim().to_string())
-        .filter(|t| !t.is_empty())
-        .unwrap_or_else(|| STARTER_WINDOW.to_string());
-    let cfg = config::load(config_path)?;
+    migrate_until(config_path, session_path, v1, usize::MAX)
+}
+
+/// [`migrate`], stopping before step `stop` (the tests' interruption).
+fn migrate_until(
+    config_path: &Path,
+    session_path: &Path,
+    v1: &V1Session,
+    stop: usize,
+) -> Result<Session, String> {
+    let at = |n: usize| {
+        if n >= stop {
+            Err(format!("stopped before step {n}"))
+        } else {
+            Ok(())
+        }
+    };
     let edit = |r: Result<(), config_core::EditError>| r.map_err(|e| format!("config: {e}"));
+
+    at(0)?;
+    config::create_starter(config_path)?;
+    let (old_title, colour) = root_window_keys(config_path)?;
+    let ws = load(config_path)?;
+    let title = old_title
+        .or_else(|| holding_window(&ws, v1))
+        .unwrap_or_else(|| STARTER_WINDOW.to_string());
+
+    at(1)?;
+    let cfg = load_config(config_path)?;
     match cfg.windows.iter().find(|w| w.title.trim() == title) {
         None => edit(config_core::add_window(
             config_path,
@@ -41,49 +65,17 @@ pub fn migrate(config_path: &Path, session_path: &Path, v1: &V1Session) -> Resul
         Some(_) => {}
     }
 
-    let cfg = config::load(config_path)?;
-    let ws = Workspace::from_config(&cfg.workspace_windows());
-    let mut open: HashSet<DocKey> = ws.tabs().map(|t| t.key.clone()).collect();
-    let mut names: Vec<String> = crate::tabs::window(&ws, &title)
-        .map(|w| w.groups.iter().map(|g| g.head.title.clone()).collect())
-        .unwrap_or_default();
-    let key = |store: &str, url: &str| Url::parse(url).ok().map(|u| identity(store, &u));
-    for g in &v1.groups {
-        let Some(head) = key(&g.store, &g.head.home_url) else {
-            continue;
-        };
-        if !open.insert(head) {
-            continue;
-        }
-        let docs = g
-            .members
-            .iter()
-            .filter(|m| key(&g.store, &m.home_url).is_some_and(|k| open.insert(k)))
-            .map(|m| Doc {
-                title: m.title.clone(),
-                url: m.home_url.clone(),
-                detached: m.detached,
-            })
-            .collect();
-        let taken: Vec<&str> = names.iter().map(String::as_str).collect();
-        let name = write::unique_group_name(&taken, &g.head.title);
-        write::apply(
-            config_path,
-            &Write::NewGroup {
-                window: title.clone(),
-                name: name.clone(),
-                url: g.head.home_url.clone(),
-                store: g.store.clone(),
-                collapsed: g.collapsed,
-                detached: g.head.detached,
-                docs,
-            },
-        )
-        .map_err(|e| format!("config: {e}"))?;
-        names.push(name);
+    for (i, g) in v1.groups.iter().enumerate() {
+        at(2 + i)?;
+        add_group(config_path, &title, g)?;
     }
 
-    // The old active tab, by the id its document has now.
+    at(2 + v1.groups.len())?;
+    for key in ["title", "colour"] {
+        edit(config_core::remove_key(config_path, key).map(|_| ()))?;
+    }
+
+    at(3 + v1.groups.len())?;
     let active_id = v1.active.as_ref().and_then(|a| {
         v1.groups.iter().find_map(|g| {
             std::iter::once(&g.head)
@@ -102,87 +94,107 @@ pub fn migrate(config_path: &Path, session_path: &Path, v1: &V1Session) -> Resul
     Ok(s)
 }
 
-/// Takes the v1 top-level `title` and `colour` out of the config at `path` and returns them; a
-/// colour that does not parse is dropped. config-core has no edit that removes a root key, so this
-/// edits the document directly, keeping every comment, and writes it the same way config-core
-/// does (a temporary file renamed over the original).
-fn take_root_window_keys(path: &Path) -> Result<(Option<String>, Option<String>), String> {
-    let src = std::fs::read_to_string(path).map_err(|e| format!("config: {e}"))?;
-    let mut doc: DocumentMut = src.parse().map_err(|e| format!("config: {e}"))?;
-    // The comments above a removed key stay, above whatever now comes first after it.
-    let mut carried = String::new();
-    let mut take = |key: &str| {
-        if let Some(p) = doc
-            .as_table()
-            .key(key)
-            .and_then(|k| k.leaf_decor().prefix())
-            .and_then(|p| p.as_str())
-        {
-            carried.push_str(p);
-        }
-        doc.remove(key)
-            .and_then(|item| item.as_str().map(str::to_string))
+fn key(store: &str, url: &str) -> Option<DocKey> {
+    Url::parse(url).ok().map(|u| identity(store, &u))
+}
+
+/// Adds v1 group `g` to window `window`, with the documents of it the config does not hold. A
+/// group whose head the config already has (an earlier run, or one the user added) takes the
+/// documents into the group that holds that head instead.
+fn add_group(config_path: &Path, window: &str, g: &Group) -> Result<(), String> {
+    let ws = load(config_path)?;
+    let open = |k: &DocKey| ws.tabs().any(|t| &t.key == k);
+    let docs: Vec<Doc> = g
+        .members
+        .iter()
+        .filter(|m| key(&g.store, &m.home_url).is_some_and(|k| !open(&k)))
+        .map(|m| Doc {
+            title: page_title(&m.title).to_string(),
+            url: m.home_url.clone(),
+            detached: m.detached,
+        })
+        .collect();
+    let Some(head) = key(&g.store, &g.head.home_url) else {
+        return Ok(());
     };
-    let title = take("title");
-    let colour = take("colour")
-        .filter(|c| !c.trim().is_empty())
-        .filter(|c| config_core::Colour::parse(c).is_ok());
-    if !carried.is_empty() {
-        carry_prefix(&mut doc, &carried);
+    let apply = |w: &Write| write::apply(config_path, w).map_err(|e| format!("config: {e}"));
+    let holder = ws
+        .find(&tab_id(&head))
+        .map(|(wi, grp, _)| (ws.windows[wi].title.clone(), grp.head.title.clone()));
+    if let Some((window, group)) = holder {
+        for doc in docs {
+            apply(&Write::AddDoc {
+                window: window.clone(),
+                group: group.clone(),
+                doc,
+            })?;
+        }
+        return Ok(());
     }
-    let out = doc.to_string();
-    if out != src {
-        let tmp = path.with_extension("toml.tmp");
-        std::fs::write(&tmp, &out)
-            .and_then(|_| std::fs::rename(&tmp, path))
-            .map_err(|e| format!("config: {e}"))?;
-    }
+    let names: Vec<&str> = crate::tabs::window(&ws, window)
+        .map(|w| w.groups.iter().map(|g| g.head.title.as_str()).collect())
+        .unwrap_or_default();
+    apply(&Write::NewGroup {
+        window: window.to_string(),
+        name: write::unique_group_name(&names, page_title(&g.head.title)),
+        url: g.head.home_url.clone(),
+        store: g.store.clone(),
+        collapsed: g.collapsed,
+        detached: g.head.detached,
+        docs,
+    })
+}
+
+/// The title of the window that already holds a v1 group's head: where an earlier run of the
+/// migration, cut short after the top-level `title` went, put them.
+fn holding_window(ws: &Workspace, v1: &V1Session) -> Option<String> {
+    v1.groups.iter().find_map(|g| {
+        let k = key(&g.store, &g.head.home_url)?;
+        ws.find(&tab_id(&k))
+            .map(|(wi, _, _)| ws.windows[wi].title.clone())
+    })
+}
+
+/// The v1 config's top-level `title` (blank is none) and `colour` (one that does not parse is
+/// none), read without changing the file.
+fn root_window_keys(path: &Path) -> Result<(Option<String>, Option<String>), String> {
+    let doc = document(path)?;
+    let text = |k: &str| {
+        doc.get(k)
+            .and_then(|i| i.as_str())
+            .map(|s| s.trim().to_string())
+    };
+    let title = text("title").filter(|t| !t.is_empty());
+    let colour = text("colour").filter(|c| config_core::Colour::parse(c).is_ok());
     Ok((title, colour))
 }
 
-/// Puts `prefix` (comment lines) in front of the first entry `doc` now starts with: a root key, or
-/// the first table.
-fn carry_prefix(doc: &mut DocumentMut, prefix: &str) {
-    use config_core::toml_edit::Item;
-    let Some((mut key, item)) = doc.as_table_mut().iter_mut().next() else {
-        return;
-    };
-    let joined = |own: Option<&str>| format!("{prefix}{}", own.unwrap_or(""));
-    match item {
-        Item::Value(_) => {
-            let own = key
-                .leaf_decor()
-                .prefix()
-                .and_then(|p| p.as_str())
-                .map(str::to_string);
-            key.leaf_decor_mut().set_prefix(joined(own.as_deref()));
-        }
-        Item::Table(t) => {
-            let own = t
-                .decor()
-                .prefix()
-                .and_then(|p| p.as_str())
-                .map(str::to_string);
-            t.decor_mut().set_prefix(joined(own.as_deref()));
-        }
-        Item::ArrayOfTables(a) => {
-            if let Some(t) = a.get_mut(0) {
-                let own = t
-                    .decor()
-                    .prefix()
-                    .and_then(|p| p.as_str())
-                    .map(str::to_string);
-                t.decor_mut().set_prefix(joined(own.as_deref()));
-            }
-        }
-        Item::None => {}
-    }
+fn document(path: &Path) -> Result<DocumentMut, String> {
+    std::fs::read_to_string(path)
+        .map_err(|e| format!("config: {e}"))?
+        .parse()
+        .map_err(|e| format!("config: {e}"))
+}
+
+/// The config at `path` as it will be once its top-level `title` and `colour` are gone: those keys
+/// are not the config's any more, so they are left out of the parse rather than refused.
+fn load_config(path: &Path) -> Result<config::Config, String> {
+    let mut doc = document(path)?;
+    doc.remove("title");
+    doc.remove("colour");
+    config::parse(&doc.to_string())
+}
+
+fn load(path: &Path) -> Result<Workspace, String> {
+    Ok(Workspace::from_config(
+        &load_config(path)?.workspace_windows(),
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flotilla_core::model::{Group, Tab};
+    use flotilla_core::model::Tab;
     use flotilla_core::session::Loaded;
     use std::path::PathBuf;
 
@@ -192,7 +204,13 @@ mod tests {
     const BULLETINS: &str = "https://drive.google.com/drive/folders/1BulletinsFolderIdAbCdEfGh";
     const BULLETIN: &str =
         "https://docs.google.com/presentation/d/1ExampleSlidesId000000000000000000000000000/edit";
+    const FLYER: &str = "https://docs.google.com/document/d/1GreatEscapeFlyerAbCdEfGhIj/edit";
     const OLD: &str = "https://drive.google.com/drive/folders/1OldClosedFolderAbCdEfGhIj";
+
+    /// The user's config before the migration: the starter's header, a top-level name and colour.
+    const OLD_CONFIG: &str = "# flotilla config — app-wide settings. Edit and save; flotilla \
+        hot-reloads.\n\n# The window's name.\ntitle = \"Rotary\"\n\n# The window's accent colour.\n\
+        colour = \"#17458f\"\n\n# Chrome sizing.\ndensity = \"comfortable\"\n";
 
     fn tab(id: &str, url: &str, title: &str, detached: bool) -> Tab {
         Tab {
@@ -214,20 +232,36 @@ mod tests {
     }
 
     /// The user's session today: the Rotary drive root with its Budget sheet, the Bulletins
-    /// folder (collapsed) with the 2026-11-02 Bulletin popped out, the Budget active, and one
-    /// group in Recent.
+    /// folder (collapsed) with the 2026-11-02 Bulletin popped out, and a group headed by the
+    /// Example Event flyer; titles as the pages reported them; the Budget active; one group in
+    /// Recent.
     fn v1() -> V1Session {
         V1Session {
             groups: vec![
                 group(
-                    tab("t-1", ROTARY, "Rotary (interim)", false),
-                    vec![tab("t-2", BUDGET, "Rotary Example – Budget", false)],
+                    tab("t-1", ROTARY, "Rotary (interim) - Google Drive", false),
+                    vec![tab(
+                        "t-2",
+                        BUDGET,
+                        "Rotary Example – Budget - Google Sheets",
+                        false,
+                    )],
                     false,
                 ),
                 group(
-                    tab("t-3", BULLETINS, "Bulletins", false),
-                    vec![tab("t-4", BULLETIN, "2026-11-02 Bulletin", true)],
+                    tab("t-3", BULLETINS, "Bulletins - Google Drive", false),
+                    vec![tab(
+                        "t-4",
+                        BULLETIN,
+                        "2026-11-02 Bulletin - Google Slides",
+                        true,
+                    )],
                     true,
+                ),
+                group(
+                    tab("t-6", FLYER, "Example Event flyer - Google Docs", false),
+                    vec![],
+                    false,
                 ),
             ],
             recent: vec![group(tab("t-5", OLD, "Old", false), vec![], false)],
@@ -242,8 +276,13 @@ mod tests {
         (dir, cfg, session)
     }
 
-    fn config(path: &Path) -> crate::config::Config {
-        crate::config::load(path).unwrap()
+    fn write_old_config(path: &Path) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, OLD_CONFIG).unwrap();
+    }
+
+    fn config(path: &Path) -> config::Config {
+        config::load(path).unwrap()
     }
 
     fn id(url: &str) -> String {
@@ -260,11 +299,15 @@ mod tests {
         let w = &cfg.windows[0];
         assert_eq!(w.title, "flotilla");
         let names: Vec<&str> = w.groups.iter().map(|g| g.name.as_str()).collect();
-        assert_eq!(names, ["Rotary (interim)", "Bulletins"]);
+        assert_eq!(
+            names,
+            ["Rotary (interim)", "Bulletins", "Example Event flyer"]
+        );
         assert_eq!(w.groups[0].extra.url, ROTARY);
         assert_eq!(w.groups[0].tabs[0].title, "Rotary Example – Budget");
         assert!(w.groups[1].extra.collapsed);
         assert!(w.groups[1].tabs[0].detached);
+        assert_eq!(w.groups[1].tabs[0].title, "2026-11-02 Bulletin");
         // The run state: the old active tab, by its new id, and Recent.
         assert_eq!(s.active.get("flotilla"), Some(&id(BUDGET)));
         assert_eq!(s.recent.len(), 1);
@@ -282,12 +325,7 @@ mod tests {
     #[test]
     fn migration_moves_title_and_colour_into_the_window() {
         let (_d, cfg_path, session_path) = paths();
-        std::fs::create_dir_all(cfg_path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &cfg_path,
-            "# flotilla config\ntitle = \"Rotary\"\ncolour = \"#17458F\"\ndark_mode = true\n",
-        )
-        .unwrap();
+        write_old_config(&cfg_path);
         migrate(&cfg_path, &session_path, &v1()).unwrap();
         let src = std::fs::read_to_string(&cfg_path).unwrap();
         let table: toml::Table = src.parse().unwrap();
@@ -295,13 +333,57 @@ mod tests {
             !table.contains_key("title") && !table.contains_key("colour"),
             "{src}"
         );
+        // The file's header stays; the removed keys' own comments go with them.
         assert!(src.starts_with("# flotilla config"), "{src}");
+        assert!(
+            !src.contains("The window's name") && !src.contains("accent colour"),
+            "{src}"
+        );
         let cfg = config(&cfg_path);
-        assert!(cfg.dark_mode);
         assert_eq!(cfg.windows.len(), 1);
         assert_eq!(cfg.windows[0].title, "Rotary");
         assert_eq!(cfg.windows[0].colour.as_deref(), Some("#17458f"));
-        assert_eq!(cfg.windows[0].groups.len(), 2);
+        assert_eq!(cfg.windows[0].groups.len(), 3);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn migration_keeps_the_configs_mode_and_symlink() {
+        use std::os::unix::fs::PermissionsExt;
+        let (d, real, session_path) = paths();
+        write_old_config(&real);
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let link = d.path().join("config.toml");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        migrate(&link, &session_path, &v1()).unwrap();
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        let mode = std::fs::metadata(&real).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert_eq!(config(&real).windows[0].groups.len(), 3);
+    }
+
+    #[test]
+    fn a_migration_cut_short_anywhere_ends_where_a_whole_one_does() {
+        let whole = {
+            let (_d, cfg_path, session_path) = paths();
+            write_old_config(&cfg_path);
+            let s = migrate(&cfg_path, &session_path, &v1()).unwrap();
+            (config(&cfg_path), s)
+        };
+        for stop in 0..=3 + v1().groups.len() {
+            let (_d, cfg_path, session_path) = paths();
+            write_old_config(&cfg_path);
+            assert!(migrate_until(&cfg_path, &session_path, &v1(), stop).is_err());
+            let s = migrate(&cfg_path, &session_path, &v1()).unwrap();
+            assert_eq!(
+                (config(&cfg_path), s),
+                whole,
+                "cut short before step {stop}"
+            );
+        }
     }
 
     #[test]
@@ -318,8 +400,29 @@ mod tests {
         let cfg = config(&cfg_path);
         assert_eq!(cfg.windows.len(), 2);
         assert!(cfg.windows[0].groups.is_empty());
-        assert_eq!(cfg.windows[1].groups.len(), 2);
+        assert_eq!(cfg.windows[1].groups.len(), 3);
         assert_eq!(cfg.windows[1].colour.as_deref(), Some("#17458f"));
+    }
+
+    #[test]
+    fn a_group_already_in_the_config_takes_the_documents_it_lacks() {
+        let (_d, cfg_path, session_path) = paths();
+        std::fs::create_dir_all(cfg_path.parent().unwrap()).unwrap();
+        // The Rotary root is already a group, in another window, without the Budget.
+        std::fs::write(
+            &cfg_path,
+            format!(
+                "title = \"flotilla\"\n[[window]]\ntitle = \"flotilla\"\n[[window]]\ntitle = \"Club\"\n\
+                 [[window.group]]\nname = \"Root\"\nurl = \"{ROTARY}\"\n"
+            ),
+        )
+        .unwrap();
+        migrate(&cfg_path, &session_path, &v1()).unwrap();
+        let cfg = config(&cfg_path);
+        let club = &cfg.windows[1];
+        assert_eq!(club.groups[0].name, "Root");
+        assert_eq!(club.groups[0].tabs[0].url, BUDGET);
+        assert_eq!(cfg.windows[0].groups.len(), 2, "the other v1 groups");
     }
 
     #[test]
@@ -328,10 +431,10 @@ mod tests {
         migrate(&cfg_path, &session_path, &v1()).unwrap();
         // The session file is v2 now: nothing left to migrate.
         assert!(matches!(session::load(&session_path), Loaded::Restored(_)));
-        // Run again (a crash before the session was written): nothing is added twice.
+        // Run again anyway: nothing is added twice.
         migrate(&cfg_path, &session_path, &v1()).unwrap();
         let cfg = config(&cfg_path);
-        assert_eq!(cfg.windows[0].groups.len(), 2);
+        assert_eq!(cfg.windows[0].groups.len(), 3);
         assert_eq!(cfg.windows[0].groups[0].tabs.len(), 1);
     }
 }

@@ -182,6 +182,25 @@ const NOISE_PARAMS: &[&str] = &["usp", "pli", "authuser", "ouid", "resourcekey"]
 /// (`?tab=t.0`) and the account segment (`/u/<n>`).
 const GOOGLE_NOISE_PARAMS: &[&str] = &["tab"];
 
+/// The app name a Google page appends to its title.
+const GOOGLE_APP_TITLES: &[&str] = &[
+    " - Google Drive",
+    " - Google Docs",
+    " - Google Sheets",
+    " - Google Slides",
+    " - Google Forms",
+];
+
+/// A page's reported title as a name: without the Google app name it ends with ("Budget - Google
+/// Sheets" is "Budget"). A title that is only an app name is kept.
+pub fn page_title(reported: &str) -> &str {
+    GOOGLE_APP_TITLES
+        .iter()
+        .find_map(|s| reported.strip_suffix(s))
+        .filter(|t| !t.trim().is_empty())
+        .unwrap_or(reported)
+}
+
 /// The address to keep as a home for the page at `url`: without its fragment, and on a Google
 /// page without the document tab it adds on load (`?tab=…`). Everything else is the page's own
 /// address, kept as the user saw it.
@@ -409,6 +428,24 @@ mod tests {
             head("https://example.com/a?x=2")
         );
         assert_eq!(head("https://example.com/"), "https://example.com");
+    }
+
+    #[test]
+    fn a_page_title_drops_the_google_app_name() {
+        for (reported, name) in [
+            ("Rotary (interim) - Google Drive", "Rotary (interim)"),
+            (
+                "Rotary Example – Budget - Google Sheets",
+                "Rotary Example – Budget",
+            ),
+            ("Minutes - Google Docs", "Minutes"),
+            ("2026-11-02 Bulletin - Google Slides", "2026-11-02 Bulletin"),
+            ("RSVP - Google Forms", "RSVP"),
+            ("Example Domain", "Example Domain"),
+            ("Google Drive", "Google Drive"),
+        ] {
+            assert_eq!(page_title(reported), name);
+        }
     }
 
     #[test]
