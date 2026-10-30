@@ -160,13 +160,52 @@ pub fn toggle_group(head: TabId, collapsed: bool, webview: Webview) -> Result<()
 pub fn new_group(url: String, webview: Webview) -> Result<(), String> {
     let window = require_chrome(&webview)?;
     let url = parse_group_url(&url)?;
-    show_from(webview.app_handle(), &window, |ws| {
-        ws.new_group(&window, &url, crate::config::DEFAULT_STORE)
+    open_group(webview.app_handle(), &window, &url, true);
+    Ok(())
+}
+
+/// Opens `url` as a new group in the window titled `window`, or raises the tab already showing it;
+/// `window` is in front unless `in_front` is false ([`show_from`]).
+fn open_group(app: &AppHandle, window: &str, url: &Url, in_front: bool) {
+    show_from(app, window, in_front, |ws| {
+        ws.new_group(window, url, crate::config::DEFAULT_STORE)
             .map(|o| match o {
                 Opened::Added(id) | Opened::Raised(id) => id,
             })
     });
-    Ok(())
+}
+
+/// Links handed over before `setup` has built the workspace: macOS delivers the link a cold launch
+/// was opened with ahead of it. `open_early_links` opens them once the state exists.
+static EARLY_LINKS: std::sync::Mutex<Vec<Url>> = std::sync::Mutex::new(Vec::new());
+
+/// A link another app handed flotilla (it was opened with flotilla): opened as a group the same way
+/// a pasted one is, in the window the menu bar acts on (else the first window, reopened), and that
+/// window brought forward. A link flotilla can't head a group with shows its reason in the sidebar.
+pub fn open_handed(app: &AppHandle, url: &Url) {
+    if app.try_state::<AppState>().is_none() {
+        EARLY_LINKS.lock().unwrap().push(url.clone());
+        return;
+    }
+    let url = match parse_group_url(url.as_str()) {
+        Ok(url) => url,
+        Err(e) => return tabs::notice(app, e),
+    };
+    let window = crate::menu::focused(app).map(|(_, t)| t).or_else(|| {
+        let state = app.state::<AppState>();
+        let ws = state.ws.lock().unwrap();
+        ws.windows.first().map(|w| w.title.clone())
+    });
+    if let Some(window) = window {
+        open_group(app, &window, &url, false);
+    }
+}
+
+/// Opens the links handed over before setup; run at its end.
+pub fn open_early_links(app: &AppHandle) {
+    for url in std::mem::take(&mut *EARLY_LINKS.lock().unwrap()) {
+        open_handed(app, &url);
+    }
 }
 
 #[tauri::command]
@@ -368,16 +407,18 @@ pub fn set_home(app: &AppHandle, id: &TabId) -> Result<(), String> {
 /// [`mutate`] for an operation started in the window titled `from` that shows a tab (`op`
 /// returns it): when open-once put that tab in another window, that window comes forward,
 /// reopened if it was closed; a popped-out one is raised ([`tabs::front_for`], the path a link's
-/// interception takes too).
+/// interception takes too). With `from` not `in_front` (another app handed the operation over), the
+/// tab's window comes forward even when it is `from`.
 pub fn show_from(
     app: &AppHandle,
     from: &str,
+    in_front: bool,
     op: impl FnOnce(&mut flotilla_core::model::Workspace) -> Option<TabId>,
 ) {
     let front = crate::write::through(app, |ws| {
         let mut shown = None;
         let raised = crate::detach::apply(ws, |ws| shown = op(ws));
-        tabs::front_for(ws, false, from, shown.as_ref(), raised)
+        tabs::front_for(ws, !in_front, from, shown.as_ref(), raised)
     });
     tabs::bring(app, front.as_ref());
     tabs::changed(app);

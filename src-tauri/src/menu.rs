@@ -489,7 +489,7 @@ pub fn handle(app: &AppHandle, menu_id: &str) -> bool {
         }),
         Action::Reopen(i) => {
             if let Some(window) = &title {
-                commands::show_from(app, window, |ws| ws.reopen_recent(window, i));
+                commands::show_from(app, window, true, |ws| ws.reopen_recent(window, i));
             }
         }
         Action::ClearRecent => mutate(app, |ws| ws.recent.clear()),
