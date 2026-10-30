@@ -46,8 +46,8 @@ fn window_identity(state: tauri::State<state::AppState>) -> WindowIdentity {
     }
 }
 
-/// Applies a reloaded config: remembers it, themes every window, retitles the main window and its
-/// Window-menu entry, and has the chrome re-read its identity. `allow_insecure` is not applied
+/// Applies a reloaded config: remembers it, themes every window, retitles the main window, rebuilds
+/// the menu bar (its Window entry and tab shortcuts), and has the chrome re-read its identity. `allow_insecure` is not applied
 /// here; it is read once at launch.
 fn apply_config(app: &tauri::AppHandle, cfg: config::Config) {
     app.set_theme(cfg.dark_mode.then_some(tauri::Theme::Dark));

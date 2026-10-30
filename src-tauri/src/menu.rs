@@ -238,9 +238,13 @@ pub fn row_menu(app: &AppHandle, ms: &MenuState, tab: &TabId) -> tauri::Result<M
 /// and Group menus, the Group menu acting on the active tab.
 fn build_app_menu(app: &AppHandle, ms: &MenuState) -> tauri::Result<Menu<Wry>> {
     let path = crate::config::config_path();
-    let (title, colour) = {
+    let (title, colour, cycle_digits) = {
         let cfg = app.state::<AppState>().config.lock().unwrap().clone();
-        (cfg.window_title(), cfg.accent())
+        (
+            cfg.window_title(),
+            cfg.accent(),
+            cfg.tab_digit_keys.is_cycle(),
+        )
     };
     let windows = [shell_core::menu::WindowEntry {
         id: MAIN_WINDOW.into(),
@@ -271,7 +275,7 @@ fn build_app_menu(app: &AppHandle, ms: &MenuState) -> tauri::Result<Menu<Wry>> {
         .select_all()
         .build()?;
 
-    let nav = shell_core::menu::build_tab_nav(app, false)?;
+    let nav = shell_core::menu::build_tab_nav(app, cycle_digits)?;
     let nav_refs: Vec<&dyn IsMenuItem<Wry>> =
         nav.nav.iter().map(|i| i as &dyn IsMenuItem<Wry>).collect();
     let jump_refs: Vec<&dyn IsMenuItem<Wry>> = nav

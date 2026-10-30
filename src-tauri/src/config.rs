@@ -1,7 +1,7 @@
 //! flotilla's app-wide config: one TOML file of settings, hot-reloaded. The workspace itself is
 //! not configured here; it forms as you work and lives in the session file.
 
-use config_core::{Colour, Density};
+use config_core::{Colour, Density, TabDigitKeys};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
@@ -28,6 +28,8 @@ pub struct Config {
     pub density: Density,
     /// Forces a dark appearance. Hot-reloads.
     pub dark_mode: bool,
+    /// What ⌘1/⌘2 do: jump to tabs 1 and 2, or cycle next/previous. Hot-reloads.
+    pub tab_digit_keys: TabDigitKeys,
     /// Whether the chrome checks for updates by itself. Read when the chrome mounts.
     pub auto_update: bool,
     /// Hosts whose invalid TLS certificate is accepted. Applied at launch only.
@@ -43,6 +45,7 @@ impl Default for Config {
             colour: String::new(),
             density: Density::Comfortable,
             dark_mode: false,
+            tab_digit_keys: TabDigitKeys::Jump,
             auto_update: true,
             allow_insecure: Vec::new(),
             format_on_save: false,
@@ -102,11 +105,12 @@ mod tests {
     use super::*;
 
     /// Every key the app reads; the starter config documents each one.
-    const KEYS: [&str; 7] = [
+    const KEYS: [&str; 8] = [
         "title",
         "colour",
         "density",
         "dark_mode",
+        "tab_digit_keys",
         "auto_update",
         "allow_insecure",
         "format_on_save",
@@ -131,13 +135,14 @@ mod tests {
     fn every_key_takes_effect() {
         let cfg = parse(
             "title = \"rotary\"\ncolour = \"#17458F\"\n\
-             density = \"compact\"\ndark_mode = true\nauto_update = false\n\
-             allow_insecure = [\"10.0.0.1\"]\nformat_on_save = true\n",
+             density = \"compact\"\ndark_mode = true\ntab_digit_keys = \"cycle\"\n\
+             auto_update = false\nallow_insecure = [\"10.0.0.1\"]\nformat_on_save = true\n",
         )
         .unwrap();
         assert_eq!(cfg.window_title(), "rotary");
         assert_eq!(cfg.accent().as_deref(), Some("#17458f"));
         assert_eq!(cfg.density, Density::Compact);
+        assert!(cfg.tab_digit_keys.is_cycle());
         assert!(cfg.dark_mode && cfg.format_on_save && !cfg.auto_update);
         assert_eq!(cfg.allow_insecure, vec!["10.0.0.1".to_string()]);
     }

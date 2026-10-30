@@ -12,6 +12,10 @@ density = "comfortable"
 # Force a dark appearance so pages honouring prefers-color-scheme render dark.
 dark_mode = false
 
+# What ⌘1 and ⌘2 do: "jump" — ⌘1–⌘9 go to that tab; "cycle" — ⌘1 next tab, ⌘2 previous,
+# ⌘3–⌘9 go to that tab.
+tab_digit_keys = "jump"
+
 # Check for a new release on launch and every 6 hours.
 auto_update = true
 

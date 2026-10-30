@@ -52,6 +52,7 @@ Settings are app-wide, in `~/.config/flotilla/config.toml` (or the file `FLOTILL
 | `colour` | `""` | `#rgb` / `#rrggbb` accent for the sidebar, the **Window** menu swatch and popped-out windows. Empty for neutral. Hot-reloads. |
 | `density` | `"comfortable"` | Chrome sizing: `comfortable` or `compact` (type and spacing scaled down). Hot-reloads. |
 | `dark_mode` | `false` | Force a dark appearance so pages honouring `prefers-color-scheme` render dark. Hot-reloads. |
+| `tab_digit_keys` | `"jump"` | What ⌘1/⌘2 do: `jump` — ⌘1–⌘9 go to that tab; `cycle` — ⌘1 next tab, ⌘2 previous, ⌘3–⌘9 go to that tab. Hot-reloads. |
 | `auto_update` | `true` | Check for a new release on launch and every 6 hours. `false` stops the automatic checks; **Check for Updates…** still works. Read at launch (restart to change). |
 | `allow_insecure` | `[]` | Hosts whose self-signed or invalid TLS certificate is accepted. Read at launch (restart to change). |
 | `format_on_save` | `false` | Reformat the config in house style on each clean reload. A file that fails to parse is left untouched. |
