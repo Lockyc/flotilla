@@ -4,11 +4,11 @@
 //!
 //! The windows and their groups are built from the config ([`Workspace::from_config`]) and
 //! replaced on each reload ([`Workspace::rebase`]); the session adds each window's active tab and
-//! Incoming queue, and Recent ([`Workspace::restore`]). Two levels only: a group's head (any URL, usually a Drive
-//! folder) and flat members (documents). A document is open at most once across every window,
-//! detached tabs included; opening it again raises the existing tab in its own window. The
-//! registry is not a separate index: it is derived by scanning the tabs, so it cannot drift from
-//! them.
+//! Incoming queue, and Recent ([`Workspace::restore`]). Two levels only: a group's head (any URL,
+//! usually a Drive folder) and flat members (documents). A document is open at most once across
+//! every window, detached tabs included; opening it again raises the existing tab in its own
+//! window. The registry is not a separate index: it is derived by scanning the tabs, so it cannot
+//! drift from them.
 
 use crate::identity::{doc_key, fnv1a, head_key, identity, tab_id, DocKey};
 use crate::nav::parse_group_url;
@@ -62,18 +62,20 @@ pub struct WindowWs {
 /// A link handed to a window ([`Workspace::receive`]) and waiting under its Incoming.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Incoming {
-    /// `"in-<16 hex>"`: the hash [`tab_id`] takes of the link's document key, else the [`fnv1a`]
-    /// of its trimmed text. The same link has the same id, so it is queued once across windows.
+    /// [`incoming_id`] of `link`. The same link has the same id, so it is queued once across
+    /// windows.
     pub id: String,
     pub link: String,
     /// Why the link can't be opened, shown on its row: it is not a web link.
     pub problem: Option<String>,
 }
 
-/// The [`Incoming::id`] of `link` handed in `store`.
-fn incoming_id(store: &str, link: &str) -> String {
+/// `"in-<16 hex>"`: the hash [`tab_id`] takes of the document key `link` has in no store, else
+/// the [`fnv1a`] of its trimmed text. Store-free, so it is the same whichever window's store the
+/// link was handed in, and can be re-derived from the link alone.
+fn incoming_id(link: &str) -> String {
     let link = link.trim();
-    match Url::parse(link).ok().and_then(|u| doc_key(store, &u)) {
+    match Url::parse(link).ok().and_then(|u| doc_key("", &u)) {
         Some(key) => format!("in-{}", &tab_id(&key)["t-".len()..]),
         None => format!("in-{:016x}", fnv1a(link.as_bytes())),
     }
@@ -125,6 +127,10 @@ pub struct Workspace {
     pub windows: Vec<WindowWs>,
     /// Closed groups, newest first.
     pub recent: Vec<Group>,
+    /// Incoming queues no window can hold, because the config has none, by the title of the
+    /// window they were in. The session keeps them, and the first window there is takes them
+    /// ([`Workspace::adopt_incoming`]).
+    pub stray: BTreeMap<String, Vec<Incoming>>,
     /// The detached tab the last operation activated, whose window the shell is to raise.
     raise: Pending,
 }
@@ -271,18 +277,40 @@ impl Workspace {
         }
     }
 
-    /// Queues `queues` (window title → items, oldest first) after what each window holds: under
-    /// the window of that title, else under the first window, so a link is never dropped while a
-    /// window exists. An item whose id is queued already is left out.
+    /// Queues `queues` (window title → items, oldest first) after what each window holds: each
+    /// under the window of that title, then those whose window is gone, and the `stray` ones
+    /// before them, appended to the first window's. With no window at all they wait in `stray`,
+    /// so a link is never dropped. Every id is re-derived from its link, and an item whose id is
+    /// queued already is left out.
     fn adopt_incoming(&mut self, queues: impl IntoIterator<Item = (String, Vec<Incoming>)>) {
-        for (title, items) in queues {
-            let wi = self.window_index(&title).unwrap_or(0);
+        let (homed, gone): (Vec<_>, Vec<_>) = queues
+            .into_iter()
+            .partition(|(title, _)| self.window_index(title).is_some());
+        for (title, items) in homed {
+            let wi = self.window_index(&title);
             for item in items {
-                if self.queued(&item.id) || wi >= self.windows.len() {
-                    continue;
-                }
-                self.windows[wi].incoming.push(item);
+                self.adopt_item(wi, &title, item);
             }
+        }
+        let stray = std::mem::take(&mut self.stray);
+        for (title, items) in stray.into_iter().chain(gone) {
+            let wi = (!self.windows.is_empty()).then_some(0);
+            for item in items {
+                self.adopt_item(wi, &title, item);
+            }
+        }
+    }
+
+    /// Queues `item`, re-keyed, under window `wi`, else in `stray` under `title`, unless its id
+    /// is queued already.
+    fn adopt_item(&mut self, wi: Option<usize>, title: &str, mut item: Incoming) {
+        item.id = incoming_id(&item.link);
+        if self.queued(&item.id) {
+            return;
+        }
+        match wi {
+            Some(wi) => self.windows[wi].incoming.push(item),
+            None => self.stray.entry(title.to_string()).or_default().push(item),
         }
     }
 
@@ -672,9 +700,9 @@ impl Workspace {
 }
 
 impl Workspace {
-    /// Whether an item with id `id` is queued in any window.
+    /// Whether an item with id `id` is queued in any window, or in `stray`.
     fn queued(&self, id: &str) -> bool {
-        self.incoming_at(id).is_some()
+        self.incoming_at(id).is_some() || self.stray.values().flatten().any(|i| i.id == id)
     }
 
     /// The window index and queue position of the Incoming item `id`.
@@ -688,8 +716,8 @@ impl Workspace {
     }
 
     /// Queues `link` under window `wi`, unless it is queued in any window already.
-    fn enqueue(&mut self, wi: usize, store: &str, link: &str, problem: Option<String>) -> Handed {
-        let id = incoming_id(store, link);
+    fn enqueue(&mut self, wi: usize, link: &str, problem: Option<String>) -> Handed {
+        let id = incoming_id(link);
         if self.queued(&id) {
             return Handed::AlreadyQueued(id);
         }
@@ -704,7 +732,8 @@ impl Workspace {
     /// Takes a link handed to window `window` in `store`. A link that is not a web link is queued
     /// with its reason; one open already, in any window, is raised; a document joins the group
     /// of that window whose head is titled `group`, else is queued; anything else heads a new
-    /// group in the window. `None` only when there is no such window.
+    /// group in the window. A link raised or joined leaves the queue, wherever it waited. `None`,
+    /// and nothing done, when there is no such window or the link is blank.
     pub fn receive(
         &mut self,
         window: &str,
@@ -713,12 +742,16 @@ impl Workspace {
         store: &str,
     ) -> Option<Handed> {
         let wi = self.window_index(window)?;
+        if link.trim().is_empty() {
+            return None;
+        }
         let url = match parse_group_url(link) {
             Ok(url) => url,
-            Err(problem) => return Some(self.enqueue(wi, store, link, Some(problem))),
+            Err(problem) => return Some(self.enqueue(wi, link, Some(problem))),
         };
         if let Some(id) = self.open_doc(&identity(store, &url)) {
             self.activate(&id);
+            self.dismiss_incoming(&incoming_id(link));
             return Some(Handed::Raised(id));
         }
         if doc_key(store, &url).is_none() {
@@ -733,8 +766,11 @@ impl Workspace {
                 .map(|g| g.head.id.clone())
         });
         match head.and_then(|h| self.open_from(&h, &url)) {
-            Some(opened) => Some(Handed::Joined(opened_id(opened))),
-            None => Some(self.enqueue(wi, store, link, None)),
+            Some(opened) => {
+                self.dismiss_incoming(&incoming_id(link));
+                Some(Handed::Joined(opened_id(opened)))
+            }
+            None => Some(self.enqueue(wi, link, None)),
         }
     }
 
@@ -1817,8 +1853,9 @@ mod tests {
             w.receive(W, None, &again, "default"),
             Some(Handed::AlreadyQueued(a.clone()))
         );
+        // In another window, on another store: still the same document.
         assert_eq!(
-            w.receive("V", None, &again, "default"),
+            w.receive("V", None, &again, "work"),
             Some(Handed::AlreadyQueued(a))
         );
         assert_eq!(queue(&w, W), [doc(1).as_str(), doc(2).as_str()]);
@@ -1839,6 +1876,7 @@ mod tests {
     #[test]
     fn receive_raises_a_document_open_in_another_window() {
         let (mut w, h1) = fleet();
+        queued(w.receive(W, None, doc(1).as_str(), "default"));
         let m = id(w.open_from(&h1, &doc(1)).unwrap());
         w.activate(&h1);
         assert_eq!(
@@ -1847,6 +1885,7 @@ mod tests {
         );
         assert_eq!(active(&w), Some(m));
         assert!(queue(&w, "V").is_empty());
+        assert!(queue(&w, W).is_empty(), "its row went with the raise");
         // An open folder is raised too.
         assert_eq!(
             w.receive("V", None, folder(1).as_str(), "default"),
@@ -1858,12 +1897,22 @@ mod tests {
     #[test]
     fn receive_into_a_named_group_joins_it() {
         let (mut w, h1) = fleet();
-        let Some(Handed::Joined(m)) = w.receive(W, Some("Fleet"), doc(1).as_str(), "default")
-        else {
+        queued(w.receive("V", None, doc(1).as_str(), "default"));
+        let again = format!("{}?usp=x", doc(1));
+        let Some(Handed::Joined(m)) = w.receive(W, Some("Fleet"), &again, "default") else {
             panic!()
         };
         assert_eq!(member_ids(&w, &h1), vec![m.clone()]);
         assert_eq!(active(&w), Some(m));
+        assert!(queue(&w, W).is_empty());
+        assert!(queue(&w, "V").is_empty(), "its row went with the join");
+    }
+
+    #[test]
+    fn receive_ignores_a_blank_link() {
+        let (mut w, _) = fleet();
+        assert_eq!(w.receive(W, None, "", "default"), None);
+        assert_eq!(w.receive(W, Some("Fleet"), "  \n", "default"), None);
         assert!(queue(&w, W).is_empty());
     }
 
@@ -1983,10 +2032,11 @@ mod tests {
         w.rebase(Workspace::from_config(&cfg));
         assert_eq!(queue(&w, "C"), [doc(8).as_str()]);
         assert_eq!(queue(&w, "A"), [doc(7).as_str()]);
-        // On restore too: a saved queue for a window that is gone goes to the first.
+        // On restore too: a saved queue for a window that is gone is appended to the first's,
+        // even when its title sorts first, and every id is re-derived from its link.
         let mut fresh = Workspace::from_config(&two_windows());
         let saved = |link: &Url| Incoming {
-            id: format!("in-{}", &tab_id(&identity("default", link))[2..]),
+            id: "in-bogus".into(),
             link: link.to_string(),
             problem: None,
         };
@@ -1994,11 +2044,35 @@ mod tests {
             BTreeMap::new(),
             vec![],
             BTreeMap::from([
+                ("0 Gone".to_string(), vec![saved(&doc(9))]),
+                ("A".to_string(), vec![saved(&doc(7))]),
                 ("B".to_string(), vec![saved(&doc(8))]),
-                ("Gone".to_string(), vec![saved(&doc(9))]),
             ]),
         );
-        assert_eq!(queue(&fresh, "A"), [doc(9).as_str()]);
+        assert_eq!(queue(&fresh, "A"), [doc(7).as_str(), doc(9).as_str()]);
         assert_eq!(queue(&fresh, "B"), [doc(8).as_str()]);
+        assert!(fresh
+            .windows
+            .iter()
+            .flat_map(|w| &w.incoming)
+            .all(|i| i.id == incoming_id(&i.link)));
+    }
+
+    #[test]
+    fn a_config_with_no_windows_keeps_the_queue_for_the_next_window() {
+        let mut w = Workspace::from_config(&two_windows());
+        queued(w.receive("A", None, doc(7).as_str(), "default"));
+        queued(w.receive("B", None, doc(8).as_str(), "default"));
+        w.rebase(Workspace::from_config(&[]));
+        assert!(w.windows.is_empty());
+        let held = crate::session::Session::of(&w).incoming;
+        assert_eq!(held.len(), 2, "a save in between keeps them: {held:?}");
+        // Restored onto a config that still has none, they are still held.
+        let mut none = Workspace::from_config(&[]);
+        none.restore(BTreeMap::new(), vec![], held.clone());
+        assert_eq!(none.stray, held);
+        w.rebase(Workspace::from_config(&[window("C")]));
+        assert_eq!(queue(&w, "C"), [doc(7).as_str(), doc(8).as_str()]);
+        assert!(w.stray.is_empty());
     }
 }

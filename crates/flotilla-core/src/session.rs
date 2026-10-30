@@ -1,6 +1,7 @@
 //! Persisting the run state: one JSON file the shell points us at, holding each window's active
-//! tab and Incoming queue, and Recent. The windows and groups themselves live in the config. Keys and ids in it are
-//! derived data, re-derived when applied (`Workspace::restore`), never trusted from disk.
+//! tab and Incoming queue, and Recent. The windows and groups themselves live in the config. Keys
+//! and ids in it are derived data, re-derived when applied (`Workspace::restore`), never trusted
+//! from disk.
 
 use crate::model::{Group, Incoming, TabId, Workspace};
 use serde::{Deserialize, Serialize};
@@ -14,7 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub const SESSION_VERSION: u32 = 2;
 
 /// What a session file keeps: each window's active tab and non-empty Incoming queue by window
-/// title, and Recent.
+/// title (the workspace's `stray` queues among them), and Recent.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Session {
     pub active: BTreeMap<String, TabId>,
@@ -37,6 +38,7 @@ impl Session {
                 .iter()
                 .filter(|w| !w.incoming.is_empty())
                 .map(|w| (w.title.clone(), w.incoming.clone()))
+                .chain(ws.stray.clone())
                 .collect(),
         }
     }
