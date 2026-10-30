@@ -34,6 +34,10 @@ tauri-plugin-process = "2"
 shell-core = { git = "https://github.com/Lockyc/shell-core", rev = "2fc995564fa51dee623661b2ad656b4c77e7c340", features = ["runtime"] }
 flotilla-core = { path = "../crates/flotilla-core" }
 dirs = "5"
+url = "2"
+
+[dev-dependencies]
+tempfile = "3"
 
 # The chrome-core / shell-core [patch] local-dev overrides live in the workspace-root Cargo.toml
 # (../Cargo.toml) — a [patch] must sit in the workspace root, not a member manifest.

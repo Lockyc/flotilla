@@ -1,5 +1,7 @@
 //! flotilla's Tauri shell. Currently an empty workspace window: the shared chrome with no tabs.
 
+mod sidebar;
+
 use serde::Serialize;
 use tauri::{Emitter, Manager, TitleBarStyle, WebviewUrl};
 
