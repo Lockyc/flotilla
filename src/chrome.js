@@ -61,6 +61,10 @@ async function mountChrome() {
       onSelect(id, { wasActive } = {}) {
         invoke(wasActive ? "home_tab" : "select_tab", { id }).catch((err) => sb.setError(String(err)));
       },
+      // The live dot: close the tab's webview, keep its row.
+      onUnload(id) {
+        invoke("unload_tab", { id }).catch((err) => sb.setError(String(err)));
+      },
       onToggleGroup(group, collapsed) {
         invoke("toggle_group", { head: group, collapsed }).catch(() => {});
       },
@@ -101,8 +105,8 @@ new ResizeObserver(() => reportRect()).observe(document.getElementById("content-
 
 listen("workspace", (e) => sb && identity && sb.update(windowDto(e.payload)));
 listen("notice", (e) => sb && sb.setError(e.payload));
-// Every row is reachable: a restored tab with no webview yet is created when stepped to.
-listen("nav-tab", (e) => sb && sb.selectByOffset(e.payload, { liveOnly: false }));
+// Cycling walks loaded tabs only (the live dot); a cold row loads when clicked.
+listen("nav-tab", (e) => sb && sb.selectByOffset(e.payload, { liveOnly: true }));
 listen("jump-tab", (e) => sb && sb.selectByIndex(e.payload));
 listen("find-in-sidebar", () => sb && sb.focusSearch());
 listen("pointer-away", () => sb && sb.pointerAway());

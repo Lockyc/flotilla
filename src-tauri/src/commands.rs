@@ -41,7 +41,11 @@ pub fn get_workspace(
     state: State<AppState>,
 ) -> Result<serde_json::Value, String> {
     require_chrome(&webview)?;
-    Ok(crate::sidebar::sidebar_dto(&state.ws.lock().unwrap()))
+    let ws = state.ws.lock().unwrap();
+    Ok(crate::sidebar::sidebar_dto(
+        &ws,
+        &state.created.lock().unwrap(),
+    ))
 }
 
 /// What the error bar shows at launch (a quarantined or unpersistable session).
@@ -60,7 +64,43 @@ pub fn select_tab(id: TabId, webview: Webview, state: State<AppState>) -> Result
         }
         ws.activate(&id);
     }
+    // An explicit selection is a fresh attempt at a tab whose webview failed to build.
+    state.failed.lock().unwrap().remove(&id);
     tabs::changed(webview.app_handle());
+    Ok(())
+}
+
+/// The row dot's Unload: closes tab `id`'s webview and keeps the tab. If it was active, the nearest
+/// live visible tab takes over ([`tabs::after_unload`]), else nothing is shown; no cold tab wakes.
+#[tauri::command]
+pub fn unload_tab(id: TabId, webview: Webview, state: State<AppState>) -> Result<(), String> {
+    require_chrome(&webview)?;
+    let window = webview.window();
+    if let Some(wv) = window
+        .get_webview(&tabs::label(&id))
+        .filter(|wv| wv.window().label() == window.label())
+    {
+        shell_core::web::content::close_content_webview(&wv);
+    }
+    let active_moved = {
+        let mut ws = state.ws.lock().unwrap();
+        let mut created = state.created.lock().unwrap();
+        let was_active = ws.active.as_ref() == Some(&id);
+        let next = tabs::after_unload(&ws, &created, &id);
+        created.remove(&id);
+        if was_active {
+            ws.active = None;
+            if let Some(n) = next {
+                ws.activate(&n);
+            }
+        }
+        was_active
+    };
+    if active_moved {
+        tabs::changed(webview.app_handle());
+    } else {
+        tabs::sync(webview.app_handle());
+    }
     Ok(())
 }
 

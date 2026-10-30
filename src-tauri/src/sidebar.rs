@@ -1,13 +1,14 @@
 //! The chrome-core DTO for the workspace: what the sidebar renders.
 
-use flotilla_core::model::Workspace;
+use flotilla_core::model::{TabId, Workspace};
 use serde_json::{json, Value};
+use std::collections::HashSet;
 
 /// The tab-list part of chrome-core's window DTO (`tabs`, `active`, `collapsed`); `chrome.js` adds
 /// the window identity fields. Each group is a run of rows keyed by its head's id, the head row
-/// first (`head: true`) and named by the head's title. `live` is false on every row: flotilla has
-/// no unload, so the row dot stays inert.
-pub fn sidebar_dto(ws: &Workspace) -> Value {
+/// first (`head: true`) and named by the head's title. `live` is whether the tab's webview exists
+/// (`created`): the row's dot then offers Unload, and tab cycling skips cold rows.
+pub fn sidebar_dto(ws: &Workspace, created: &HashSet<TabId>) -> Value {
     let tabs: Vec<Value> = ws
         .groups
         .iter()
@@ -22,7 +23,7 @@ pub fn sidebar_dto(ws: &Workspace) -> Value {
                         "groupName": g.head.title,
                         "head": head,
                         "detached": t.detached,
-                        "live": false,
+                        "live": created.contains(&t.id),
                         "attention": null,
                         "presence": null,
                         "killable": false,
@@ -78,7 +79,7 @@ mod tests {
         ws.set_collapsed(&h1, true);
         ws.set_detached(&m1, true);
 
-        let dto = sidebar_dto(&ws);
+        let dto = sidebar_dto(&ws, &HashSet::from([h2.clone()]));
         assert_eq!(dto["active"], json!(h2));
         assert_eq!(dto["collapsed"], json!([h1]));
         let rows: Vec<(String, String, String, bool, bool)> = dto["tabs"]
@@ -107,11 +108,19 @@ mod tests {
             ]
         );
         assert_eq!(dto["tabs"][1]["title"], json!("Budget"));
+        // Only h2 has a webview.
+        let live: Vec<bool> = dto["tabs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["live"].as_bool().unwrap())
+            .collect();
+        assert_eq!(live, [false, false, true]);
     }
 
     #[test]
     fn empty_workspace_has_no_rows_and_no_active() {
-        let dto = sidebar_dto(&Workspace::default());
+        let dto = sidebar_dto(&Workspace::default(), &HashSet::new());
         assert_eq!(dto["active"], Value::Null);
         assert_eq!(dto["collapsed"], json!([]));
         assert_eq!(dto["tabs"], json!([]));

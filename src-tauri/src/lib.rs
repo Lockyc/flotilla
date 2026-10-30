@@ -71,6 +71,7 @@ fn load_state(app: &tauri::App) -> state::AppState {
             FIRST_RUN_SIZE.1,
         )),
         created: Default::default(),
+        failed: Default::default(),
         persist,
         notice,
     }
@@ -165,6 +166,7 @@ pub fn run() {
             commands::toggle_group,
             commands::new_group,
             commands::home_tab,
+            commands::unload_tab,
             commands::set_hole_rect,
         ])
         .setup(|app| {

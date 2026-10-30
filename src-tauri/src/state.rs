@@ -16,6 +16,9 @@ pub struct AppState {
     /// Tabs whose content webview exists in the main window. Restored tabs start absent and are
     /// created when first shown.
     pub created: Mutex<HashSet<TabId>>,
+    /// Tabs whose webview could not be created; not retried (or re-announced) until the tab is
+    /// next selected. Lock order: `ws`, then `created`, then `failed`.
+    pub failed: Mutex<HashSet<TabId>>,
     pub persist: Persist,
     /// The launch-time notice for the error bar (a quarantined or unpersistable session).
     pub notice: Option<String>,
