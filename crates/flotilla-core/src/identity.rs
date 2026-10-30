@@ -70,6 +70,9 @@ fn valid_file_id(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
+/// The `DocKey` provider the model gives non-document heads; no recogniser may take this name.
+pub const HEAD_PROVIDER: &str = "head";
+
 const RECOGNISERS: &[&dyn Recogniser] = &[&Google];
 
 /// The key of the document `url` opens in `store`, from the first recogniser that knows it.
@@ -188,6 +191,11 @@ mod tests {
 
     fn head(s: &str) -> String {
         head_key(&Url::parse(s).unwrap())
+    }
+
+    #[test]
+    fn no_recogniser_takes_the_head_provider_name() {
+        assert!(RECOGNISERS.iter().all(|r| r.name() != HEAD_PROVIDER));
     }
 
     #[test]

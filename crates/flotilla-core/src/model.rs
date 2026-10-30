@@ -6,7 +6,7 @@
 //! raises the existing tab. The registry is not a separate index: it is derived by scanning the
 //! tabs, so it cannot drift from them.
 
-use crate::identity::{doc_key, head_key, DocKey};
+use crate::identity::{doc_key, head_key, DocKey, HEAD_PROVIDER};
 use serde::{Deserialize, Serialize};
 use shell_core::tabs::pick_live_neighbour;
 use url::Url;
@@ -17,7 +17,7 @@ use url::Url;
 fn identity(store: &str, url: &Url) -> DocKey {
     doc_key(store, url).unwrap_or_else(|| DocKey {
         store: store.to_string(),
-        provider: "head".to_string(),
+        provider: HEAD_PROVIDER.to_string(),
         id: head_key(url),
     })
 }
