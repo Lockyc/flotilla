@@ -7,6 +7,7 @@ use crate::state::AppState;
 use flotilla_core::model::{SetHomeBlock, TabId, Workspace};
 use shell_core::menu::WindowEntry;
 use shell_core::windows::WindowSet;
+use std::collections::HashSet;
 use tauri::menu::{
     IsMenuItem, Menu, MenuBuilder, MenuItem, MenuItemBuilder, MenuItemKind, PredefinedMenuItem,
     Submenu, SubmenuBuilder,
@@ -37,6 +38,7 @@ pub struct MenuState {
     /// The menu bar's ⌘W.
     pub unload_tab: Item,
     pub remove_tab: Item,
+    pub unload_group: Item,
     pub close_group: Item,
     pub recent: Item,
     /// The Recent groups' names, newest first; position is the `recent` index.
@@ -57,6 +59,8 @@ pub enum Action {
     /// Move the tab to the group headed by the second id.
     MoveTo(Option<TabId>, TabId),
     RemoveTab(Option<TabId>),
+    /// Unload every loaded tab of the tab's group, its head included.
+    UnloadGroup(Option<TabId>),
     CloseGroup(Option<TabId>),
     /// Reopen `recent[i]`.
     Reopen(usize),
@@ -79,6 +83,7 @@ pub fn id(a: &Action) -> String {
         Action::MakeOwnGroup(t) => ("make_own_group".into(), t.as_ref()),
         Action::MoveTo(t, head) => (format!("move:{head}"), t.as_ref()),
         Action::RemoveTab(t) => ("remove_tab".into(), t.as_ref()),
+        Action::UnloadGroup(t) => ("unload_group".into(), t.as_ref()),
         Action::CloseGroup(t) => ("close_group".into(), t.as_ref()),
         Action::Reopen(i) => (format!("recent:{i}"), None),
         Action::ClearRecent => ("clear_recent".into(), None),
@@ -108,6 +113,7 @@ pub fn action(id: &str) -> Option<Action> {
         ("make_own_group", None, t) => Action::MakeOwnGroup(t),
         ("move", Some(head), t) => Action::MoveTo(t, head.to_string()),
         ("remove_tab", None, t) => Action::RemoveTab(t),
+        ("unload_group", None, t) => Action::UnloadGroup(t),
         ("close_group", None, t) => Action::CloseGroup(t),
         ("recent", Some(i), None) => Action::Reopen(i.parse().ok()?),
         ("clear_recent", None, None) => Action::ClearRecent,
@@ -120,6 +126,21 @@ const NO_TAB: &str = "No tab selected";
 const IS_HEAD: &str = "Already a group's head";
 const NO_OTHER_GROUPS: &str = "No other groups";
 const NOTHING_CLOSED: &str = "Nothing closed yet";
+const NOTHING_LOADED: &str = "Nothing loaded";
+
+/// The tabs of `id`'s group (head first) that Unload Group closes: those with a webview in
+/// `live`, a popped-out tab's excepted, since its window shows it.
+pub fn group_loaded(ws: &Workspace, live: &HashSet<TabId>, id: &TabId) -> Vec<TabId> {
+    ws.group_of(id)
+        .map(|g| {
+            std::iter::once(&g.head)
+                .chain(&g.members)
+                .filter(|t| !t.detached && live.contains(&t.id))
+                .map(|t| t.id.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
 
 fn item(label: &str, blocked: Option<&str>) -> Item {
     match blocked {
@@ -157,9 +178,14 @@ pub fn set_home_refusal(block: SetHomeBlock) -> String {
 
 /// The Group menu for `tab` (the focused window's active tab for the menu bar, the clicked row for
 /// its context menu), whose webview shows `current` (`None`: nothing loaded). A tab that is not
-/// open counts as none. A member moves to any other group: its own window's by name, another
-/// window's as "name — window".
-pub fn menu_state_for(ws: &Workspace, current: Option<&Url>, tab: Option<&TabId>) -> MenuState {
+/// open counts as none. `live` is every tab with a webview. A member moves to any other group: its
+/// own window's by name, another window's as "name — window".
+pub fn menu_state_for(
+    ws: &Workspace,
+    live: &HashSet<TabId>,
+    current: Option<&Url>,
+    tab: Option<&TabId>,
+) -> MenuState {
     let found = tab.and_then(|id| ws.find(id));
     let no_tab = found.is_none().then_some(NO_TAB);
     let set_home_blocked = no_tab.or_else(|| {
@@ -198,6 +224,13 @@ pub fn menu_state_for(ws: &Workspace, current: Option<&Url>, tab: Option<&TabId>
         // ⌘W also docks a focused pop-out; disabled, it would swallow the shortcut there.
         unload_tab: item("Unload Tab", no_tab.filter(|_| !any_detached(ws))),
         remove_tab: item("Remove Tab", no_tab),
+        unload_group: item(
+            "Unload Group",
+            no_tab.or_else(|| {
+                tab.filter(|id| group_loaded(ws, live, id).is_empty())
+                    .map(|_| NOTHING_LOADED)
+            }),
+        ),
         close_group: item("Close Group", no_tab),
         recent: item("Recent", ws.recent.is_empty().then_some(NOTHING_CLOSED)),
         recent_entries: ws.recent.iter().map(|g| g.head.title.clone()).collect(),
@@ -247,6 +280,11 @@ fn group_items(
         tab_items.push(MenuItemKind::MenuItem(spine.clone()));
     }
     tab_items.push(entry(Action::RemoveTab(t.clone()), &ms.remove_tab, None)?);
+    tab_items.push(entry(
+        Action::UnloadGroup(t.clone()),
+        &ms.unload_group,
+        None,
+    )?);
     tab_items.push(entry(
         Action::CloseGroup(t.clone()),
         &ms.close_group,
@@ -412,12 +450,13 @@ fn focused_label(app: &AppHandle) -> Option<String> {
 /// Window menu's rows. `current` is the page `tab` shows.
 pub fn key_for(
     ws: &Workspace,
+    live: &HashSet<TabId>,
     tab: Option<&TabId>,
     current: Option<&Url>,
     windows: &[WindowEntry],
 ) -> MenuKey {
     MenuKey {
-        group: menu_state_for(ws, current, tab),
+        group: menu_state_for(ws, live, current, tab),
         windows: windows
             .iter()
             .map(|e| (e.id.clone(), e.title.clone(), e.open))
@@ -441,8 +480,10 @@ pub fn refresh(app: &AppHandle) {
     let current = tab
         .as_ref()
         .and_then(|id| crate::tabs::current_url(app, id));
+    let live = crate::tabs::live(app);
     let key = key_for(
         &state.ws.lock().unwrap(),
+        &live,
         tab.as_ref(),
         current.as_ref(),
         &windows,
@@ -518,6 +559,12 @@ pub fn handle(app: &AppHandle, menu_id: &str) -> bool {
                 ws.close_tab(&t);
             }
         }),
+        Action::UnloadGroup(t) => {
+            let t = pick(t, &app.state::<AppState>().ws.lock().unwrap());
+            if let Some(t) = t {
+                commands::unload_group(app, &t);
+            }
+        }
         Action::CloseGroup(t) => mutate(app, |ws| {
             let head = pick(t, ws)
                 .and_then(|t| ws.group_of(&t))
@@ -585,6 +632,39 @@ mod tests {
         h
     }
 
+    /// No tab has a webview.
+    fn cold() -> HashSet<TabId> {
+        HashSet::new()
+    }
+
+    #[test]
+    fn unload_group_needs_a_loaded_tab_in_the_group_and_skips_pop_outs() {
+        let (mut ws, h, m) = one_group();
+        let w = add_group(&mut ws, "f2", "Website");
+        let live = |ids: &[&TabId]| ids.iter().map(|&i| i.clone()).collect::<HashSet<_>>();
+        // Only another group is loaded: nothing here to unload, from head or member.
+        for tab in [&h, &m] {
+            assert_eq!(
+                menu_state_for(&ws, &live(&[&w]), None, Some(tab)).unload_group,
+                off("Unload Group — Nothing loaded")
+            );
+        }
+        // A loaded member offers it on the head's row too, and both go.
+        let both = live(&[&h, &m, &w]);
+        assert_eq!(
+            menu_state_for(&ws, &both, None, Some(&h)).unload_group,
+            on("Unload Group")
+        );
+        assert_eq!(group_loaded(&ws, &both, &m), [h.clone(), m.clone()]);
+        // A popped-out member stays in its window.
+        ws.set_detached(&m, true);
+        assert_eq!(group_loaded(&ws, &both, &h), [h.clone()]);
+        assert_eq!(
+            menu_state_for(&ws, &live(&[&m]), None, Some(&h)).unload_group,
+            off("Unload Group — Nothing loaded")
+        );
+    }
+
     fn on(label: &str) -> Item {
         Item {
             label: label.into(),
@@ -611,6 +691,8 @@ mod tests {
             Action::MoveTo(None, "t-1".into()),
             Action::MoveTo(t(), "t-1".into()),
             Action::RemoveTab(t()),
+            Action::UnloadGroup(None),
+            Action::UnloadGroup(t()),
             Action::CloseGroup(None),
             Action::CloseGroup(t()),
             Action::Reopen(2),
@@ -634,7 +716,7 @@ mod tests {
     fn a_head_cannot_become_its_own_group_or_move() {
         let (mut ws, h, _) = one_group();
         add_group(&mut ws, "f2", "Website");
-        let s = menu_state_for(&ws, None, Some(&h));
+        let s = menu_state_for(&ws, &cold(), None, Some(&h));
         assert_eq!(s.home, on("Home"));
         assert_eq!(
             s.make_own_group,
@@ -651,7 +733,7 @@ mod tests {
         let (mut ws, h, m) = one_group();
         let w = add_group(&mut ws, "f2", "Website");
         let x = add_group(&mut ws, "f3", "Grants");
-        let s = menu_state_for(&ws, None, Some(&m));
+        let s = menu_state_for(&ws, &cold(), None, Some(&m));
         assert_eq!(s.make_own_group, on("Make Own Group"));
         assert_eq!(s.move_to, on("Move to Group"));
         // Its own group is not a destination.
@@ -665,7 +747,7 @@ mod tests {
     #[test]
     fn a_single_group_offers_nowhere_to_move() {
         let (ws, _, m) = one_group();
-        let s = menu_state_for(&ws, None, Some(&m));
+        let s = menu_state_for(&ws, &cold(), None, Some(&m));
         assert_eq!(s.make_own_group, on("Make Own Group"));
         assert_eq!(s.move_to, off("Move to Group — No other groups"));
         assert!(s.move_targets.is_empty());
@@ -693,7 +775,7 @@ mod tests {
             panic!()
         };
         ws.set_title(&b, "Newsletters");
-        let s = menu_state_for(&ws, None, Some(&m));
+        let s = menu_state_for(&ws, &cold(), None, Some(&m));
         assert_eq!(s.move_targets, vec![(b, "Newsletters — B".to_string())]);
         assert_eq!(s.move_to, on("Move to Group"));
     }
@@ -703,10 +785,16 @@ mod tests {
     #[test]
     fn rename_is_offered_for_heads_and_documents() {
         let (ws, h, m) = one_group();
-        assert_eq!(menu_state_for(&ws, None, Some(&h)).rename, on("Rename…"));
-        assert_eq!(menu_state_for(&ws, None, Some(&m)).rename, on("Rename…"));
         assert_eq!(
-            menu_state_for(&ws, None, None).rename,
+            menu_state_for(&ws, &cold(), None, Some(&h)).rename,
+            on("Rename…")
+        );
+        assert_eq!(
+            menu_state_for(&ws, &cold(), None, Some(&m)).rename,
+            on("Rename…")
+        );
+        assert_eq!(
+            menu_state_for(&ws, &cold(), None, None).rename,
             off("Rename… — No tab selected")
         );
     }
@@ -723,14 +811,14 @@ mod tests {
             (&h, None),
         ] {
             assert_eq!(
-                menu_state_for(&ws, current.as_ref(), Some(tab)).set_home,
+                menu_state_for(&ws, &cold(), current.as_ref(), Some(tab)).set_home,
                 off("Set Home to Current Page — Already at its home")
             );
         }
         // Browsed into a subfolder: the head can make it home.
         let sub = url("https://drive.google.com/drive/folders/sub");
         assert_eq!(
-            menu_state_for(&ws, Some(&sub), Some(&h)).set_home,
+            menu_state_for(&ws, &cold(), Some(&sub), Some(&h)).set_home,
             on("Set Home to Current Page")
         );
     }
@@ -740,7 +828,7 @@ mod tests {
         let (ws, h, _) = one_group();
         for page in ["about:blank", "file:///etc/hosts", "data:text/html,x"] {
             assert_eq!(
-                menu_state_for(&ws, Some(&url(page)), Some(&h)).set_home,
+                menu_state_for(&ws, &cold(), Some(&url(page)), Some(&h)).set_home,
                 off("Set Home to Current Page — Not a web page"),
                 "{page}"
             );
@@ -753,13 +841,13 @@ mod tests {
         add_group(&mut ws, "f2", "Website");
         // The head browsed to the member's document: it is open in another tab.
         assert_eq!(
-            menu_state_for(&ws, Some(&url(DOC1)), Some(&h)).set_home,
+            menu_state_for(&ws, &cold(), Some(&url(DOC1)), Some(&h)).set_home,
             off("Set Home to Current Page — Open in another tab")
         );
         // A group head's folder, likewise.
         let f2 = url("https://drive.google.com/drive/folders/f2");
         assert_eq!(
-            menu_state_for(&ws, Some(&f2), Some(&m)).set_home,
+            menu_state_for(&ws, &cold(), Some(&f2), Some(&m)).set_home,
             off("Set Home to Current Page — Open in another tab")
         );
     }
@@ -798,14 +886,14 @@ mod tests {
         // A in front, its member active: the member's items.
         let tab_a = menu_tab(&ws, Some("a"), Some("A"));
         assert_eq!(tab_a.as_ref(), Some(&m));
-        let in_a = key_for(&ws, tab_a.as_ref(), None, &entries);
-        assert_eq!(in_a.group, menu_state_for(&ws, None, Some(&m)));
+        let in_a = key_for(&ws, &cold(), tab_a.as_ref(), None, &entries);
+        assert_eq!(in_a.group, menu_state_for(&ws, &cold(), None, Some(&m)));
         assert_eq!(in_a.group.make_own_group, on("Make Own Group"));
         // B in front, nothing active there: no tab, so nothing acts on A's member.
         let tab_b = menu_tab(&ws, Some("b"), Some("B"));
         assert_eq!(tab_b, None);
-        let in_b = key_for(&ws, tab_b.as_ref(), None, &entries);
-        assert_eq!(in_b.group, menu_state_for(&ws, None, None));
+        let in_b = key_for(&ws, &cold(), tab_b.as_ref(), None, &entries);
+        assert_eq!(in_b.group, menu_state_for(&ws, &cold(), None, None));
         assert_ne!(in_a, in_b, "a focus change rebuilds the menu bar");
         assert_eq!(in_b.windows.len(), 2);
         // A focused pop-out: its own tab, not its window's active one.
@@ -818,14 +906,14 @@ mod tests {
     #[test]
     fn recent_lists_closed_groups_newest_first() {
         let (mut ws, h, _) = one_group();
-        let s = menu_state_for(&ws, None, Some(&h));
+        let s = menu_state_for(&ws, &cold(), None, Some(&h));
         assert_eq!(s.recent, off("Recent — Nothing closed yet"));
         assert!(s.recent_entries.is_empty());
 
         let w = add_group(&mut ws, "f2", "Website");
         ws.close_group(&h);
         ws.close_group(&w);
-        let s = menu_state_for(&ws, None, None);
+        let s = menu_state_for(&ws, &cold(), None, None);
         assert_eq!(s.recent, on("Recent"));
         assert_eq!(s.recent_entries, ["Website", "Auction"]);
     }
@@ -835,14 +923,15 @@ mod tests {
         let (mut ws, h, _) = one_group();
         ws.close_group(&h);
         for s in [
-            menu_state_for(&ws, None, None),
-            menu_state_for(&ws, None, Some(&"t-99".to_string())),
+            menu_state_for(&ws, &cold(), None, None),
+            menu_state_for(&ws, &cold(), None, Some(&"t-99".to_string())),
         ] {
             assert_eq!(s.home, off("Home — No tab selected"));
             assert_eq!(s.make_own_group, off("Make Own Group — No tab selected"));
             assert_eq!(s.move_to, off("Move to Group — No tab selected"));
             assert_eq!(s.unload_tab, off("Unload Tab — No tab selected"));
             assert_eq!(s.remove_tab, off("Remove Tab — No tab selected"));
+            assert_eq!(s.unload_group, off("Unload Group — No tab selected"));
             assert_eq!(s.close_group, off("Close Group — No tab selected"));
             assert_eq!(s.recent, on("Recent"));
         }
@@ -855,13 +944,13 @@ mod tests {
         let (mut ws, _, m) = one_group();
         ws.set_detached(&m, true);
         ws.windows[0].active = None;
-        let s = menu_state_for(&ws, None, None);
+        let s = menu_state_for(&ws, &cold(), None, None);
         assert_eq!(s.unload_tab, on("Unload Tab"));
         assert_eq!(s.remove_tab, off("Remove Tab — No tab selected"));
         assert_eq!(s.home, off("Home — No tab selected"));
         ws.set_detached(&m, false);
         assert_eq!(
-            menu_state_for(&ws, None, None).unload_tab,
+            menu_state_for(&ws, &cold(), None, None).unload_tab,
             off("Unload Tab — No tab selected")
         );
     }
@@ -872,19 +961,19 @@ mod tests {
         let mut last = None;
         assert!(needs_rebuild(
             &mut last,
-            menu_state_for(&ws, None, Some(&h))
+            menu_state_for(&ws, &cold(), None, Some(&h))
         ));
         // A push that changes nothing the menu shows (a member's retitle) rebuilds nothing.
         ws.set_title(&m, "Budget");
         assert!(!needs_rebuild(
             &mut last,
-            menu_state_for(&ws, None, Some(&h))
+            menu_state_for(&ws, &cold(), None, Some(&h))
         ));
         // Selecting the member enables Make Own Group: rebuilt.
         assert!(needs_rebuild(
             &mut last,
-            menu_state_for(&ws, None, Some(&m))
+            menu_state_for(&ws, &cold(), None, Some(&m))
         ));
-        assert_eq!(last, Some(menu_state_for(&ws, None, Some(&m))));
+        assert_eq!(last, Some(menu_state_for(&ws, &cold(), None, Some(&m))));
     }
 }

@@ -123,27 +123,55 @@ pub fn unload_active_tab(app: &AppHandle, label: &str) {
     }
 }
 
-/// Closes tab `id`'s webview in `window` and keeps the tab. If it was active, the nearest live
-/// visible tab takes over ([`tabs::after_unload`]), else nothing is shown; no cold tab wakes.
+/// The row menu's and Group menu's Unload Group: unloads every loaded tab of `id`'s group
+/// ([`crate::menu::group_loaded`]), keeping them all.
+pub fn unload_group(app: &AppHandle, id: &TabId) {
+    let Some(window) = window_label_of(app, id).and_then(|l| app.get_window(&l)) else {
+        return;
+    };
+    let ids = {
+        let state = app.state::<AppState>();
+        let ws = state.ws.lock().unwrap();
+        let live = tabs::live_in(&state.created.lock().unwrap());
+        crate::menu::group_loaded(&ws, &live, id)
+    };
+    unload_all(app, &window, &ids);
+}
+
+/// Closes tab `id`'s webview in `window` and keeps the tab.
 fn unload(app: &AppHandle, window: &tauri::Window, id: &TabId) {
+    unload_all(app, window, std::slice::from_ref(id));
+}
+
+/// Closes the webviews of `ids` in `window` and keeps the tabs. If one was active, the nearest
+/// live visible tab outside `ids` takes over ([`tabs::after_unload`]), else nothing is shown; no
+/// cold tab wakes.
+fn unload_all(app: &AppHandle, window: &tauri::Window, ids: &[TabId]) {
     let state = app.state::<AppState>();
-    if let Some(wv) = tabs::own_webview(window, id) {
-        shell_core::web::content::close_content_webview(&wv);
+    for id in ids {
+        if let Some(wv) = tabs::own_webview(window, id) {
+            shell_core::web::content::close_content_webview(&wv);
+        }
     }
     let active_moved = {
         let mut ws = state.ws.lock().unwrap();
         let mut created = state.created.lock().unwrap();
         let created = created.entry(window.label().to_string()).or_default();
-        let was_active = ws.is_active(id);
-        let next = tabs::after_unload(&ws, created, id);
-        created.remove(id);
-        if was_active {
+        let active = ids.iter().find(|id| ws.is_active(id)).cloned();
+        for id in ids {
+            if Some(id) != active.as_ref() {
+                created.remove(id);
+            }
+        }
+        if let Some(id) = &active {
+            let next = tabs::after_unload(&ws, created, id);
+            created.remove(id);
             ws.deactivate(id);
             if let Some(n) = next {
                 ws.activate(&n);
             }
         }
-        was_active
+        active.is_some()
     };
     if active_moved {
         tabs::changed(app);
@@ -418,7 +446,8 @@ pub fn row_menu(
         if ws.find(&id).is_none() {
             return Err("unknown tab".into());
         }
-        crate::menu::menu_state_for(&ws, current.as_ref(), Some(&id))
+        let live = tabs::live_in(&state.created.lock().unwrap());
+        crate::menu::menu_state_for(&ws, &live, current.as_ref(), Some(&id))
     };
     let menu = crate::menu::row_menu(webview.app_handle(), &ms, &id).map_err(|e| e.to_string())?;
     webview

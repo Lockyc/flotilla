@@ -14,7 +14,7 @@ use shell_core::web::content::{
     close_content_webview, create_content_webview, ContentHooks, ContentSpec, LinkOrigin,
 };
 use shell_core::windows::WindowSet;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, Url, Window};
 
@@ -79,6 +79,16 @@ pub fn active_in(ws: &Workspace, title: &str) -> Option<TabId> {
 /// The title of the workspace window holding tab `id`.
 pub fn window_title_of(ws: &Workspace, id: &TabId) -> Option<String> {
     ws.find(id).map(|(wi, _, _)| ws.windows[wi].title.clone())
+}
+
+/// Every tab with a webview, across windows: `created`'s sets (tab ids are unique across windows).
+pub fn live_in(created: &HashMap<String, HashSet<TabId>>) -> HashSet<TabId> {
+    created.values().flatten().cloned().collect()
+}
+
+/// [`live_in`] of the app's state.
+pub fn live(app: &AppHandle) -> HashSet<TabId> {
+    live_in(&app.state::<AppState>().created.lock().unwrap())
 }
 
 /// The tab to activate after unloading `id`: shell-core's `pick_live_neighbour` over the sidebar's
