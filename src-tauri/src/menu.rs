@@ -562,7 +562,7 @@ pub fn handle(app: &AppHandle, menu_id: &str) -> bool {
         Action::UnloadGroup(t) => {
             let t = pick(t, &app.state::<AppState>().ws.lock().unwrap());
             if let Some(t) = t {
-                commands::unload_group(app, &t);
+                commands::unload_group_of(app, &t);
             }
         }
         Action::CloseGroup(t) => mutate(app, |ws| {

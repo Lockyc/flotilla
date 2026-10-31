@@ -123,9 +123,20 @@ pub fn unload_active_tab(app: &AppHandle, label: &str) {
     }
 }
 
-/// The row menu's and Group menu's Unload Group: unloads every loaded tab of `id`'s group
-/// ([`crate::menu::group_loaded`]), keeping them all.
-pub fn unload_group(app: &AppHandle, id: &TabId) {
+/// A head row's unload-group button.
+#[tauri::command]
+pub fn unload_group(head: TabId, webview: Webview, state: State<AppState>) -> Result<(), String> {
+    require_chrome(&webview)?;
+    if state.ws.lock().unwrap().find(&head).is_none() {
+        return Err("unknown tab".into());
+    }
+    unload_group_of(webview.app_handle(), &head);
+    Ok(())
+}
+
+/// Unload Group (the head's button, the row menu, the Group menu): unloads every loaded tab of
+/// `id`'s group ([`crate::menu::group_loaded`]), keeping them all.
+pub fn unload_group_of(app: &AppHandle, id: &TabId) {
     let Some(window) = window_label_of(app, id).and_then(|l| app.get_window(&l)) else {
         return;
     };

@@ -327,6 +327,7 @@ pub fn run() {
             commands::nav_back,
             commands::nav_forward,
             commands::unload_tab,
+            commands::unload_group,
             commands::remove_tab,
             commands::pop_out_tab,
             commands::pop_in_tab,
