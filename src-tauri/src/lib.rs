@@ -385,6 +385,22 @@ pub fn run() {
             let nav_handle = handle.clone();
             shell_core::mouse_nav::install(move || tabs::focused_webview(&nav_handle));
 
+            // A clicked banner (a finished download) selects the tab it came from; its window is
+            // already raised.
+            shell_core::banner::init(handle, |app, _window, label| {
+                let Some((_, id)) = tabs::tab_of(label) else {
+                    return;
+                };
+                let app = app.clone();
+                crate::defer(&app.clone(), move || {
+                    let state = app.state::<state::AppState>();
+                    let open = state.ws.lock().unwrap().find(&id).is_some();
+                    if open {
+                        commands::mutate(&app, |ws| ws.activate(&id));
+                    }
+                });
+            });
+
             // Row and banner context menus' events arrive here too.
             app.on_menu_event(move |app, event| {
                 let id = event.id().as_ref();

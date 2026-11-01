@@ -408,7 +408,6 @@ fn hooks() -> ContentHooks {
             let title = title.to_string();
             crate::defer(&app.clone(), move || retitle(&app, &label, &title));
         })),
-        on_download: None,
     }
 }
 

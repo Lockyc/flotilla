@@ -20,7 +20,7 @@ chrome-core = { git = "https://github.com/Lockyc/chrome-core", rev = "f5a4da5118
 # Shared release tooling + build_stamp. build.rs materializes scripts/*.sh (git-ignored) and stamps
 # BUILD_GIT_SHA/BUILD_DATE. default-features=false keeps the build-dep zero-tauri (resolver 2 keeps
 # it separate from the runtime-featured [dependencies] entry below). Pinned by rev.
-shell-core = { git = "https://github.com/Lockyc/shell-core", rev = "d017be1bf4fa8166f05eb08fa7aa0859ae7ed41b", default-features = false }
+shell-core = { git = "https://github.com/Lockyc/shell-core", rev = "691148174826d20735ab5c91be595fa5e239647f", default-features = false }
 
 [dependencies]
 tauri = { version = "2", features = ["unstable", "devtools"] }
@@ -31,7 +31,7 @@ serde_json = "1"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 # Same rev as the build-dep above — bump both in lockstep.
-shell-core = { git = "https://github.com/Lockyc/shell-core", rev = "d017be1bf4fa8166f05eb08fa7aa0859ae7ed41b", features = ["runtime"] }
+shell-core = { git = "https://github.com/Lockyc/shell-core", rev = "691148174826d20735ab5c91be595fa5e239647f", features = ["runtime"] }
 flotilla-core = { path = "../crates/flotilla-core" }
 dirs = "5"
 toml = "0.8"
