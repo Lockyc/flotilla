@@ -385,10 +385,11 @@ pub fn run() {
             let nav_handle = handle.clone();
             shell_core::mouse_nav::install(move || tabs::focused_webview(&nav_handle));
 
-            // A clicked banner (a finished download) selects the tab it came from; its window is
-            // already raised.
-            shell_core::banner::init(handle, |app, _window, label| {
-                let Some((_, id)) = tabs::tab_of(label) else {
+            // A clicked banner (a finished download) raises its window and selects the tab it came
+            // from.
+            shell_core::banner::init(handle, |app, click| {
+                shell_core::banner::raise(app, &click.window);
+                let Some((_, id)) = tabs::tab_of(&click.tab) else {
                     return;
                 };
                 let app = app.clone();

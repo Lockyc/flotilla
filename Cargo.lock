@@ -3380,7 +3380,7 @@ dependencies = [
 [[package]]
 name = "shell-core"
 version = "0.4.0"
-source = "git+https://github.com/Lockyc/shell-core?rev=691148174826d20735ab5c91be595fa5e239647f#691148174826d20735ab5c91be595fa5e239647f"
+source = "git+https://github.com/Lockyc/shell-core?rev=b8fc631727478e844df71fabd3254ec1cf389829#b8fc631727478e844df71fabd3254ec1cf389829"
 dependencies = [
  "block2",
  "getrandom 0.2.17",
