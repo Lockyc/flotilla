@@ -155,7 +155,7 @@ fn unload(app: &AppHandle, window: &tauri::Window, id: &TabId) {
 }
 
 /// Closes the webviews of `ids` in `window` and keeps the tabs. If one was active, the nearest
-/// live visible tab outside `ids` takes over ([`tabs::after_unload`]), else nothing is shown; no
+/// live visible tab outside `ids` takes over ([`Workspace::successor`]), else nothing is shown; no
 /// cold tab wakes.
 fn unload_all(app: &AppHandle, window: &tauri::Window, ids: &[TabId]) {
     let state = app.state::<AppState>();
@@ -175,7 +175,7 @@ fn unload_all(app: &AppHandle, window: &tauri::Window, ids: &[TabId]) {
             }
         }
         if let Some(id) = &active {
-            let next = tabs::after_unload(&ws, created, id);
+            let next = ws.successor(id, |t| created.contains(t));
             created.remove(id);
             ws.deactivate(id);
             if let Some(n) = next {
@@ -702,7 +702,8 @@ pub fn set_hole_rect(
 #[tauri::command]
 pub fn remove_tab(id: TabId, webview: Webview) -> Result<(), String> {
     require_chrome(&webview)?;
-    mutate(webview.app_handle(), |ws| ws.close_tab(&id));
+    let live = tabs::live(webview.app_handle());
+    mutate(webview.app_handle(), |ws| ws.close_tab(&id, &live));
     Ok(())
 }
 

@@ -9,7 +9,6 @@ use flotilla_core::model::{Opened, Tab, TabId, WindowWs, Workspace};
 use flotilla_core::nav::{self, Decision};
 use shell_core::compositing::HoleRect;
 use shell_core::label::{child_label, window_of};
-use shell_core::tabs::pick_live_neighbour;
 use shell_core::web::content::{
     close_content_webview, create_content_webview, ContentHooks, ContentSpec, LinkOrigin,
 };
@@ -89,27 +88,6 @@ pub fn live_in(created: &HashMap<String, HashSet<TabId>>) -> HashSet<TabId> {
 /// [`live_in`] of the app's state.
 pub fn live(app: &AppHandle) -> HashSet<TabId> {
     live_in(&app.state::<AppState>().created.lock().unwrap())
-}
-
-/// The tab to activate after unloading `id`: shell-core's `pick_live_neighbour` over the sidebar's
-/// row order in `id`'s window, eligible = has a webview, is visible (not a member of a collapsed
-/// group) and is not popped out. `None` leaves the hole blank; a cold tab is never woken to fill
-/// it.
-pub fn after_unload(ws: &Workspace, created: &HashSet<TabId>, id: &TabId) -> Option<TabId> {
-    let (wi, _, _) = ws.find(id)?;
-    let rows: Vec<(&Tab, bool)> = ws.windows[wi]
-        .groups
-        .iter()
-        .flat_map(|g| {
-            std::iter::once((&g.head, true)).chain(g.members.iter().map(move |m| (m, !g.collapsed)))
-        })
-        .collect();
-    let at = rows.iter().position(|(t, _)| &t.id == id)?;
-    let eligible: Vec<bool> = rows
-        .iter()
-        .map(|(t, visible)| *visible && !t.detached && &t.id != id && created.contains(&t.id))
-        .collect();
-    pick_live_neighbour(at, &eligible).map(|i| rows[i].0.id.clone())
 }
 
 /// The plan for the workspace window titled `title`, given the tabs whose webview exists in its
@@ -658,7 +636,7 @@ mod tests {
         // Reopening, from A, a closed group whose folder is now open in B raises it in B.
         let folder_a = url("https://drive.google.com/drive/folders/f1");
         let head_a = ws.windows[0].groups[0].head.id.clone();
-        ws.close_group(&head_a);
+        ws.close_group(&head_a, &Default::default());
         let Some(Opened::Added(in_b)) = ws.new_group("B", &folder_a, "default") else {
             panic!()
         };
@@ -685,22 +663,26 @@ mod tests {
         assert_eq!(p.show, Some(b));
     }
 
+    fn succ(ws: &Workspace, live: &HashSet<TabId>, id: &TabId) -> Option<TabId> {
+        ws.successor(id, |t| live.contains(t))
+    }
+
     #[test]
     fn unloading_the_active_tab_picks_the_nearest_live_tab_above() {
         let (mut ws, h, a, b) = ws();
         // b active; h and b live, a cold: skip a, land on h.
-        assert_eq!(after_unload(&ws, &set(&[&h, &b]), &b), Some(h.clone()));
+        assert_eq!(succ(&ws, &set(&[&h, &b]), &b), Some(h.clone()));
         // a live too: the nearest above wins.
-        assert_eq!(after_unload(&ws, &set(&[&h, &a, &b]), &b), Some(a.clone()));
+        assert_eq!(succ(&ws, &set(&[&h, &a, &b]), &b), Some(a.clone()));
         // Unloading the head: nothing above, so the nearest live below.
         ws.activate(&h);
-        assert_eq!(after_unload(&ws, &set(&[&h, &b]), &h), Some(b.clone()));
+        assert_eq!(succ(&ws, &set(&[&h, &b]), &h), Some(b.clone()));
     }
 
     #[test]
     fn unloading_the_last_live_tab_wakes_nothing() {
         let (ws, _, _, b) = ws();
-        assert_eq!(after_unload(&ws, &set(&[&b]), &b), None);
+        assert_eq!(succ(&ws, &set(&[&b]), &b), None);
     }
 
     #[test]
@@ -713,7 +695,7 @@ mod tests {
         // Group 1 collapsed: its members are not visible, so only its head can be picked.
         ws.set_collapsed(&h, true);
         ws.set_detached(&h, true);
-        assert_eq!(after_unload(&ws, &set(&[&h, &a, &b, &h2]), &h2), None);
+        assert_eq!(succ(&ws, &set(&[&h, &a, &b, &h2]), &h2), None);
     }
 
     #[test]
@@ -868,7 +850,7 @@ mod tests {
     #[test]
     fn closed_and_popped_out_tabs_lose_their_webview() {
         let (mut ws, h, a, b) = ws();
-        ws.close_tab(&b);
+        ws.close_tab(&b, &Default::default());
         ws.set_detached(&a, true);
         let p = plan(&ws, "W", &set(&[&h, &a, &b]), &none(), &none(), &none());
         let mut close = vec![a, b];
@@ -882,7 +864,7 @@ mod tests {
     #[test]
     fn nothing_open_shows_nothing() {
         let (mut ws, h, a, b) = ws();
-        ws.close_group(&h);
+        ws.close_group(&h, &Default::default());
         let p = plan(&ws, "W", &set(&[&h, &a, &b]), &none(), &none(), &none());
         assert_eq!(p.show, None);
         assert_eq!(p.create, None);

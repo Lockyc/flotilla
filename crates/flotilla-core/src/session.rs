@@ -238,7 +238,7 @@ mod tests {
         let Some(Opened::Added(h2)) = w.new_group("B", &g2, "default") else {
             panic!()
         };
-        w.close_group(&h2);
+        w.close_group(&h2, &Default::default());
         let g3 = url("https://drive.google.com/drive/folders/f3");
         w.new_group("B", &g3, "default").unwrap();
         w.activate(&m);

@@ -31,8 +31,8 @@ pub fn tab_of(window_label: &str) -> Option<TabId> {
 }
 
 /// Marks tab `id` popped out. If it was its window's active tab, the nearest live visible tab
-/// (`created`: the webviews in that window) takes over ([`tabs::after_unload`]), else nothing is
-/// shown there.
+/// (`created`: the webviews in that window) takes over ([`Workspace::successor`]), else nothing
+/// is shown there.
 pub fn pop_out(ws: &mut Workspace, created: &HashSet<TabId>, id: &TabId) -> Result<(), String> {
     match ws.find(id) {
         None => return Err("unknown tab".into()),
@@ -40,7 +40,7 @@ pub fn pop_out(ws: &mut Workspace, created: &HashSet<TabId>, id: &TabId) -> Resu
         Some(_) => {}
     }
     if ws.is_active(id) {
-        if let Some(n) = tabs::after_unload(ws, created, id) {
+        if let Some(n) = ws.successor(id, |t| created.contains(t)) {
             ws.activate(&n);
         }
     }
@@ -363,7 +363,7 @@ mod tests {
         let (mut ws, _, a, b) = ws();
         ws.set_detached(&a, true);
         ws.set_detached(&b, true);
-        ws.close_tab(&a);
+        ws.close_tab(&a, &Default::default());
         ws.set_detached(&b, false);
         let p = plan(&ws, &set(&[&a, &b]));
         let mut close = vec![a, b];

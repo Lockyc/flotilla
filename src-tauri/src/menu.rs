@@ -549,30 +549,39 @@ pub fn handle(app: &AppHandle, menu_id: &str) -> bool {
                 ws.make_own_group(&t);
             }
         }),
-        Action::MoveTo(t, head) => mutate(app, |ws| {
-            if let Some(t) = pick(t, ws) {
-                ws.move_to_group(&t, &head);
-            }
-        }),
-        Action::RemoveTab(t) => mutate(app, |ws| {
-            if let Some(t) = pick(t, ws) {
-                ws.close_tab(&t);
-            }
-        }),
+        Action::MoveTo(t, head) => {
+            let live = crate::tabs::live(app);
+            mutate(app, |ws| {
+                if let Some(t) = pick(t, ws) {
+                    ws.move_to_group(&t, &head, &live);
+                }
+            })
+        }
+        Action::RemoveTab(t) => {
+            let live = crate::tabs::live(app);
+            mutate(app, |ws| {
+                if let Some(t) = pick(t, ws) {
+                    ws.close_tab(&t, &live);
+                }
+            })
+        }
         Action::UnloadGroup(t) => {
             let t = pick(t, &app.state::<AppState>().ws.lock().unwrap());
             if let Some(t) = t {
                 commands::unload_group_of(app, &t);
             }
         }
-        Action::CloseGroup(t) => mutate(app, |ws| {
-            let head = pick(t, ws)
-                .and_then(|t| ws.group_of(&t))
-                .map(|g| g.head.id.clone());
-            if let Some(h) = head {
-                ws.close_group(&h);
-            }
-        }),
+        Action::CloseGroup(t) => {
+            let live = crate::tabs::live(app);
+            mutate(app, |ws| {
+                let head = pick(t, ws)
+                    .and_then(|t| ws.group_of(&t))
+                    .map(|g| g.head.id.clone());
+                if let Some(h) = head {
+                    ws.close_group(&h, &live);
+                }
+            })
+        }
         Action::Reopen(i) => {
             if let Some(window) = &title {
                 commands::show_from(app, window, true, |ws| ws.reopen_recent(window, i));
@@ -911,8 +920,8 @@ mod tests {
         assert!(s.recent_entries.is_empty());
 
         let w = add_group(&mut ws, "f2", "Website");
-        ws.close_group(&h);
-        ws.close_group(&w);
+        ws.close_group(&h, &Default::default());
+        ws.close_group(&w, &Default::default());
         let s = menu_state_for(&ws, &cold(), None, None);
         assert_eq!(s.recent, on("Recent"));
         assert_eq!(s.recent_entries, ["Website", "Auction"]);
@@ -921,7 +930,7 @@ mod tests {
     #[test]
     fn no_tab_disables_every_tab_action_but_keeps_recent() {
         let (mut ws, h, _) = one_group();
-        ws.close_group(&h);
+        ws.close_group(&h, &Default::default());
         for s in [
             menu_state_for(&ws, &cold(), None, None),
             menu_state_for(&ws, &cold(), None, Some(&"t-99".to_string())),

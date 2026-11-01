@@ -14,7 +14,7 @@ use crate::identity::{doc_key, fnv1a, head_key, identity, tab_id, DocKey};
 use crate::nav::parse_group_url;
 use serde::{Deserialize, Serialize};
 use shell_core::tabs::pick_live_neighbour;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use url::Url;
 
 /// Closed groups kept in `Workspace::recent`; the oldest is dropped past this.
@@ -477,68 +477,74 @@ impl Workspace {
         Some(Opened::Added(id))
     }
 
-    /// The tab `shell_core::tabs::pick_live_neighbour` picks for member `at` of group `gi` in
-    /// window `wi`, over `[head, members...]` with every docked tab eligible.
-    fn member_neighbour(&self, wi: usize, gi: usize, at: usize) -> Option<TabId> {
-        let g = &self.windows[wi].groups[gi];
-        let eligible: Vec<bool> = std::iter::once(&g.head)
-            .chain(g.members.iter())
-            .map(|t| !t.detached)
+    /// The tab to show once `id` leaves its window: shell-core's `pick_live_neighbour` over the
+    /// window's sidebar rows, eligible = `live` (has a webview), visible (not a member of a
+    /// collapsed group), docked, and not `id`. `None` leaves the window blank; a cold tab is never
+    /// woken to fill it.
+    pub fn successor(&self, id: &TabId, live: impl Fn(&TabId) -> bool) -> Option<TabId> {
+        let (wi, _, _) = self.find(id)?;
+        let rows: Vec<(&Tab, bool)> = self.windows[wi]
+            .groups
+            .iter()
+            .flat_map(|g| {
+                std::iter::once((&g.head, true))
+                    .chain(g.members.iter().map(move |m| (m, !g.collapsed)))
+            })
             .collect();
-        pick_live_neighbour(at + 1, &eligible).map(|i| match i {
-            0 => g.head.id.clone(),
-            i => g.members[i - 1].id.clone(),
-        })
+        let at = rows.iter().position(|(t, _)| &t.id == id)?;
+        let eligible: Vec<bool> = rows
+            .iter()
+            .map(|(t, visible)| *visible && !t.detached && &t.id != id && live(&t.id))
+            .collect();
+        pick_live_neighbour(at, &eligible).map(|i| rows[i].0.id.clone())
     }
 
-    /// Closes a tab. Closing a head closes its group (`close_group` then picks the neighbouring
-    /// group's head). Closing its window's active member activates [`Self::member_neighbour`],
-    /// else none.
-    pub fn close_tab(&mut self, id: &TabId) {
+    /// Closes a tab. Closing a head closes its group. Closing its window's active tab activates
+    /// its [`Self::successor`] among `live`, else none.
+    pub fn close_tab(&mut self, id: &TabId, live: &HashSet<TabId>) {
         let Some((wi, gi)) = self.locate(id) else {
             return;
         };
         if &self.windows[wi].groups[gi].head.id == id {
-            return self.close_group(id);
+            return self.close_group(id, live);
         }
-        let at = self.windows[wi].groups[gi]
-            .members
-            .iter()
-            .position(|m| &m.id == id)
-            .unwrap();
-        let neighbour = self.member_neighbour(wi, gi, at);
-        self.windows[wi].groups[gi].members.remove(at);
+        let next = self.successor(id, |t| live.contains(t));
+        let g = &mut self.windows[wi].groups[gi];
+        g.members.retain(|m| &m.id != id);
         if self.windows[wi].active.as_ref() == Some(id) {
             self.windows[wi].active = None;
-            if let Some(n) = neighbour {
+            if let Some(n) = next {
                 self.activate(&n);
             }
         }
     }
 
     /// Closes the group headed by `head` into the front of `recent`. If its window's active tab
-    /// was in it, the nearest following group's docked head (else the nearest preceding one's)
-    /// becomes active, else none.
-    pub fn close_group(&mut self, head: &TabId) {
+    /// was in it, the head's [`Self::successor`] among `live` outside the group becomes active,
+    /// else none.
+    pub fn close_group(&mut self, head: &TabId, live: &HashSet<TabId>) {
         let Some((wi, gi)) = self.locate(head) else {
             return;
         };
-        let w = &mut self.windows[wi];
-        if &w.groups[gi].head.id != head {
+        if &self.windows[wi].groups[gi].head.id != head {
             return;
         }
+        let next = {
+            let g = &self.windows[wi].groups[gi];
+            let inside = |t: &TabId| &g.head.id == t || g.members.iter().any(|m| &m.id == t);
+            self.successor(head, |t| live.contains(t) && !inside(t))
+        };
+        let w = &mut self.windows[wi];
         let group = w.groups.remove(gi);
         let was_active = w
             .active
             .as_ref()
             .is_some_and(|a| a == &group.head.id || group.members.iter().any(|m| &m.id == a));
         if was_active {
-            let docked = |g: &&Group| !g.head.detached;
-            w.active = w.groups[gi..]
-                .iter()
-                .find(docked)
-                .or_else(|| w.groups[..gi].iter().rev().find(docked))
-                .map(|g| g.head.id.clone());
+            w.active = None;
+            if let Some(n) = next {
+                self.activate(&n);
+            }
         }
         self.recent.insert(0, group);
         self.recent.truncate(RECENT_CAP);
@@ -620,8 +626,8 @@ impl Workspace {
     /// Moves a member to the end of the group `head` belongs to, in whichever window. A move into
     /// a group on another store re-keys the document to that store (and so gives it that key's
     /// id), and is refused if it is already open there. An active member stays active, in its new
-    /// window; the window it left shows [`Self::member_neighbour`].
-    pub fn move_to_group(&mut self, member: &TabId, head: &TabId) {
+    /// window; the window it left shows its [`Self::successor`] among `live`.
+    pub fn move_to_group(&mut self, member: &TabId, head: &TabId, live: &HashSet<TabId>) {
         let (Some((fw, fg)), Some((tw, tg))) = (self.locate(member), self.locate(head)) else {
             return;
         };
@@ -645,7 +651,7 @@ impl Workspace {
         }
         let was_active = self.windows[fw].active.as_ref() == Some(member);
         let neighbour = (was_active && fw != tw)
-            .then(|| self.member_neighbour(fw, fg, at))
+            .then(|| self.successor(member, |t| live.contains(t)))
             .flatten();
         self.windows[fw].groups[fg].members.remove(at);
         let id = moved.id.clone();
@@ -1162,7 +1168,7 @@ mod tests {
         let roster = w.windows[1].groups[0].members[0].id.clone();
         w.activate(&minutes);
         w.activate(&roster);
-        w.close_group(&w.windows[1].groups[0].head.id.clone());
+        w.close_group(&w.windows[1].groups[0].head.id.clone(), &Default::default());
         assert_eq!(w.recent.len(), 1);
         // The reload drops the Roster from B and renames Minutes.
         let mut cfg = two_windows();
@@ -1294,7 +1300,7 @@ mod tests {
         let mut w = ws();
         let h = head_of(&mut w, 1);
         let d = id(w.open_from(&h, &doc(1)).unwrap());
-        w.close_tab(&h);
+        w.close_tab(&h, &Default::default());
         assert!(groups(&w).is_empty());
         assert_eq!(w.recent.len(), 1);
         assert_eq!(w.recent[0].head.id, h);
@@ -1310,7 +1316,7 @@ mod tests {
             heads.push(head_of(&mut w, n));
         }
         for h in &heads {
-            w.close_group(h);
+            w.close_group(h, &Default::default());
         }
         assert_eq!(w.recent.len(), RECENT_CAP);
         assert_eq!(w.recent[0].head.id, heads[24]);
@@ -1323,7 +1329,7 @@ mod tests {
         let h1 = head_of(&mut w, 1);
         w.open_from(&h1, &doc(1)).unwrap();
         let keep = id(w.open_from(&h1, &doc(2)).unwrap());
-        w.close_group(&h1);
+        w.close_group(&h1, &Default::default());
         let h2 = head_of(&mut w, 2);
         let elsewhere = id(w.open_from(&h2, &doc(1)).unwrap());
         let back = w.reopen_recent(W, 0).unwrap();
@@ -1338,7 +1344,7 @@ mod tests {
     fn reopen_recent_of_a_head_open_elsewhere_raises_it() {
         let mut w = ws();
         let h1 = head_of(&mut w, 1);
-        w.close_group(&h1);
+        w.close_group(&h1, &Default::default());
         let h2 = head_of(&mut w, 1);
         assert_eq!(w.reopen_recent(W, 0), Some(h2.clone()));
         assert_eq!(groups(&w).len(), 1);
@@ -1350,7 +1356,7 @@ mod tests {
     fn reopen_recent_into_another_window() {
         let mut w = Workspace::from_config(&[window("A"), window("B")]);
         let h = id(w.new_group("A", &folder(1), "default").unwrap());
-        w.close_group(&h);
+        w.close_group(&h, &Default::default());
         assert_eq!(w.reopen_recent("nowhere", 0), None);
         assert_eq!(w.recent.len(), 1);
         assert_eq!(w.reopen_recent("B", 0), Some(h.clone()));
@@ -1362,7 +1368,7 @@ mod tests {
     fn forget_recent_drops_the_entry() {
         let mut w = ws();
         let h = head_of(&mut w, 1);
-        w.close_group(&h);
+        w.close_group(&h, &Default::default());
         w.forget_recent(0);
         w.forget_recent(9);
         assert!(w.recent.is_empty());
@@ -1389,7 +1395,7 @@ mod tests {
         let h1 = head_of(&mut w, 1);
         let h2 = head_of(&mut w, 2);
         let d = id(w.open_from(&h1, &doc(1)).unwrap());
-        w.move_to_group(&d, &h2);
+        w.move_to_group(&d, &h2, &Default::default());
         assert!(member_ids(&w, &h1).is_empty());
         assert_eq!(member_ids(&w, &h2), vec![d.clone()]);
         assert_eq!(w.open_from(&h1, &doc(1)), Some(Opened::Raised(d)));
@@ -1402,11 +1408,15 @@ mod tests {
         let one = w.windows[0].groups[0].head.id.clone();
         let two = w.windows[1].groups[0].head.id.clone();
         w.activate(&budget);
-        w.move_to_group(&budget, &two);
+        w.move_to_group(&budget, &two, &live(&[&one, &budget]));
         assert_eq!(member_ids(&w, &two).last(), Some(&budget));
         assert_eq!(w.windows[1].active, Some(budget));
         // The window it left shows the tab the member's close would have picked.
         assert_eq!(w.windows[0].active, Some(one));
+    }
+
+    fn live(ids: &[&TabId]) -> HashSet<TabId> {
+        ids.iter().map(|id| (*id).clone()).collect()
     }
 
     #[test]
@@ -1429,14 +1439,30 @@ mod tests {
         let a = id(w.open_from(&h, &doc(1)).unwrap());
         let b = id(w.open_from(&h, &doc(2)).unwrap());
         let c = id(w.open_from(&h, &doc(3)).unwrap());
+        let all = live(&[&h, &a, &b, &c]);
         w.activate(&b);
-        w.close_tab(&b);
+        w.close_tab(&b, &all);
         assert_eq!(active(&w), Some(a.clone())); // leans up
         w.activate(&c);
-        w.close_tab(&c);
+        w.close_tab(&c, &all);
         assert_eq!(active(&w), Some(a.clone()));
-        w.close_tab(&a);
+        w.close_tab(&a, &all);
         assert_eq!(active(&w), Some(h)); // the head is above the first member
+    }
+
+    #[test]
+    fn closing_the_active_tab_never_wakes_a_cold_one() {
+        let mut w = ws();
+        let h1 = head_of(&mut w, 1);
+        let a = id(w.open_from(&h1, &doc(1)).unwrap());
+        let h2 = head_of(&mut w, 2);
+        let b = id(w.open_from(&h2, &doc(2)).unwrap());
+        // b active; a and h2 cold, h1 live: the nearest live tab above, past the cold ones.
+        w.close_tab(&b, &live(&[&h1, &b]));
+        assert_eq!(active(&w), Some(h1.clone()));
+        // Closing the last live group: the cold one left is not loaded to fill the hole.
+        w.close_group(&h1, &live(&[&h1, &a]));
+        assert_eq!(active(&w), None);
     }
 
     #[test]
@@ -1445,7 +1471,7 @@ mod tests {
         let h = head_of(&mut w, 1);
         let a = id(w.open_from(&h, &doc(1)).unwrap());
         w.activate(&h);
-        w.close_tab(&a);
+        w.close_tab(&a, &Default::default());
         assert_eq!(active(&w), Some(h));
     }
 
@@ -1456,7 +1482,7 @@ mod tests {
         let one = w.windows[0].groups[0].head.id.clone();
         w.activate(&roster);
         w.activate(&one);
-        w.close_group(&one);
+        w.close_group(&one, &Default::default());
         assert_eq!(w.windows[0].active, None);
         assert_eq!(w.windows[1].active, Some(roster));
     }
@@ -1508,7 +1534,7 @@ mod tests {
         let h1 = head_of(&mut w, 1);
         w.open_from(&h1, &doc(1)).unwrap();
         w.open_from(&h1, &doc(2)).unwrap();
-        w.close_group(&h1);
+        w.close_group(&h1, &Default::default());
         let h2 = head_of(&mut w, 1);
         let shared = id(w.open_from(&h2, &doc(1)).unwrap());
         assert_eq!(w.reopen_recent(W, 0), Some(h2.clone()));
@@ -1524,7 +1550,7 @@ mod tests {
         let mut w = ws();
         let h1 = id(w.new_group(W, &doc(5), "default").unwrap());
         let kept = id(w.open_from(&h1, &doc(1)).unwrap());
-        w.close_group(&h1);
+        w.close_group(&h1, &Default::default());
         let h2 = head_of(&mut w, 2);
         let m = id(w.open_from(&h2, &doc(5)).unwrap());
         assert_eq!(w.reopen_recent(W, 0), Some(m.clone()));
@@ -1535,15 +1561,15 @@ mod tests {
     }
 
     #[test]
-    fn closing_the_active_member_of_a_collapsed_group_expands_it() {
+    fn closing_the_active_member_of_a_collapsed_group_lands_on_a_visible_tab() {
         let mut w = ws();
         let h = head_of(&mut w, 1);
         let a = id(w.open_from(&h, &doc(1)).unwrap());
         let b = id(w.open_from(&h, &doc(2)).unwrap());
         w.set_collapsed(&h, true);
-        w.close_tab(&b);
-        assert_eq!(active(&w), Some(a));
-        assert!(!w.group_of(&h).unwrap().collapsed);
+        w.close_tab(&b, &live(&[&h, &a, &b]));
+        assert_eq!(active(&w), Some(h.clone()));
+        assert!(w.group_of(&h).unwrap().collapsed);
     }
 
     #[test]
@@ -1553,7 +1579,7 @@ mod tests {
         let h2 = head_of(&mut w, 2);
         let d = id(w.open_from(&h1, &doc(1)).unwrap());
         w.set_collapsed(&h2, true);
-        w.move_to_group(&d, &h2);
+        w.move_to_group(&d, &h2, &Default::default());
         assert_eq!(active(&w), Some(d));
         assert!(!w.group_of(&h2).unwrap().collapsed);
     }
@@ -1564,8 +1590,8 @@ mod tests {
         let h = head_of(&mut w, 1);
         let a = id(w.open_from(&h, &doc(1)).unwrap());
         let b = id(w.open_from(&h, &doc(2)).unwrap());
-        w.move_to_group(&a, &h);
-        w.move_to_group(&a, &b);
+        w.move_to_group(&a, &h, &Default::default());
+        w.move_to_group(&a, &b, &Default::default());
         assert_eq!(member_ids(&w, &h), vec![a, b]);
     }
 
@@ -1585,7 +1611,7 @@ mod tests {
         let h1 = head_of(&mut w, 1);
         let work = id(w.new_group(W, &folder(2), "work").unwrap());
         let d = id(w.open_from(&h1, &doc(1)).unwrap());
-        w.move_to_group(&d, &work);
+        w.move_to_group(&d, &work, &Default::default());
         // Re-keyed into the work store, the tab's id is that key's.
         let moved = tab_id(&identity("work", &doc(1)));
         assert_eq!(w.find(&moved).unwrap().2.key.store, "work");
@@ -1594,7 +1620,7 @@ mod tests {
         // doc 2 is open in both stores: moving the default copy into work collides
         let e = id(w.open_from(&h1, &doc(2)).unwrap());
         let e2 = id(w.open_from(&work, &doc(2)).unwrap());
-        w.move_to_group(&e, &work);
+        w.move_to_group(&e, &work, &Default::default());
         assert_eq!(member_ids(&w, &h1), vec![e]);
         assert_eq!(member_ids(&w, &work), vec![moved, e2]);
     }
@@ -1605,18 +1631,19 @@ mod tests {
         let h1 = head_of(&mut w, 1);
         let h2 = head_of(&mut w, 2);
         let h3 = head_of(&mut w, 3);
+        let all = live(&[&h1, &h2, &h3]);
         w.activate(&h2);
-        w.close_group(&h2);
-        assert_eq!(active(&w), Some(h3.clone()));
-        w.close_group(&h3);
-        assert_eq!(active(&w), Some(h1));
+        w.close_group(&h2, &all);
+        assert_eq!(active(&w), Some(h1.clone())); // leans up
+        w.close_group(&h1, &all);
+        assert_eq!(active(&w), Some(h3)); // nothing above: the nearest below
     }
 
     #[test]
     fn the_same_document_gets_the_same_id() {
         let mut w = ws();
         let a = head_of(&mut w, 1);
-        w.close_group(&a);
+        w.close_group(&a, &Default::default());
         w.forget_recent(0);
         let b = head_of(&mut w, 2);
         // Closed and opened again, in the same or another workspace: the same id.
@@ -1631,7 +1658,7 @@ mod tests {
         let h1 = head_of(&mut w, 1);
         w.open_from(&h1, &doc(1)).unwrap();
         w.open_from(&h1, &doc(2)).unwrap();
-        w.close_group(&h1);
+        w.close_group(&h1, &Default::default());
         let mut recent = w.recent.clone();
         recent[0].head.key.id = "bogus".into();
         recent[0].members[1].home_url = "not a url".into();
@@ -1651,8 +1678,8 @@ mod tests {
         let mut w = ws();
         let h1 = head_of(&mut w, 1);
         let h2 = head_of(&mut w, 2);
-        w.close_group(&h1);
-        w.close_group(&h2);
+        w.close_group(&h1, &Default::default());
+        w.close_group(&h2, &Default::default());
         let mut recent = w.recent.clone();
         recent[0].head.home_url = "also not".into();
         let kept = recent[1].head.id.clone();
@@ -1718,7 +1745,7 @@ mod tests {
     fn moving_a_detached_member_keeps_active() {
         let (mut w, _, a, b, h2) = two_groups();
         w.set_detached(&a, true);
-        w.move_to_group(&a, &h2);
+        w.move_to_group(&a, &h2, &Default::default());
         assert_eq!(member_ids(&w, &h2), vec![a]);
         assert_eq!(active(&w), Some(b));
         assert_eq!(w.take_raise(), None);
@@ -1726,32 +1753,33 @@ mod tests {
 
     #[test]
     fn closing_a_tab_skips_a_detached_neighbour() {
-        let (mut w, h1, a, b, _) = two_groups();
+        let (mut w, h1, a, b, h2) = two_groups();
+        let all = live(&[&h1, &a, &b, &h2]);
         w.set_detached(&a, true);
-        w.close_tab(&b);
+        w.close_tab(&b, &all);
         assert_eq!(active(&w), Some(h1.clone()));
-        // Every neighbour detached: nothing is active.
+        // Every live neighbour detached: nothing is active.
         let (mut w, h1, a, b, _) = two_groups();
         w.set_detached(&h1, true);
         w.set_detached(&a, true);
-        w.close_tab(&b);
+        w.close_tab(&b, &live(&[&h1, &a, &b]));
         assert_eq!(active(&w), None);
     }
 
     #[test]
     fn closing_a_group_skips_a_group_whose_head_is_detached() {
-        let (mut w, h1, _, b, h2) = two_groups();
+        let (mut w, h1, a, b, h2) = two_groups();
         let h3 = head_of(&mut w, 3);
         w.activate(&b);
         w.set_detached(&h2, true);
-        w.close_group(&h1);
+        w.close_group(&h1, &live(&[&h1, &a, &b, &h2, &h3]));
         assert_eq!(active(&w), Some(h3.clone()));
         // Only detached heads remain: nothing is active.
         w.set_detached(&h3, true);
         assert_eq!(active(&w), None);
-        let (mut w, h1, _, _, h2) = two_groups();
+        let (mut w, h1, a, b, h2) = two_groups();
         w.set_detached(&h2, true);
-        w.close_group(&h1);
+        w.close_group(&h1, &live(&[&h1, &a, &b, &h2]));
         assert_eq!(active(&w), None);
     }
 
@@ -2090,7 +2118,7 @@ mod tests {
     fn add_incoming_to_a_closed_group_keeps_it() {
         let (mut w, h1) = fleet();
         let a = queued(w.receive(W, None, doc(1).as_str(), "default"));
-        w.close_group(&h1);
+        w.close_group(&h1, &Default::default());
         assert_eq!(w.add_incoming(&a, &h1), None);
         assert_eq!(queue(&w, W), [doc(1).as_str()]);
         // A rejected link joins nothing either.

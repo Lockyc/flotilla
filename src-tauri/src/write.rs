@@ -950,7 +950,7 @@ mod tests {
             matches!(&w, Write::AddDoc { group, doc, .. } if group == "Two" && doc.title == D3)
         );
 
-        let w = one(run(|ws| ws.close_tab(&id_of(ws, D2))));
+        let w = one(run(|ws| ws.close_tab(&id_of(ws, D2), &Default::default())));
         assert_eq!(
             w,
             Write::RemoveDoc {
@@ -960,7 +960,9 @@ mod tests {
             }
         );
 
-        let w = one(run(|ws| ws.close_group(&id_of(ws, F1))));
+        let w = one(run(|ws| {
+            ws.close_group(&id_of(ws, F1), &Default::default())
+        }));
         assert!(matches!(&w, Write::RemoveGroup { group, .. } if group == "One"));
 
         let w = one(run(|ws| ws.set_detached(&id_of(ws, D1), true)));
@@ -978,11 +980,15 @@ mod tests {
             }
         ));
 
-        let w = one(run(|ws| ws.move_to_group(&id_of(ws, D1), &id_of(ws, F2))));
+        let w = one(run(|ws| {
+            ws.move_to_group(&id_of(ws, D1), &id_of(ws, F2), &Default::default())
+        }));
         assert!(matches!(&w, Write::MoveDoc { to_group, .. } if to_group == "Two"));
 
         // Into another window, and another store: the id changes, the table moves.
-        let w = one(run(|ws| ws.move_to_group(&id_of(ws, D1), &id_of(ws, F3))));
+        let w = one(run(|ws| {
+            ws.move_to_group(&id_of(ws, D1), &id_of(ws, F3), &Default::default())
+        }));
         assert!(
             matches!(&w, Write::MoveDoc { to_window, to_group, .. } if to_window == "B" && to_group == "Three")
         );
@@ -999,7 +1005,7 @@ mod tests {
         // Reopening a closed group writes it back whole, documents included; closed and reopened
         // in another window in one change, it leaves its old window too.
         let w = run(|ws| {
-            ws.close_group(&id_of(ws, F1));
+            ws.close_group(&id_of(ws, F1), &Default::default());
             ws.reopen_recent("B", 0).unwrap();
         });
         assert!(matches!(&w[0], Write::RemoveGroup { window, .. } if window == "A"));
@@ -1008,7 +1014,7 @@ mod tests {
         );
         assert_eq!(w.len(), 2);
         let mut closed = load_source();
-        closed.close_group(&id_of(&closed, F1));
+        closed.close_group(&id_of(&closed, F1), &Default::default());
         let w = one(change(&mut closed, |ws| {
             ws.reopen_recent("A", 0).unwrap();
         })
