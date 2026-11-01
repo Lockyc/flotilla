@@ -1,6 +1,6 @@
 [package]
 name = "flotilla"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "A workspace where any tab can head a group of documents, each opened once, restored on relaunch. macOS only."
 license = "MIT"
