@@ -16,11 +16,11 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 # The shared sidebar chrome, embedded as string consts; build.rs writes them into ../src (the
 # frontendDist Tauri embeds). Pinned by rev — bump in lockstep with the toolchain.
-chrome-core = { git = "https://github.com/Lockyc/chrome-core", rev = "f5a4da511872d0df2fb23a55e854e60321b75596" }
+chrome-core = { git = "https://github.com/Lockyc/chrome-core", rev = "fbed5cea5ac65cb1166c96c0152e5b186433f779" }
 # Shared release tooling + build_stamp. build.rs materializes scripts/*.sh (git-ignored) and stamps
 # BUILD_GIT_SHA/BUILD_DATE. default-features=false keeps the build-dep zero-tauri (resolver 2 keeps
 # it separate from the runtime-featured [dependencies] entry below). Pinned by rev.
-shell-core = { git = "https://github.com/Lockyc/shell-core", rev = "5a2fba70407ee6642c8be410cfbe9c2d8481e60f", default-features = false }
+shell-core = { git = "https://github.com/Lockyc/shell-core", rev = "d6affad4e56ec88c2b056aeb90ef2f7d8a61da74", default-features = false }
 
 [dependencies]
 tauri = { version = "2", features = ["unstable", "devtools"] }
@@ -31,12 +31,12 @@ serde_json = "1"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 # Same rev as the build-dep above — bump both in lockstep.
-shell-core = { git = "https://github.com/Lockyc/shell-core", rev = "5a2fba70407ee6642c8be410cfbe9c2d8481e60f", features = ["runtime"] }
+shell-core = { git = "https://github.com/Lockyc/shell-core", rev = "d6affad4e56ec88c2b056aeb90ef2f7d8a61da74", features = ["runtime"] }
 flotilla-core = { path = "../crates/flotilla-core" }
 dirs = "5"
 toml = "0.8"
 # House-style formatter, starter-config seeding and path resolution, shared with curator, warden and lector. Pinned by rev, same as curator.
-config-core = { git = "https://github.com/Lockyc/config-core", rev = "3a92590c2df61f5a867a4cecc6180c66c51b9039" }
+config-core = { git = "https://github.com/Lockyc/config-core", rev = "69b38586661ff44df21f01d715484792014cdd82" }
 url = "2"
 
 [dev-dependencies]
