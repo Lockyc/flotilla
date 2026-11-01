@@ -48,12 +48,14 @@ impl Session {
         }
     }
 
-    /// `ws`'s session with `loaded`, those of them still open in it.
+    /// `ws`'s session with `loaded`, those of them still open in it. A workspace with no windows
+    /// (a config that didn't parse) keeps them all, as its `stray` queues are kept, so they load
+    /// again once the config is good.
     pub fn with_loaded<'a>(ws: &Workspace, loaded: impl IntoIterator<Item = &'a TabId>) -> Session {
         Session {
             loaded: loaded
                 .into_iter()
-                .filter(|id| ws.find(id).is_some())
+                .filter(|id| ws.windows.is_empty() || ws.find(id).is_some())
                 .cloned()
                 .collect(),
             ..Session::of(ws)
@@ -243,6 +245,31 @@ mod tests {
         w.new_group("B", &g3, "default").unwrap();
         w.activate(&m);
         w
+    }
+
+    #[test]
+    fn a_workspace_with_no_windows_keeps_the_loaded_tabs() {
+        let ids: Vec<TabId> = sample()
+            .windows
+            .iter()
+            .filter_map(|w| w.active.clone())
+            .collect();
+        assert!(!ids.is_empty());
+        let none = Workspace::from_config(&[]);
+        assert_eq!(
+            Session::with_loaded(&none, &ids).loaded,
+            ids.iter().cloned().collect()
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("session.json");
+        save(&p, &none, &ids).unwrap();
+        let Loaded::Restored(s) = load(&p) else {
+            panic!()
+        };
+        assert_eq!(s.loaded, ids.iter().cloned().collect());
+        // With windows, a tab no longer open is still dropped.
+        let gone = Session::with_loaded(&sample(), &[TabId::default()]);
+        assert!(gone.loaded.is_empty());
     }
 
     #[test]
