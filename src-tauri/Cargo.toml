@@ -16,11 +16,11 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 # The shared sidebar chrome, embedded as string consts; build.rs writes them into ../src (the
 # frontendDist Tauri embeds). Pinned by rev — bump in lockstep with the toolchain.
-chrome-core = { git = "https://github.com/Lockyc/chrome-core", rev = "f27e3c39e81327564c9758e213e9c2f684c95814" }
+chrome-core = { git = "https://github.com/Lockyc/chrome-core", rev = "471135049ea9ea04a119fb4f8363ec4bb67be3be" }
 # Shared release tooling + build_stamp. build.rs materializes scripts/*.sh (git-ignored) and stamps
 # BUILD_GIT_SHA/BUILD_DATE. default-features=false keeps the build-dep zero-tauri (resolver 2 keeps
 # it separate from the runtime-featured [dependencies] entry below). Pinned by rev.
-shell-core = { git = "https://github.com/Lockyc/shell-core", rev = "014c87b2704ed7cb729371529b29cddcc8d5823e", default-features = false }
+shell-core = { git = "https://github.com/Lockyc/shell-core", rev = "68947df6369ddf83976e0654556af68810354aad", default-features = false }
 
 [dependencies]
 tauri = { version = "2", features = ["unstable", "devtools"] }
@@ -31,7 +31,7 @@ serde_json = "1"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 # Same rev as the build-dep above — bump both in lockstep.
-shell-core = { git = "https://github.com/Lockyc/shell-core", rev = "014c87b2704ed7cb729371529b29cddcc8d5823e", features = ["runtime"] }
+shell-core = { git = "https://github.com/Lockyc/shell-core", rev = "68947df6369ddf83976e0654556af68810354aad", features = ["runtime"] }
 flotilla-core = { path = "../crates/flotilla-core" }
 dirs = "5"
 toml = "0.8"
