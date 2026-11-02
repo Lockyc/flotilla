@@ -9,10 +9,30 @@
   <body>
     <!-- This page is the window's MAIN webview, spanning the whole window, so `data-tauri-drag-region`
          moves the window natively. The sidebar is a fixed-width column; #content-hole is where the
-         Rust-positioned document webviews will sit above this page. -->
+         Rust-positioned document webviews will sit above this page. #empty-state is chrome-core's
+         `emptyState`: the muted flotilla mark, shown while no tab is active. -->
     <div id="app">
       <aside id="sidebar" data-tauri-drag-region></aside>
-      <div id="content-hole" data-tauri-drag-region></div>
+      <div id="content-hole" data-tauri-drag-region>
+        <div id="empty-state">
+          <svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="no tab selected">
+            <rect width="1024" height="1024" rx="224" fill="#333333" />
+            <g fill="#444444">
+              <path d="M158 600 L158 420 L238 600 Z" />
+              <path d="M110 632 H246 L222 684 H134 Z" />
+              <path d="M866 600 L866 420 L786 600 Z" />
+              <path d="M778 632 H914 L890 684 H802 Z" />
+            </g>
+            <g fill="#555555">
+              <path d="M512 190 L592 230 L512 270 Z" />
+              <rect x="502" y="190" width="20" height="500" />
+              <path d="M488 290 L488 650 L316 650 Z" />
+              <path d="M536 340 L536 650 L692 650 Z" />
+              <path d="M272 690 H752 L696 796 H328 Z" />
+            </g>
+          </svg>
+        </div>
+      </div>
     </div>
     <script src="chrome-core.js"></script>
     <script type="module" src="chrome.js"></script>

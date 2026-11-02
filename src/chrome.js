@@ -105,6 +105,7 @@ async function mountChrome() {
       urlField: { placeholder: "Open a folder or page as a new group" },
       downloads: true,
       appName: "flotilla",
+      emptyState: document.getElementById("empty-state"),
       storageKey: "flotilla:sidebar-width",
       defaultWidth: identity.default_width,
       minWidth: MIN_W,
