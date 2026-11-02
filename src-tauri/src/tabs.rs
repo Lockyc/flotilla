@@ -212,8 +212,9 @@ pub fn changed(app: &AppHandle) {
     crate::persist::mark_dirty(app);
 }
 
-/// Brings every open window's content webviews in line with the workspace ([`plan`]) and pushes
-/// the sidebar DTOs. Main thread only. `ws` is locked only to compute each plan.
+/// Brings every open window's content webviews in line with the workspace ([`plan`]), closing a
+/// window's downloads popup when its active tab changed, and pushes the sidebar DTOs. Main thread
+/// only. `ws` is locked only to compute each plan.
 pub fn sync(app: &AppHandle) {
     for (label, title) in open_windows(app) {
         if sync_window(app, &label, &title) {
@@ -255,8 +256,9 @@ fn sync_window(app: &AppHandle, label: &str, title: &str) -> bool {
         .keys()
         .filter_map(|l| tab_of(l).filter(|(w, _)| *w == label).map(|(_, id)| id))
         .collect();
-    let plan = {
+    let (plan, active) = {
         let ws = state.ws.lock().unwrap();
+        let active = active_in(&ws, title);
         let created_all = state.created.lock().unwrap();
         let created = created_all.get(label).cloned().unwrap_or_default();
         let closing: HashSet<TabId> = alive.difference(&created).cloned().collect();
@@ -264,8 +266,17 @@ fn sync_window(app: &AppHandle, label: &str, title: &str) -> bool {
         warm.retain(|id| ws.find(id).is_some());
         let mut failed = state.failed.lock().unwrap();
         failed.retain(|id| ws.find(id).is_some());
-        plan(&ws, title, &created, &failed, &closing, &warm)
+        (plan(&ws, title, &created, &failed, &closing, &warm), active)
     };
+    let switched = state
+        .shown
+        .lock()
+        .unwrap()
+        .insert(label.to_string(), active.clone())
+        != Some(active);
+    if switched {
+        shell_core::downloads::popup::close(&window);
+    }
     let forget = |id: &TabId| {
         if let Some(c) = state.created.lock().unwrap().get_mut(label) {
             c.remove(id);
@@ -738,6 +749,11 @@ mod tests {
         // A chrome whose window label holds a `:` is not a tab.
         assert_eq!(tab_of("club:-interim"), None);
         assert_eq!(tab_of("club"), None);
+        // The downloads popup is a child of the window, never a tab: every webview walk that
+        // parses labels with `tab_of` skips it.
+        let popup = child_label("club", "shell-downloads");
+        assert!(shell_core::downloads::popup::is_popup_label(&popup));
+        assert_eq!(tab_of(&popup), None);
     }
 
     #[test]

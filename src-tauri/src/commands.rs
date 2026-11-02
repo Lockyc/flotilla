@@ -698,6 +698,29 @@ pub fn set_hole_rect(
     Ok(())
 }
 
+/// The header's downloads button: opens the calling window's downloads popup under the button's
+/// `rect`, or closes it.
+#[tauri::command]
+pub fn downloads_toggle(rect: RectArg, webview: Webview) -> Result<(), String> {
+    require_chrome(&webview)?;
+    let anchor = HoleRect {
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height,
+    };
+    shell_core::downloads::popup::toggle(&webview.window(), anchor);
+    Ok(())
+}
+
+/// What the downloads button shows, for the chrome's first paint (later states arrive as
+/// `downloads-state` events).
+#[tauri::command]
+pub fn downloads_state(webview: Webview) -> Result<shell_core::downloads::DownloadsState, String> {
+    require_chrome(&webview)?;
+    Ok(shell_core::downloads::state())
+}
+
 /// The row's remove button: closes tab `id` (a head closes its group).
 #[tauri::command]
 pub fn remove_tab(id: TabId, webview: Webview) -> Result<(), String> {

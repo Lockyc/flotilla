@@ -14,8 +14,8 @@ use std::sync::Mutex;
 /// `open_or_focus`, `rename`, `delete`): the host takes them.
 ///
 /// Lock order: `gate`, then `ws`, then `created`, then `warm`, then `hole`, then `failed`; and `Persist`'s
-/// writer lock before `ws` (the session snapshot is taken inside it). `menu`, `notice` and
-/// `chrome_queue` are each taken alone.
+/// writer lock before `ws` (the session snapshot is taken inside it). `menu`, `notice`,
+/// `chrome_queue` and `shown` are each taken alone.
 pub struct AppState {
     /// Serialises config writes and reloads (`crate::write::Gate`).
     pub gate: crate::write::Gate,
@@ -31,6 +31,9 @@ pub struct AppState {
     /// Tabs whose webview could not be created; not retried (or re-announced) until the tab is
     /// next selected, or sent Home while active.
     pub failed: Mutex<HashSet<TabId>>,
+    /// The tab each open window showed at its last sync, by window label: a change closes the
+    /// window's downloads popup.
+    pub shown: Mutex<HashMap<String, Option<TabId>>>,
     /// What the menu bar was last built from (`menu::refresh`).
     pub menu: Mutex<Option<MenuKey>>,
     /// The app-wide config in force (the last good one).
