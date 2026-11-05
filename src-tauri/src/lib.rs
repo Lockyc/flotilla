@@ -339,6 +339,7 @@ pub fn run() {
             commands::downloads_toggle,
             commands::downloads_state,
             commands::incoming_action,
+            commands::move_tab,
             commands::set_hole_rect,
             commands::shell_home_create_config,
             commands::shell_home_edit_config,

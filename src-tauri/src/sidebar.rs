@@ -77,7 +77,9 @@ fn remove_confirm(g: &flotilla_core::model::Group) -> String {
 /// (`created`): the row's dot then offers Unload, and tab cycling skips cold rows. `icon` is the
 /// glyph of the kind of Google page the tab opens on; other pages keep chrome-core's letter tile.
 /// The window's Unsorted documents come first, a headless run keyed [`UNSORTED`], which
-/// chrome-core labels "Unsorted"; with none, there is no such run.
+/// chrome-core labels "Unsorted"; with none, there is no such run, and `dropSections` offers it
+/// as a drop zone while a row is dragged. Every document (any row but a head) is `movable`:
+/// dragged onto another group or Unsorted, it moves there (`commands::move_tab`).
 pub fn sidebar_dto(window: Option<&WindowWs>, created: &HashSet<TabId>) -> Value {
     let groups = window.map_or(&[][..], |w| &w.groups[..]);
     let unsorted = window.map_or(&[][..], |w| &w.unsorted[..]);
@@ -88,6 +90,7 @@ pub fn sidebar_dto(window: Option<&WindowWs>, created: &HashSet<TabId>) -> Value
             "group": group,
             "groupName": name,
             "head": head,
+            "movable": !head,
             "confirmRemove": confirm,
             "detached": t.detached,
             "icon": icon_of(&t.home_url),
@@ -118,7 +121,13 @@ pub fn sidebar_dto(window: Option<&WindowWs>, created: &HashSet<TabId>) -> Value
         .map(|g| g.head.id.as_str())
         .collect();
     let active = window.and_then(|w| w.active.as_ref());
-    json!({ "active": active, "collapsed": collapsed, "tabs": tabs })
+    let drop_sections = json!([{ "group": UNSORTED, "label": "Unsorted" }]);
+    json!({
+        "active": active,
+        "collapsed": collapsed,
+        "dropSections": drop_sections,
+        "tabs": tabs,
+    })
 }
 
 /// The glyph a tab opening on `home_url` shows, if it is a Google page.
@@ -174,6 +183,13 @@ mod tests {
         assert_eq!(rows[0]["groupName"], json!("Unsorted"));
         assert_eq!(rows[0]["head"], json!(false));
         assert_eq!(rows[1]["id"], json!(h));
+        // Documents drag; heads don't; Unsorted takes a drop even while empty.
+        assert_eq!(rows[0]["movable"], json!(true));
+        assert_eq!(rows[1]["movable"], json!(false));
+        assert_eq!(
+            none["dropSections"],
+            json!([{ "group": UNSORTED, "label": "Unsorted" }])
+        );
     }
 
     #[test]

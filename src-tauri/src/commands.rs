@@ -5,7 +5,7 @@
 use crate::config::DEFAULT_STORE;
 use crate::state::AppState;
 use crate::tabs;
-use flotilla_core::model::{opened_id, Handed, TabId};
+use flotilla_core::model::{opened_id, Dest, Handed, TabId};
 use flotilla_core::nav::parse_group_url;
 use serde::Deserialize;
 use shell_core::compositing::{layout_webviews, HoleRect};
@@ -198,6 +198,22 @@ pub fn toggle_group(head: TabId, collapsed: bool, webview: Webview) -> Result<()
         ws.set_collapsed(&head, collapsed)
     });
     tabs::push_dto(webview.app_handle());
+    Ok(())
+}
+
+/// A row dragged onto another section of the calling window's sidebar (chrome-core's
+/// `onMoveTab`): the group headed by `group`, or ([`crate::sidebar::UNSORTED`]) the window's
+/// Unsorted.
+#[tauri::command]
+pub fn move_tab(id: TabId, group: String, webview: Webview) -> Result<(), String> {
+    let window = require_chrome(&webview)?;
+    let app = webview.app_handle();
+    let live = tabs::live(app);
+    let dest = match group.as_str() {
+        crate::sidebar::UNSORTED => Dest::Unsorted(&window),
+        _ => Dest::Group(&group),
+    };
+    mutate(app, |ws| ws.move_tab(&id, dest, &live));
     Ok(())
 }
 

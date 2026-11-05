@@ -82,6 +82,9 @@ async function mountChrome() {
       onIncomingAction(id, action, { x, y }) {
         invoke("incoming_action", { id, action, x, y }).catch((err) => sb.setError(String(err)));
       },
+      onMoveTab(id, group) {
+        invoke("move_tab", { id, group }).catch((err) => sb.setError(String(err)));
+      },
       onToggleGroup(group, collapsed) {
         invoke("toggle_group", { head: group, collapsed }).catch(() => {});
       },
