@@ -5,7 +5,7 @@
 
 use crate::state::AppState;
 use flotilla_core::identity::{is_tab_id, page_title};
-use flotilla_core::model::{Opened, Tab, TabId, WindowWs, Workspace};
+use flotilla_core::model::{Opened, TabId, WindowWs, Workspace};
 use flotilla_core::nav::{self, Decision};
 use shell_core::compositing::HoleRect;
 use shell_core::label::{child_label, window_of};
@@ -103,12 +103,7 @@ pub fn plan(
     warm: &HashSet<TabId>,
 ) -> ViewPlan {
     let here = |id: &TabId| {
-        window(ws, title).is_some_and(|w| {
-            w.groups
-                .iter()
-                .flat_map(|g| std::iter::once(&g.head).chain(&g.members))
-                .any(|t| &t.id == id && !t.detached)
-        })
+        window(ws, title).is_some_and(|w| w.tabs().any(|t| &t.id == id && !t.detached))
     };
     let mut close: Vec<TabId> = created.iter().filter(|id| !here(id)).cloned().collect();
     close.sort();
@@ -117,19 +112,18 @@ pub fn plan(
         .as_ref()
         .filter(|id| !created.contains(*id) && !failed.contains(*id));
     let wait = wanted.is_some_and(|id| closing.contains(id));
-    let target = |(_, g, t): (usize, &flotilla_core::model::Group, &Tab)| Target {
-        id: t.id.clone(),
-        home_url: t.home_url.clone(),
-        store: g.store.clone(),
+    let target = |id: &TabId| {
+        let (_, _, t) = ws.find(id)?;
+        Some(Target {
+            id: t.id.clone(),
+            home_url: t.home_url.clone(),
+            store: ws.store_of(id)?.to_string(),
+        })
     };
-    let create = wanted
-        .filter(|_| !wait)
-        .and_then(|id| ws.find(id))
-        .map(target);
+    let create = wanted.filter(|_| !wait).and_then(target);
     let warm: Vec<Target> = window(ws, title)
         .into_iter()
-        .flat_map(|w| &w.groups)
-        .flat_map(|g| std::iter::once(&g.head).chain(&g.members))
+        .flat_map(|w| w.tabs())
         .map(|t| &t.id)
         .filter(|id| {
             warm.contains(*id)
@@ -139,7 +133,7 @@ pub fn plan(
                 && !failed.contains(*id)
                 && !closing.contains(*id)
         })
-        .filter_map(|id| ws.find(id).map(target))
+        .filter_map(target)
         .collect();
     // While waiting, the webview under the active tab's label is the closing one: not shown.
     let show = show.filter(|_| !wait);
@@ -533,6 +527,7 @@ pub(crate) mod testing {
 
     pub fn one_window() -> Workspace {
         Workspace::from_config(&[ConfigWindow {
+            unsorted: vec![],
             title: "W".into(),
             groups: vec![],
         }])
@@ -586,6 +581,7 @@ mod tests {
     /// Windows A and B, each with a folder group and a document; each window's document active.
     fn two_windows() -> (Workspace, TabId, TabId) {
         let window = |t: &str| ConfigWindow {
+            unsorted: vec![],
             title: t.into(),
             groups: vec![],
         };

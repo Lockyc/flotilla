@@ -55,10 +55,12 @@ pub type FlotillaWindow = config_core::Window<DocTab, WindowExtras, FlotillaGrou
 pub struct WindowExtras {
     /// Overrides the global `open_tabs_section` for this window.
     pub open_tabs_section: Option<bool>,
+    /// The `[[window.tab]]`s: documents in no group (the window's Unsorted), in the default store.
+    #[serde(rename = "tab")]
+    pub unsorted: Vec<DocTab>,
 }
 
-/// The login store a group without `store` opens in.
-pub const DEFAULT_STORE: &str = "default";
+pub use flotilla_core::model::DEFAULT_STORE;
 
 fn default_store() -> String {
     DEFAULT_STORE.to_string()
@@ -143,6 +145,7 @@ impl Config {
             .iter()
             .map(|w| ConfigWindow {
                 title: w.title.clone(),
+                unsorted: w.extra.unsorted.iter().map(config_tab).collect(),
                 groups: w
                     .groups
                     .iter()
@@ -152,19 +155,19 @@ impl Config {
                         store: g.extra.store.clone(),
                         collapsed: g.extra.collapsed,
                         detached: g.extra.detached,
-                        tabs: g
-                            .tabs
-                            .iter()
-                            .map(|t| ConfigTab {
-                                title: t.title.clone(),
-                                url: t.url.clone(),
-                                detached: t.detached,
-                            })
-                            .collect(),
+                        tabs: g.tabs.iter().map(config_tab).collect(),
                     })
                     .collect(),
             })
             .collect()
+    }
+}
+
+fn config_tab(t: &DocTab) -> ConfigTab {
+    ConfigTab {
+        title: t.title.clone(),
+        url: t.url.clone(),
+        detached: t.detached,
     }
 }
 
@@ -180,26 +183,30 @@ pub fn parse(src: &str) -> Result<Config, String> {
         }
     }
     let mut seen: HashMap<DocKey, String> = HashMap::new();
+    let mut claim = |at: String, store: &str, url: &str| -> Result<(), String> {
+        let parsed = Url::parse(url)
+            .ok()
+            .filter(|u| matches!(u.scheme(), "http" | "https"))
+            .ok_or_else(|| format!("config: {at}: `{url}` is not an http(s) address"))?;
+        match seen.insert(identity(store, &parsed), at.clone()) {
+            Some(first) => Err(format!(
+                "config: {first} and {at} are the same document, which opens once"
+            )),
+            None => Ok(()),
+        }
+    };
     for w in &cfg.windows {
         let window = w.title.trim();
+        for t in &w.extra.unsorted {
+            let at = format!("`{}` (window `{window}`)", t.title.trim());
+            claim(at, DEFAULT_STORE, &t.url)?;
+        }
         for g in &w.groups {
             let group = g.name.trim();
-            let mut claim = |name: &str, url: &str| -> Result<(), String> {
-                let at = format!("`{name}` (window `{window}`, group `{group}`)");
-                let parsed = Url::parse(url)
-                    .ok()
-                    .filter(|u| matches!(u.scheme(), "http" | "https"))
-                    .ok_or_else(|| format!("config: {at}: `{url}` is not an http(s) address"))?;
-                match seen.insert(identity(&g.extra.store, &parsed), at.clone()) {
-                    Some(first) => Err(format!(
-                        "config: {first} and {at} are the same document, which opens once"
-                    )),
-                    None => Ok(()),
-                }
-            };
-            claim(group, &g.extra.url)?;
+            let at = |name: &str| format!("`{name}` (window `{window}`, group `{group}`)");
+            claim(at(group), &g.extra.store, &g.extra.url)?;
             for t in &g.tabs {
-                claim(t.title.trim(), &t.url)?;
+                claim(at(t.title.trim()), &g.extra.store, &t.url)?;
             }
         }
     }
@@ -252,13 +259,14 @@ mod tests {
     ];
     /// Every `[[window]]`, `[[window.group]]` and `[[window.group.tab]]` key; the starter
     /// config's commented example documents each one.
-    const WINDOW_KEYS: [&str; 7] = [
+    const WINDOW_KEYS: [&str; 8] = [
         "title",
         "colour",
         "width",
         "height",
         "open_on_start",
         "open_tabs_section",
+        "tab",
         "group",
     ];
     const GROUP_KEYS: [&str; 6] = ["name", "url", "store", "collapsed", "detached", "tab"];
@@ -307,8 +315,11 @@ mod tests {
         assert_keys(group, &GROUP_KEYS, "[[window.group]]");
         let tab = group["tab"].as_array().unwrap()[0].as_table().unwrap();
         assert_keys(tab, &TAB_KEYS, "[[window.group.tab]]");
+        let loose = window["tab"].as_array().unwrap()[0].as_table().unwrap();
+        assert_keys(loose, &TAB_KEYS, "[[window.tab]]");
         let cfg = parse(&example).unwrap();
         assert_eq!(cfg.windows[0].groups[0].tabs.len(), 1);
+        assert_eq!(cfg.windows[0].extra.unsorted.len(), 1);
     }
 
     #[test]
@@ -388,6 +399,7 @@ mod tests {
         assert_eq!(
             cfg.workspace_windows(),
             vec![ConfigWindow {
+                unsorted: vec![],
                 title: " Club ".into(),
                 groups: vec![ConfigGroup {
                     name: "A".into(),

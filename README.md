@@ -26,8 +26,8 @@ A macOS workspace for work that spreads across many documents. Each piece of wor
 - **Downloads.** **File ▸ Download** in a Doc, Sheet or Slides deck, like any download link, saves to `~/Downloads`. The toolbar's downloads button lists recent downloads: click one to open it, or **Show in Finder**.
 - **Restored on relaunch.** Every group comes back with its head, its documents and its popped-out windows, and the tabs that were loaded load again.
 - **Unload, remove and reopen.** **⌘W** unloads the active tab, keeping its row; the live dot unloads any row, and a group row's stacked-dots button (or **Unload Group**) unloads its head and documents together, popped-out windows aside. A row's bin removes the tab, and **⌘⇧⌫** closes its whole group, popped-out windows included. A closed group (or a removed head, which takes its group with it) is kept: choosing it under **Group ▸ Recent** reopens it with its documents, docked in the focused window; **Recent ▸ Clear Recent** empties the list.
-- **Find things in the sidebar.** Groups list their documents beneath them, each marked as a Doc, Sheet, Slides deck, Form or Drive folder, and search covers every group. Right-click a row, or use the **Group** menu, for Home, Rename…, Set Home to Current Page, Make Own Group, Move to Group, Remove Tab, Unload Group and Close Group.
-- **Links sent from other apps.** `open -a flotilla <link>`, or a link router, hands flotilla a link, and the last focused window takes it. A folder or page opens as a new group, and a document already open is brought up. Any other document waits under **Incoming** at the top of the sidebar until you **Add to** the active group, **Add to group…**, open it as a **New group**, or **Dismiss** it. A link aimed at a window and group ([below](#for-link-routers)) joins that group directly. The queue is kept across relaunches.
+- **Find things in the sidebar.** Groups list their documents beneath them, each marked as a Doc, Sheet, Slides deck, Form or Drive folder, and search covers every group. Right-click a row, or use the **Group** menu, for Home, Rename…, Set Home to Current Page, Make Own Group, Move to Unsorted, Move to Group, Remove Tab, Unload Group and Close Group.
+- **Links sent from other apps.** `open -a flotilla <link>`, or a link router, hands flotilla a link, and the last focused window takes it. A folder or page opens as a new group, and a document already open is brought up. Any other document opens straight away under **Unsorted** at the top of the sidebar, to sort into a group when you're ready. A link aimed at a window and group ([below](#for-link-routers)) joins that group directly. A link that can't open, or whose save to the config failed, waits under **Incoming** until you add it to a group, open it as a new group, or dismiss it; that queue is kept across relaunches.
 - **Names and homes are yours.** A new group or document is named by its page's title once it loads; after that the name stays as written, wherever the tab navigates. **Rename…** edits it in place. **Set Home to Current Page** makes the page a tab has browsed to its home, so Home and relaunch land there; a group keeps its documents.
 
 Links to other sites leave flotilla for your default browser. Content runs in WKWebView (Safari's engine), so Chrome extensions and Docs offline mode are not available.
@@ -79,6 +79,7 @@ A document is open once across every window: two heads or tabs naming the same d
 | `[[window.group.tab]]` `title` | required | The document's name in the sidebar, written like a group's `name`. |
 | `[[window.group.tab]]` `url` | required | The document, and its Home. |
 | `[[window.group.tab]]` `detached` | `false` | Popped out; reopens in its own window. |
+| `[[window.tab]]` `title`, `url`, `detached` | as `[[window.group.tab]]` | A document in no group, listed under **Unsorted**; it opens in the default store. |
 | `density` | `"comfortable"` | Chrome sizing: `comfortable` or `compact` (type and spacing scaled down). Hot-reloads. |
 | `dark_mode` | `false` | Force a dark appearance so pages honouring `prefers-color-scheme` render dark. Hot-reloads. |
 | `tab_digit_keys` | `"jump"` | What ⌘1/⌘2 do: `jump` — ⌘1–⌘9 go to that tab; `cycle` — ⌘1 next tab, ⌘2 previous, ⌘3–⌘9 go to that tab. **Tab ▸ Cycle Tabs with ⌘1/⌘2** flips it. Hot-reloads. |
@@ -89,7 +90,7 @@ A document is open once across every window: two heads or tabs naming the same d
 
 ## For link routers
 
-flotilla takes `flotilla://open?window=<title>&group=<name>&url=<link>`, every value percent-encoded. `window` names the window to take the link (else the last focused one), and `group` the group in it a document joins (else it waits under Incoming). Launch it with `open -b au.lsjc.flotilla '<that URL>'`.
+flotilla takes `flotilla://open?window=<title>&group=<name>&url=<link>`, every value percent-encoded. `window` names the window to take the link (else the last focused one), and `group` the group in it a document joins (else it opens under Unsorted). Launch it with `open -b au.lsjc.flotilla '<that URL>'`.
 
 The windows and their groups are published in `~/Library/Application Support/au.lsjc.flotilla/windows.json`, written at launch and whenever they change. Windows are in config order and groups in sidebar order; `colour` is `null` for a window without one:
 

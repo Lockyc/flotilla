@@ -38,6 +38,11 @@ title = "flotilla"
 # open_on_start = true        # optional; false leaves it closed until opened from the Window menu
 # open_tabs_section = true    # optional; overrides the global open_tabs_section for this window
 #
+# [[window.tab]]              # a document in no group: listed under Unsorted, default store
+# title = "Minutes"
+# url = "https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrSt03/edit"
+# detached = false
+#
 # [[window.group]]
 # name = "Club drive"         # the group's name in the sidebar
 # url = "https://drive.google.com/drive/folders/0AbCdEfGhIjKlMnOpQ"  # its head and Home

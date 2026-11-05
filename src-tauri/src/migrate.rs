@@ -130,9 +130,10 @@ fn add_group(config_path: &Path, window: &str, g: &Group) -> Result<(), String> 
         return Ok(());
     };
     let apply = |w: &Write| write::apply(config_path, w).map_err(|e| format!("config: {e}"));
-    let holder = ws
-        .find(&tab_id(&head))
-        .map(|(wi, grp, _)| (ws.windows[wi].title.clone(), grp.head.title.clone()));
+    let holder = ws.find(&tab_id(&head)).map(|(wi, grp, _)| {
+        let group = grp.map(|g| g.head.title.clone());
+        (ws.windows[wi].title.clone(), group)
+    });
     if let Some((window, group)) = holder {
         for doc in docs {
             apply(&Write::AddDoc {

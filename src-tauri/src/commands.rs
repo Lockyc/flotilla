@@ -272,7 +272,7 @@ pub fn handed_front(
     raised: Option<TabId>,
 ) -> Option<tabs::Forward> {
     match handed? {
-        Handed::Raised(id) | Handed::Grouped(id) | Handed::Joined(id) => {
+        Handed::Raised(id) | Handed::Grouped(id) | Handed::Joined(id) | Handed::Unsorted(id) => {
             tabs::front_for(ws, true, target, Some(id), raised)
         }
         // A row waiting in `stray` (there is no window) has no window to show.
@@ -346,7 +346,9 @@ pub fn requeue(
     last: Option<&str>,
     placed: &mut Placed,
 ) {
-    let (Some(Handed::Grouped(id)) | Some(Handed::Joined(id))) = &placed.handed else {
+    let (Some(Handed::Grouped(id)) | Some(Handed::Joined(id)) | Some(Handed::Unsorted(id))) =
+        &placed.handed
+    else {
         return;
     };
     if ws.find(id).is_some() {
@@ -775,6 +777,7 @@ mod tests {
 
     fn two_windows() -> Workspace {
         let window = |t: &str| ConfigWindow {
+            unsorted: vec![],
             title: t.into(),
             groups: vec![],
         };
@@ -851,7 +854,7 @@ mod tests {
         let window = |t: &str| Some(Forward::Window(t.into()));
         // Queued here, or waiting already in another window: that window.
         let doc = "https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrSt01/edit";
-        let Some(Handed::Queued(q)) = ws.receive("Work", None, doc, "default") else {
+        let Some(Handed::Queued(q)) = ws.queue("Work", doc, None) else {
             panic!()
         };
         assert_eq!(
@@ -914,6 +917,7 @@ mod tests {
         let mut ws = two_windows();
         let mut placed = place(&mut ws, &h, None);
         ws.rebase(Workspace::from_config(&[ConfigWindow {
+            unsorted: vec![],
             title: "Rotary".into(),
             groups: vec![],
         }]));

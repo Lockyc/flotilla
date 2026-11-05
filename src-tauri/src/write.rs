@@ -29,7 +29,8 @@ impl Doc {
 }
 
 /// One change to the config. Windows and groups are addressed by title and name as the file has
-/// them before the change; documents by their `url`. `url: None` addresses a group's head.
+/// them before the change; documents by their `url`, in a group, or with `group: None` in the
+/// window's Unsorted (`[[window.tab]]`). `url: None` addresses a group's head.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Write {
     NewGroup {
@@ -43,12 +44,12 @@ pub enum Write {
     },
     AddDoc {
         window: String,
-        group: String,
+        group: Option<String>,
         doc: Doc,
     },
     RemoveDoc {
         window: String,
-        group: String,
+        group: Option<String>,
         url: String,
     },
     RemoveGroup {
@@ -57,7 +58,7 @@ pub enum Write {
     },
     SetDetached {
         window: String,
-        group: String,
+        group: Option<String>,
         url: Option<String>,
         detached: bool,
     },
@@ -68,16 +69,16 @@ pub enum Write {
     },
     MoveDoc {
         window: String,
-        group: String,
+        group: Option<String>,
         url: String,
         to_window: String,
-        to_group: String,
+        to_group: Option<String>,
     },
     /// The document at `doc.url` leaves `group` to head a new group `name` (in the same store) at
     /// the end of `to_window`.
     MakeOwnGroup {
         window: String,
-        group: String,
+        group: Option<String>,
         doc: Doc,
         to_window: String,
         name: String,
@@ -85,7 +86,7 @@ pub enum Write {
     },
     SetTitle {
         window: String,
-        group: String,
+        group: Option<String>,
         url: String,
         title: String,
     },
@@ -96,7 +97,7 @@ pub enum Write {
     },
     SetUrl {
         window: String,
-        group: String,
+        group: Option<String>,
         url: Option<String>,
         new_url: String,
     },
@@ -137,11 +138,13 @@ pub fn change_rekey<E>(
     let mut before = ws.clone();
     let r = op(ws);
     if let Ok((old, new)) = &r {
-        let tabs = before
-            .windows
-            .iter_mut()
-            .flat_map(|w| w.groups.iter_mut())
-            .flat_map(|g| std::iter::once(&mut g.head).chain(g.members.iter_mut()));
+        let tabs = before.windows.iter_mut().flat_map(|w| {
+            w.unsorted.iter_mut().chain(
+                w.groups
+                    .iter_mut()
+                    .flat_map(|g| std::iter::once(&mut g.head).chain(g.members.iter_mut())),
+            )
+        });
         for t in tabs.filter(|t| &t.id == old) {
             t.id = new.clone();
         }
@@ -178,28 +181,51 @@ fn uniquify(before: &Workspace, after: &mut Workspace) {
     }
 }
 
-/// Where a tab sits.
+/// Where a tab sits: in a group (as its head or a member), or (`group: None`) in its window's
+/// Unsorted.
 struct Loc<'a> {
     window: &'a str,
-    group: &'a Group,
+    group: Option<&'a Group>,
     tab: &'a Tab,
     head: bool,
+}
+
+impl Loc<'_> {
+    /// The group's name as the file has it; `None` for Unsorted.
+    fn group_name(&self) -> Option<String> {
+        self.group.map(|g| g.head.title.clone())
+    }
+
+    /// The same list of documents: the same group, or the same window's Unsorted.
+    fn same_list(&self, other: &Loc) -> bool {
+        match (self.group, other.group) {
+            (Some(g), Some(o)) => g.head.id == o.head.id,
+            (None, None) => self.window == other.window,
+            _ => false,
+        }
+    }
 }
 
 fn locs(ws: &Workspace) -> Vec<Loc<'_>> {
     ws.windows
         .iter()
         .flat_map(|w| {
-            w.groups.iter().flat_map(move |g| {
+            let unsorted = w.unsorted.iter().map(move |tab| Loc {
+                window: &w.title,
+                group: None,
+                tab,
+                head: false,
+            });
+            unsorted.chain(w.groups.iter().flat_map(move |g| {
                 std::iter::once((&g.head, true))
                     .chain(g.members.iter().map(|m| (m, false)))
                     .map(move |(tab, head)| Loc {
                         window: &w.title,
-                        group: g,
+                        group: Some(g),
                         tab,
                         head,
                     })
-            })
+            }))
         })
         .collect()
 }
@@ -226,11 +252,12 @@ pub fn plan(before: &Workspace, after: &Workspace) -> Vec<Write> {
     // A group is the same group only in the same window: one that changed window is written anew.
     let same_group = |o: &Loc, l: &Loc| o.head && o.window == l.window;
     for l in a.iter().filter(|l| l.head) {
-        let g = l.group;
+        let g = l.group.expect("a head heads a group");
         match in_b(&g.head.id) {
             Some(o) if same_group(o, l) => {
-                let (window, group) = (o.window.to_string(), o.group.head.title.clone());
-                if o.group.collapsed != g.collapsed {
+                let old = o.group.expect("a head heads a group");
+                let (window, group) = (o.window.to_string(), old.head.title.clone());
+                if old.collapsed != g.collapsed {
                     fields.push(Write::SetCollapsed {
                         window: window.clone(),
                         group: group.clone(),
@@ -240,7 +267,7 @@ pub fn plan(before: &Workspace, after: &Workspace) -> Vec<Write> {
                 if o.tab.detached != g.head.detached {
                     fields.push(Write::SetDetached {
                         window: window.clone(),
-                        group: group.clone(),
+                        group: Some(group.clone()),
                         url: None,
                         detached: g.head.detached,
                     });
@@ -248,7 +275,7 @@ pub fn plan(before: &Workspace, after: &Workspace) -> Vec<Write> {
                 if o.tab.home_url != g.head.home_url {
                     fields.push(Write::SetUrl {
                         window: window.clone(),
-                        group: group.clone(),
+                        group: Some(group.clone()),
                         url: None,
                         new_url: g.head.home_url.clone(),
                     });
@@ -263,7 +290,7 @@ pub fn plan(before: &Workspace, after: &Workspace) -> Vec<Write> {
             }
             Some(o) if !o.head => groups.push(Write::MakeOwnGroup {
                 window: o.window.to_string(),
-                group: o.group.head.title.clone(),
+                group: o.group_name(),
                 doc: Doc::of(o.tab),
                 to_window: l.window.to_string(),
                 name: g.head.title.clone(),
@@ -285,22 +312,29 @@ pub fn plan(before: &Workspace, after: &Workspace) -> Vec<Write> {
         if !in_a(&l.tab.id).is_some_and(|n| same_group(l, n)) {
             removes.push(Write::RemoveGroup {
                 window: l.window.to_string(),
-                group: l.group.head.title.clone(),
+                group: l.tab.title.clone(),
             });
         }
     }
 
     for m in a.iter().filter(|l| !l.head) {
         // Members of a new group were written with it.
-        let Some(home) = in_b(&m.group.head.id).filter(|o| same_group(o, m)) else {
+        let home = match m.group {
+            Some(g) => in_b(&g.head.id)
+                .filter(|o| same_group(o, m))
+                .map(|o| (o.window.to_string(), o.group_name())),
+            None => before
+                .window_index(m.window)
+                .map(|_| (m.window.to_string(), None)),
+        };
+        let Some((window, group)) = home else {
             continue;
         };
-        let (window, group) = (home.window.to_string(), home.group.head.title.clone());
         match in_b(&m.tab.id)
             .filter(|o| !o.head)
             .or_else(|| moved_by_url(m))
         {
-            Some(o) if o.group.head.id == m.group.head.id => {
+            Some(o) if o.same_list(m) => {
                 let url = o.tab.home_url.clone();
                 if o.tab.detached != m.tab.detached {
                     fields.push(Write::SetDetached {
@@ -329,7 +363,7 @@ pub fn plan(before: &Workspace, after: &Workspace) -> Vec<Write> {
             }
             Some(o) => docs.push(Write::MoveDoc {
                 window: o.window.to_string(),
-                group: o.group.head.title.clone(),
+                group: o.group_name(),
                 url: o.tab.home_url.clone(),
                 to_window: window,
                 to_group: group,
@@ -347,11 +381,14 @@ pub fn plan(before: &Workspace, after: &Workspace) -> Vec<Write> {
             && !a
                 .iter()
                 .any(|m| !m.head && m.tab.home_url == o.tab.home_url && in_b(&m.tab.id).is_none());
-        let group_stays = in_a(&o.group.head.id).is_some_and(|l| l.head && l.window == o.window);
-        if gone && group_stays {
+        let list_stays = match o.group {
+            Some(g) => in_a(&g.head.id).is_some_and(|l| l.head && l.window == o.window),
+            None => after.window_index(o.window).is_some(),
+        };
+        if gone && list_stays {
             removes.push(Write::RemoveDoc {
                 window: o.window.to_string(),
-                group: o.group.head.title.clone(),
+                group: o.group_name(),
                 url: o.tab.home_url.clone(),
             });
         }
@@ -366,11 +403,16 @@ pub fn plan(before: &Workspace, after: &Workspace) -> Vec<Write> {
         .collect()
 }
 
-/// The group's head (`url: None`) or the document at `url`.
-fn tab_at<'a>(window: &'a str, group: &'a str, url: Option<&'a str>) -> At<'a> {
+/// The group's head (`url: None`) or the document at `url`, in the group or (`group: None`) the
+/// window's Unsorted. Never both `None`: that addresses the window itself.
+fn tab_at<'a>(window: &'a str, group: Option<&'a str>, url: Option<&'a str>) -> At<'a> {
+    debug_assert!(
+        group.is_some() || url.is_some(),
+        "a write never addresses a window"
+    );
     At {
         window,
-        group: Some(group),
+        group,
         tab: url.map(|u| ("url", u)),
     }
 }
@@ -405,7 +447,7 @@ fn group_fields(
     f
 }
 
-/// One config-core edit: one atomic rewrite of the file.
+/// One config-core edit: one atomic rewrite of the file. `group: None` is the window's Unsorted.
 pub(crate) enum Step {
     AddGroup {
         window: String,
@@ -413,29 +455,29 @@ pub(crate) enum Step {
     },
     AddTab {
         window: String,
-        group: String,
+        group: Option<String>,
         fields: Vec<(&'static str, Value)>,
     },
     /// The document at `url`, else the whole group.
     Remove {
         window: String,
-        group: String,
+        group: Option<String>,
         url: Option<String>,
     },
     /// `key` on the document at `url`, else on the group; `None` removes it.
     Set {
         window: String,
-        group: String,
+        group: Option<String>,
         url: Option<String>,
         key: &'static str,
         value: Option<Value>,
     },
     Move {
         window: String,
-        group: String,
+        group: Option<String>,
         url: String,
         to_window: String,
-        to_group: String,
+        to_group: Option<String>,
     },
 }
 
@@ -447,9 +489,9 @@ impl Step {
                 window,
                 group,
                 fields,
-            } => add_tab(path, window, Some(group), fields),
+            } => add_tab(path, window, group.as_deref(), fields),
             Step::Remove { window, group, url } => {
-                remove(path, tab_at(window, group, url.as_deref()))
+                remove(path, tab_at(window, group.as_deref(), url.as_deref()))
             }
             Step::Set {
                 window,
@@ -459,7 +501,7 @@ impl Step {
                 value,
             } => set_field(
                 path,
-                tab_at(window, group, url.as_deref()),
+                tab_at(window, group.as_deref(), url.as_deref()),
                 key,
                 value.clone(),
             ),
@@ -471,9 +513,9 @@ impl Step {
                 to_group,
             } => move_tab(
                 path,
-                tab_at(window, group, Some(url)),
+                tab_at(window, group.as_deref(), Some(url)),
                 to_window,
-                Some(to_group),
+                to_group.as_deref(),
             ),
         }
     }
@@ -483,9 +525,9 @@ impl Step {
 /// Make Own Group removes the document before adding the group it heads, so the document is
 /// never listed twice.
 pub(crate) fn steps(w: &Write) -> Vec<Step> {
-    let set = |window: &str, group: &str, url: Option<&str>, key, value| Step::Set {
+    let set = |window: &str, group: Option<&str>, url: Option<&str>, key, value| Step::Set {
         window: window.into(),
-        group: group.into(),
+        group: group.map(Into::into),
         url: url.map(Into::into),
         key,
         value,
@@ -505,7 +547,7 @@ pub(crate) fn steps(w: &Write) -> Vec<Step> {
         })
         .chain(docs.iter().map(|d| Step::AddTab {
             window: window.clone(),
-            group: name.clone(),
+            group: Some(name.clone()),
             fields: doc_fields(d),
         }))
         .collect(),
@@ -521,7 +563,7 @@ pub(crate) fn steps(w: &Write) -> Vec<Step> {
         }],
         Write::RemoveGroup { window, group } => vec![Step::Remove {
             window,
-            group,
+            group: Some(group),
             url: None,
         }],
         Write::SetDetached {
@@ -531,7 +573,7 @@ pub(crate) fn steps(w: &Write) -> Vec<Step> {
             detached,
         } => vec![set(
             &window,
-            &group,
+            group.as_deref(),
             url.as_deref(),
             "detached",
             flag(detached),
@@ -540,7 +582,13 @@ pub(crate) fn steps(w: &Write) -> Vec<Step> {
             window,
             group,
             collapsed,
-        } => vec![set(&window, &group, None, "collapsed", flag(collapsed))],
+        } => vec![set(
+            &window,
+            Some(&group),
+            None,
+            "collapsed",
+            flag(collapsed),
+        )],
         Write::MoveDoc {
             window,
             group,
@@ -579,7 +627,7 @@ pub(crate) fn steps(w: &Write) -> Vec<Step> {
             title,
         } => vec![set(
             &window,
-            &group,
+            group.as_deref(),
             Some(&url),
             "title",
             Some(Value::from(title)),
@@ -588,7 +636,13 @@ pub(crate) fn steps(w: &Write) -> Vec<Step> {
             window,
             group,
             name,
-        } => vec![set(&window, &group, None, "name", Some(Value::from(name)))],
+        } => vec![set(
+            &window,
+            Some(&group),
+            None,
+            "name",
+            Some(Value::from(name)),
+        )],
         Write::SetUrl {
             window,
             group,
@@ -596,7 +650,7 @@ pub(crate) fn steps(w: &Write) -> Vec<Step> {
             new_url,
         } => vec![set(
             &window,
-            &group,
+            group.as_deref(),
             url.as_deref(),
             "url",
             Some(Value::from(new_url)),
@@ -768,7 +822,7 @@ pub(crate) fn through_with<R>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flotilla_core::model::Opened;
+    use flotilla_core::model::{Dest, Opened};
     use url::Url;
 
     const F1: &str = "https://drive.google.com/drive/folders/f1";
@@ -777,12 +831,15 @@ mod tests {
     const D1: &str = "https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrSt01/edit";
     const D2: &str = "https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrSt02/edit";
     const D3: &str = "https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrSt03/edit";
+    const D4: &str = "https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrSt04/edit";
+    const D5: &str = "https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrSt05/edit";
 
-    /// Window A: "One" (F1; Budget D1, Minutes D2) and "Two" (F2). Window B: "Three" (F3, store
-    /// work).
+    /// Window A: Unsorted (Loose D4), "One" (F1; Budget D1, Minutes D2) and "Two" (F2). Window B:
+    /// "Three" (F3, store work).
     fn source() -> String {
         format!(
             "# kept\n[[window]]\ntitle = \"A\"\n\
+             [[window.tab]]\ntitle = \"Loose\"\nurl = \"{D4}\"\n\
              [[window.group]]\nname = \"One\"\nurl = \"{F1}\" # the head\n\
              [[window.group.tab]]\ntitle = \"Budget\"\nurl = \"{D1}\"\n\
              [[window.group.tab]]\ntitle = \"Minutes\"\nurl = \"{D2}\"\n\
@@ -856,7 +913,7 @@ mod tests {
             one(writes),
             Write::SetUrl {
                 window: "A".into(),
-                group: "One".into(),
+                group: Some("One".into()),
                 url: None,
                 new_url: sub.into(),
             }
@@ -901,7 +958,7 @@ mod tests {
             one(writes),
             Write::SetUrl {
                 window: "A".into(),
-                group: "One".into(),
+                group: Some("One".into()),
                 url: Some(D1.into()),
                 new_url: D3.into(),
             }
@@ -947,7 +1004,7 @@ mod tests {
             assert!(matches!(ws.open_from(&h, &url(D3)), Some(Opened::Added(_))));
         }));
         assert!(
-            matches!(&w, Write::AddDoc { group, doc, .. } if group == "Two" && doc.title == D3)
+            matches!(&w, Write::AddDoc { group, doc, .. } if group.as_deref() == Some("Two") && doc.title == D3)
         );
 
         let w = one(run(|ws| ws.close_tab(&id_of(ws, D2), &Default::default())));
@@ -955,7 +1012,7 @@ mod tests {
             w,
             Write::RemoveDoc {
                 window: "A".into(),
-                group: "One".into(),
+                group: Some("One".into()),
                 url: D2.into()
             }
         );
@@ -969,7 +1026,9 @@ mod tests {
         assert!(matches!(&w, Write::SetDetached { url: Some(u), detached: true, .. } if u == D1));
 
         let w = one(run(|ws| ws.set_detached(&id_of(ws, F2), true)));
-        assert!(matches!(&w, Write::SetDetached { url: None, group, .. } if group == "Two"));
+        assert!(
+            matches!(&w, Write::SetDetached { url: None, group, .. } if group.as_deref() == Some("Two"))
+        );
 
         let w = one(run(|ws| ws.set_collapsed(&id_of(ws, F1), true)));
         assert!(matches!(
@@ -981,16 +1040,20 @@ mod tests {
         ));
 
         let w = one(run(|ws| {
-            ws.move_to_group(&id_of(ws, D1), &id_of(ws, F2), &Default::default())
+            let (d, h) = (id_of(ws, D1), id_of(ws, F2));
+            ws.move_tab(&d, Dest::Group(&h), &Default::default())
         }));
-        assert!(matches!(&w, Write::MoveDoc { to_group, .. } if to_group == "Two"));
+        assert!(
+            matches!(&w, Write::MoveDoc { to_group, .. } if to_group.as_deref() == Some("Two"))
+        );
 
         // Into another window, and another store: the id changes, the table moves.
         let w = one(run(|ws| {
-            ws.move_to_group(&id_of(ws, D1), &id_of(ws, F3), &Default::default())
+            let (d, h) = (id_of(ws, D1), id_of(ws, F3));
+            ws.move_tab(&d, Dest::Group(&h), &Default::default())
         }));
         assert!(
-            matches!(&w, Write::MoveDoc { to_window, to_group, .. } if to_window == "B" && to_group == "Three")
+            matches!(&w, Write::MoveDoc { to_window, to_group, .. } if to_window == "B" && to_group.as_deref() == Some("Three"))
         );
 
         let w = one(run(|ws| ws.make_own_group(&id_of(ws, D2))));
@@ -1026,6 +1089,59 @@ mod tests {
     }
 
     #[test]
+    fn unsorted_documents_are_written_as_window_tabs() {
+        let unsorted = |w: &Write| match w {
+            Write::AddDoc { group, .. }
+            | Write::RemoveDoc { group, .. }
+            | Write::SetTitle { group, .. }
+            | Write::SetDetached { group, .. } => group.is_none(),
+            _ => false,
+        };
+        // A handed document that names no group.
+        let w = one(run(|ws| {
+            ws.receive("A", None, D5, "default").unwrap();
+        }));
+        assert!(matches!(&w, Write::AddDoc { doc, .. } if doc.url == D5) && unsorted(&w));
+
+        let w = one(run(|ws| ws.set_title(&id_of(ws, D4), "Agenda")));
+        assert!(matches!(&w, Write::SetTitle { title, .. } if title == "Agenda") && unsorted(&w));
+
+        let w = one(run(|ws| ws.set_detached(&id_of(ws, D4), true)));
+        assert!(matches!(&w, Write::SetDetached { detached: true, .. }) && unsorted(&w));
+
+        let w = one(run(|ws| ws.close_tab(&id_of(ws, D4), &Default::default())));
+        assert!(matches!(&w, Write::RemoveDoc { url, .. } if url == D4) && unsorted(&w));
+
+        // Into a group, out of one, and into another window's Unsorted on another store.
+        let w = one(run(|ws| {
+            let (d, h) = (id_of(ws, D4), id_of(ws, F2));
+            ws.move_tab(&d, Dest::Group(&h), &Default::default())
+        }));
+        assert_eq!(
+            w,
+            Write::MoveDoc {
+                window: "A".into(),
+                group: None,
+                url: D4.into(),
+                to_window: "A".into(),
+                to_group: Some("Two".into()),
+            }
+        );
+        let w = one(run(|ws| {
+            ws.move_tab(&id_of(ws, D1), Dest::Unsorted("A"), &Default::default())
+        }));
+        assert!(matches!(&w, Write::MoveDoc { group: Some(g), to_group: None, .. } if g == "One"));
+        let w = one(run(|ws| {
+            let (d, h) = (id_of(ws, D4), id_of(ws, F3));
+            ws.move_tab(&d, Dest::Group(&h), &Default::default())
+        }));
+        assert!(matches!(&w, Write::MoveDoc { to_window, group: None, .. } if to_window == "B"));
+
+        let w = one(run(|ws| ws.make_own_group(&id_of(ws, D4))));
+        assert!(matches!(&w, Write::MakeOwnGroup { group: None, name, .. } if name == "Loose"));
+    }
+
+    #[test]
     fn a_name_taken_in_the_window_is_suffixed_in_the_model_and_the_file() {
         let w = one(run(|ws| ws.set_title(&id_of(ws, F2), "One")));
         assert!(matches!(&w, Write::SetName { name, .. } if name == "One 2"));
@@ -1047,7 +1163,7 @@ mod tests {
             &path,
             &Write::SetUrl {
                 window: "A".into(),
-                group: "One".into(),
+                group: Some("One".into()),
                 url: None,
                 new_url: sub.into(),
             },
@@ -1057,7 +1173,7 @@ mod tests {
             &path,
             &Write::SetUrl {
                 window: "A".into(),
-                group: "One".into(),
+                group: Some("One".into()),
                 url: Some(D1.into()),
                 new_url: D3.into(),
             },
@@ -1174,7 +1290,7 @@ mod tests {
         // The failed change is undone even with no reload behind it (a file that doesn't parse).
         {
             let w = ws.lock().unwrap();
-            assert!(!w.find(&id_of(&w, F2)).unwrap().1.collapsed);
+            assert!(!w.group_of(&id_of(&w, F2)).unwrap().collapsed);
         }
         // A commit that lands does no view work of its own: the caller's follows it.
         through_with(

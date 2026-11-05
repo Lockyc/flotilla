@@ -1,10 +1,13 @@
 //! The chrome-core DTO for the workspace: what the sidebar renders.
 
 use flotilla_core::identity::{kind, Kind};
-use flotilla_core::model::{TabId, WindowWs, Workspace};
+use flotilla_core::model::{Tab, TabId, WindowWs, Workspace};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use url::Url;
+
+/// The DTO `group` of a window's Unsorted rows; tab ids are `t-…`, so it is never a head's.
+pub const UNSORTED: &str = "unsorted";
 
 /// The Incoming row actions, as chrome-core's `onIncomingAction` reports them
 /// ([`crate::commands::incoming_action`]).
@@ -73,33 +76,41 @@ fn remove_confirm(g: &flotilla_core::model::Group) -> String {
 /// bin opens a confirm saying so ([`remove_confirm`]). `live` is whether the tab's webview exists
 /// (`created`): the row's dot then offers Unload, and tab cycling skips cold rows. `icon` is the
 /// glyph of the kind of Google page the tab opens on; other pages keep chrome-core's letter tile.
+/// The window's Unsorted documents come first, a headless run keyed [`UNSORTED`], which
+/// chrome-core labels "Unsorted"; with none, there is no such run.
 pub fn sidebar_dto(window: Option<&WindowWs>, created: &HashSet<TabId>) -> Value {
     let groups = window.map_or(&[][..], |w| &w.groups[..]);
-    let tabs: Vec<Value> = groups
+    let unsorted = window.map_or(&[][..], |w| &w.unsorted[..]);
+    let row = |t: &Tab, group: &str, name: &str, head: bool, confirm: Option<String>| {
+        json!({
+            "id": t.id,
+            "title": t.title,
+            "group": group,
+            "groupName": name,
+            "head": head,
+            "confirmRemove": confirm,
+            "detached": t.detached,
+            "icon": icon_of(&t.home_url),
+            "live": created.contains(&t.id),
+            "attention": null,
+            "presence": null,
+            "killable": false,
+            "suspendable": false,
+            "startable": false,
+            "warn": false,
+        })
+    };
+    let tabs: Vec<Value> = unsorted
         .iter()
-        .flat_map(|g| {
+        .map(|t| row(t, UNSORTED, "Unsorted", false, None))
+        .chain(groups.iter().flat_map(|g| {
             std::iter::once((&g.head, true))
                 .chain(g.members.iter().map(|m| (m, false)))
                 .map(move |(t, head)| {
-                    json!({
-                        "id": t.id,
-                        "title": t.title,
-                        "group": g.head.id,
-                        "groupName": g.head.title,
-                        "head": head,
-                        "confirmRemove": head.then(|| remove_confirm(g)),
-                        "detached": t.detached,
-                        "icon": icon_of(&t.home_url),
-                        "live": created.contains(&t.id),
-                        "attention": null,
-                        "presence": null,
-                        "killable": false,
-                        "suspendable": false,
-                        "startable": false,
-                        "warn": false,
-                    })
+                    let confirm = head.then(|| remove_confirm(g));
+                    row(t, &g.head.id, &g.head.title, head, confirm)
                 })
-        })
+        }))
         .collect();
     let collapsed: Vec<&str> = groups
         .iter()
@@ -137,6 +148,32 @@ mod tests {
 
     fn url(s: &str) -> Url {
         Url::parse(s).unwrap()
+    }
+
+    #[test]
+    fn unsorted_documents_lead_the_list_as_one_headless_run() {
+        let mut ws = one_window();
+        let Opened::Added(h) = new_group(&mut ws, "https://drive.google.com/drive/folders/f1")
+        else {
+            panic!()
+        };
+        let none = sidebar_dto(ws.windows.first(), &HashSet::new());
+        assert!(none["tabs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|t| t["group"] != json!(UNSORTED)));
+        let Some(flotilla_core::model::Handed::Unsorted(d)) = ws.receive("W", None, DOC, "default")
+        else {
+            panic!()
+        };
+        let dto = sidebar_dto(ws.windows.first(), &HashSet::new());
+        let rows = dto["tabs"].as_array().unwrap();
+        assert_eq!(rows[0]["id"], json!(d));
+        assert_eq!(rows[0]["group"], json!(UNSORTED));
+        assert_eq!(rows[0]["groupName"], json!("Unsorted"));
+        assert_eq!(rows[0]["head"], json!(false));
+        assert_eq!(rows[1]["id"], json!(h));
     }
 
     #[test]
@@ -277,7 +314,7 @@ mod tests {
             panic!()
         };
         ws.set_title(&h, "Fleet");
-        ws.receive("W", None, DOC, "default").unwrap();
+        ws.queue("W", DOC, None).unwrap();
         ws.receive("W", None, "mailto:x", "default").unwrap();
 
         let dto = incoming_dto(&ws, "W");
@@ -312,7 +349,7 @@ mod tests {
     #[test]
     fn incoming_with_no_group_disables_the_adds() {
         let mut ws = one_window();
-        ws.receive("W", None, DOC, "default").unwrap();
+        ws.queue("W", DOC, None).unwrap();
         assert_eq!(
             actions(&incoming_dto(&ws, "W")[0]),
             [
@@ -339,11 +376,12 @@ mod tests {
     #[test]
     fn the_window_dto_carries_its_own_queue() {
         let window = |t: &str| flotilla_core::model::ConfigWindow {
+            unsorted: vec![],
             title: t.into(),
             groups: vec![],
         };
         let mut ws = flotilla_core::model::Workspace::from_config(&[window("A"), window("B")]);
-        ws.receive("B", None, DOC, "default").unwrap();
+        ws.queue("B", DOC, None).unwrap();
         let none = HashSet::new();
         assert_eq!(window_dto(&ws, "A", &none)["incoming"], json!([]));
         assert_eq!(

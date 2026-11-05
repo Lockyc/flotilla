@@ -4,7 +4,7 @@
 
 use crate::commands::{self, mutate};
 use crate::state::AppState;
-use flotilla_core::model::{SetHomeBlock, TabId, Workspace};
+use flotilla_core::model::{Dest, SetHomeBlock, TabId, Workspace};
 use shell_core::menu::WindowEntry;
 use shell_core::windows::WindowSet;
 use std::collections::HashSet;
@@ -32,6 +32,7 @@ pub struct MenuState {
     pub rename: Item,
     pub set_home: Item,
     pub make_own_group: Item,
+    pub unsort: Item,
     pub move_to: Item,
     /// The groups `move_to` offers: each other group's head id and name.
     pub move_targets: Vec<(TabId, String)>,
@@ -56,6 +57,8 @@ pub enum Action {
     /// Make the tab's current page its home.
     SetHome(Option<TabId>),
     MakeOwnGroup(Option<TabId>),
+    /// Move the tab out of its group into its window's Unsorted.
+    Unsort(Option<TabId>),
     /// Move the tab to the group headed by the second id.
     MoveTo(Option<TabId>, TabId),
     RemoveTab(Option<TabId>),
@@ -81,6 +84,7 @@ pub fn id(a: &Action) -> String {
         Action::Rename(t) => ("rename".into(), t.as_ref()),
         Action::SetHome(t) => ("set_home".into(), t.as_ref()),
         Action::MakeOwnGroup(t) => ("make_own_group".into(), t.as_ref()),
+        Action::Unsort(t) => ("unsort".into(), t.as_ref()),
         Action::MoveTo(t, head) => (format!("move:{head}"), t.as_ref()),
         Action::RemoveTab(t) => ("remove_tab".into(), t.as_ref()),
         Action::UnloadGroup(t) => ("unload_group".into(), t.as_ref()),
@@ -111,6 +115,7 @@ pub fn action(id: &str) -> Option<Action> {
         ("rename", None, t) => Action::Rename(t),
         ("set_home", None, t) => Action::SetHome(t),
         ("make_own_group", None, t) => Action::MakeOwnGroup(t),
+        ("unsort", None, t) => Action::Unsort(t),
         ("move", Some(head), t) => Action::MoveTo(t, head.to_string()),
         ("remove_tab", None, t) => Action::RemoveTab(t),
         ("unload_group", None, t) => Action::UnloadGroup(t),
@@ -124,6 +129,8 @@ pub fn action(id: &str) -> Option<Action> {
 
 const NO_TAB: &str = "No tab selected";
 const IS_HEAD: &str = "Already a group's head";
+const IN_UNSORTED: &str = "Already in Unsorted";
+const NO_GROUP: &str = "Not in a group";
 const NO_OTHER_GROUPS: &str = "No other groups";
 const NOTHING_CLOSED: &str = "Nothing closed yet";
 const NOTHING_LOADED: &str = "Nothing loaded";
@@ -192,14 +199,15 @@ pub fn menu_state_for(
         tab.and_then(|id| ws.set_home_blocked(id, current))
             .map(set_home_reason)
     });
-    let is_head = found.is_some_and(|(_, g, t)| g.head.id == t.id);
+    let is_head = found.is_some_and(|(_, g, t)| g.is_some_and(|g| g.head.id == t.id));
+    let unsorted = found.is_some_and(|(_, g, _)| g.is_none());
     let move_targets: Vec<(TabId, String)> = match found {
         Some((wi, own, _)) if !is_head => ws
             .windows
             .iter()
             .enumerate()
             .flat_map(|(i, w)| w.groups.iter().map(move |g| (i, w, g)))
-            .filter(|(_, _, g)| g.head.id != own.head.id)
+            .filter(|(_, _, g)| own.is_none_or(|own| g.head.id != own.head.id))
             .map(|(i, w, g)| {
                 let name = if i == wi {
                     g.head.title.clone()
@@ -219,6 +227,12 @@ pub fn menu_state_for(
         rename: item("Rename…", no_tab),
         set_home: item("Set Home to Current Page", set_home_blocked),
         make_own_group: item("Make Own Group", no_tab.or(is_head.then_some(IS_HEAD))),
+        unsort: item(
+            "Move to Unsorted",
+            no_tab
+                .or(is_head.then_some(IS_HEAD))
+                .or(unsorted.then_some(IN_UNSORTED)),
+        ),
         move_to: item("Move to Group", move_blocked),
         move_targets,
         // ⌘W also docks a focused pop-out; disabled, it would swallow the shortcut there.
@@ -226,12 +240,12 @@ pub fn menu_state_for(
         remove_tab: item("Remove Tab", no_tab),
         unload_group: item(
             "Unload Group",
-            no_tab.or_else(|| {
+            no_tab.or(unsorted.then_some(NO_GROUP)).or_else(|| {
                 tab.filter(|id| group_loaded(ws, live, id).is_empty())
                     .map(|_| NOTHING_LOADED)
             }),
         ),
-        close_group: item("Close Group", no_tab),
+        close_group: item("Close Group", no_tab.or(unsorted.then_some(NO_GROUP))),
         recent: item("Recent", ws.recent.is_empty().then_some(NOTHING_CLOSED)),
         recent_entries: ws.recent.iter().map(|g| g.head.title.clone()).collect(),
     }
@@ -304,6 +318,7 @@ fn group_items(
         entry(Action::SetHome(t.clone()), &ms.set_home, None)?,
         sep()?,
         entry(Action::MakeOwnGroup(t.clone()), &ms.make_own_group, None)?,
+        entry(Action::Unsort(t.clone()), &ms.unsort, None)?,
         MenuItemKind::Submenu(moves.build()?),
         sep()?,
     ];
@@ -550,11 +565,21 @@ pub fn handle(app: &AppHandle, menu_id: &str) -> bool {
                 ws.make_own_group(&t);
             }
         }),
+        Action::Unsort(t) => {
+            let live = crate::tabs::live(app);
+            mutate(app, |ws| {
+                let window = pick(t, ws).and_then(|t| ws.find(&t).map(|(wi, _, _)| (wi, t)));
+                if let Some((wi, t)) = window {
+                    let title = ws.windows[wi].title.clone();
+                    ws.move_tab(&t, Dest::Unsorted(&title), &live);
+                }
+            })
+        }
         Action::MoveTo(t, head) => {
             let live = crate::tabs::live(app);
             mutate(app, |ws| {
                 if let Some(t) = pick(t, ws) {
-                    ws.move_to_group(&t, &head, &live);
+                    ws.move_tab(&t, Dest::Group(&head), &live);
                 }
             })
         }
@@ -723,6 +748,26 @@ mod tests {
     }
 
     #[test]
+    fn an_unsorted_document_moves_to_any_group_and_has_no_group_to_close() {
+        let (mut ws, h, m) = one_group();
+        let doc = "https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrSt02/edit";
+        let Some(flotilla_core::model::Handed::Unsorted(d)) = ws.receive("W", None, doc, "default")
+        else {
+            panic!()
+        };
+        let s = menu_state_for(&ws, &cold(), None, Some(&d));
+        assert_eq!(s.make_own_group, on("Make Own Group"));
+        assert_eq!(s.unsort, off("Move to Unsorted — Already in Unsorted"));
+        assert_eq!(s.move_to, on("Move to Group"));
+        assert_eq!(s.move_targets, vec![(h, "Auction".to_string())]);
+        assert_eq!(s.close_group, off("Close Group — Not in a group"));
+        assert_eq!(s.unload_group, off("Unload Group — Not in a group"));
+        // A member can leave its group for Unsorted.
+        let s = menu_state_for(&ws, &cold(), None, Some(&m));
+        assert_eq!(s.unsort, on("Move to Unsorted"));
+    }
+
+    #[test]
     fn a_head_cannot_become_its_own_group_or_move() {
         let (mut ws, h, _) = one_group();
         add_group(&mut ws, "f2", "Website");
@@ -766,6 +811,7 @@ mod tests {
     #[test]
     fn a_member_moves_to_another_windows_group_named_with_its_window() {
         let window = |t: &str| flotilla_core::model::ConfigWindow {
+            unsorted: vec![],
             title: t.into(),
             groups: vec![],
         };
@@ -865,6 +911,7 @@ mod tests {
     #[test]
     fn the_group_menu_follows_the_focused_window() {
         let window = |t: &str| flotilla_core::model::ConfigWindow {
+            unsorted: vec![],
             title: t.into(),
             groups: vec![],
         };
