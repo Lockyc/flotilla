@@ -34,10 +34,10 @@ pub fn parse_group_url(input: &str) -> Result<Url, String> {
 /// the caller's, deferred off the policy callback. The rule is the same however the navigation
 /// was asked for (a new window, a click or a plain navigation).
 pub fn decide(ws: &mut Workspace, from: &TabId, url: &Url) -> Decision {
-    let Some((_, group, tab)) = ws.find(from) else {
+    let (Some((_, _, tab)), Some(store)) = (ws.find(from), ws.store_of(from)) else {
         return Decision::PassThrough;
     };
-    match doc_key(&group.store, url) {
+    match doc_key(store, url) {
         Some(key) if key != tab.key => ws
             .open_from(from, url)
             .map_or(Decision::PassThrough, Decision::Open),
@@ -58,6 +58,7 @@ mod tests {
 
     fn one_window() -> Workspace {
         Workspace::from_config(&[ConfigWindow {
+            unsorted: vec![],
             title: "W".into(),
             groups: vec![],
         }])
@@ -121,7 +122,7 @@ mod tests {
             decide(&mut w, &h2, &doc(A)),
             Decision::Open(Opened::Raised(m))
         );
-        assert!(w.find(&h2).is_some_and(|(_, g, _)| g.members.is_empty()));
+        assert!(w.group_of(&h2).is_some_and(|g| g.members.is_empty()));
     }
 
     #[test]

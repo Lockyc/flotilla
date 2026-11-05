@@ -5,7 +5,8 @@
 //! The windows and their groups are built from the config ([`Workspace::from_config`]) and
 //! replaced on each reload ([`Workspace::rebase`]); the session adds each window's active tab and
 //! Incoming queue, and Recent ([`Workspace::restore`]). Two levels only: a group's head (any URL,
-//! usually a Drive folder) and flat members (documents). A document is open at most once across
+//! usually a Drive folder) and flat members (documents); a document may also sit in no group, in
+//! its window's Unsorted ([`WindowWs::unsorted`]). A document is open at most once across
 //! every window, detached tabs included; opening it again raises the existing tab in its own
 //! window. The registry is not a separate index: it is derived by scanning the tabs, so it cannot
 //! drift from them.
@@ -19,6 +20,9 @@ use url::Url;
 
 /// Closed groups kept in `Workspace::recent`; the oldest is dropped past this.
 pub const RECENT_CAP: usize = 20;
+
+/// The login store a group without `store` opens in, and every Unsorted document.
+pub const DEFAULT_STORE: &str = "default";
 
 /// `"t-<16 hex>"`, the [`tab_id`] of the tab's key: open-once makes it unique app-wide, and it is
 /// the same across reloads, reorders and moves between windows.
@@ -50,6 +54,9 @@ pub struct Group {
 pub struct WindowWs {
     /// The config window's title, which names it in the session.
     pub title: String,
+    /// Documents in no group, listed before the groups, in [`DEFAULT_STORE`]: where a handed
+    /// document lands when it names no group of the window.
+    pub unsorted: Vec<Tab>,
     pub groups: Vec<Group>,
     /// The tab the window shows. Never a detached tab: activating one leaves this as it is and
     /// asks for its window instead ([`Workspace::take_raise`]).
@@ -91,6 +98,8 @@ pub enum Handed {
     Grouped(TabId),
     /// A document aimed at a group of the window: it joined it.
     Joined(TabId),
+    /// A document aimed at no group of the window: it opened under the window's Unsorted.
+    Unsorted(TabId),
     /// Queued under the window's Incoming, as the item with this id.
     Queued(String),
     /// Already waiting under some window's Incoming, as the item with this id.
@@ -101,7 +110,17 @@ pub enum Handed {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ConfigWindow {
     pub title: String,
+    /// The window's `[[window.tab]]`s: its Unsorted documents.
+    pub unsorted: Vec<ConfigTab>,
     pub groups: Vec<ConfigGroup>,
+}
+
+/// Where [`Workspace::move_tab`] moves a document: to the end of the group a head belongs to, or
+/// of a window's Unsorted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Dest<'a> {
+    Group(&'a TabId),
+    Unsorted(&'a str),
 }
 
 /// A config `[[window.group]]`: its name, head `url`, store and members. `detached` is the head's.
@@ -186,7 +205,8 @@ impl Workspace {
     /// config's own text, so a write addressing the tab by its `url` finds it. An entry whose URL
     /// does not parse, or whose identity repeats an earlier one, is left out (the config's own
     /// checks refuse both, so this only guards the model's invariant); heads are claimed before
-    /// members, so a head is never dropped for a duplicate member.
+    /// members, and members before Unsorted documents, so a head is never dropped for a duplicate
+    /// member, nor a member for a duplicate Unsorted document.
     pub fn from_config(windows: &[ConfigWindow]) -> Workspace {
         let configured = |url: &str, title: &str, store: &str, detached: bool| {
             let mut t = tab(&Url::parse(url).ok()?, title, store, detached);
@@ -212,12 +232,10 @@ impl Workspace {
                     .collect()
             })
             .collect();
-        let windows = windows
-            .iter()
-            .zip(heads)
-            .map(|(w, heads)| WindowWs {
-                title: w.title.trim().to_string(),
-                groups: heads
+        let groups: Vec<Vec<Group>> = heads
+            .into_iter()
+            .map(|heads| {
+                heads
                     .into_iter()
                     .map(|(g, head)| Group {
                         head,
@@ -230,7 +248,21 @@ impl Workspace {
                         collapsed: g.collapsed,
                         store: g.store.clone(),
                     })
+                    .collect()
+            })
+            .collect();
+        let windows = windows
+            .iter()
+            .zip(groups)
+            .map(|(w, groups)| WindowWs {
+                title: w.title.trim().to_string(),
+                unsorted: w
+                    .unsorted
+                    .iter()
+                    .filter_map(|t| configured(&t.url, &t.title, DEFAULT_STORE, t.detached))
+                    .filter(|t| claim(t))
                     .collect(),
+                groups,
                 active: None,
                 incoming: vec![],
             })
@@ -368,10 +400,7 @@ impl Workspace {
 
     /// Every open tab, in every window.
     pub fn tabs(&self) -> impl Iterator<Item = &Tab> {
-        self.windows
-            .iter()
-            .flat_map(|w| w.groups.iter())
-            .flat_map(|g| std::iter::once(&g.head).chain(g.members.iter()))
+        self.windows.iter().flat_map(WindowWs::tabs)
     }
 
     /// The open tab (head or member, detached or not) with identity `key`.
@@ -379,14 +408,23 @@ impl Workspace {
         self.tabs().find(|t| &t.key == key).map(|t| t.id.clone())
     }
 
-    /// The window and group index holding tab `id`.
-    fn locate(&self, id: &TabId) -> Option<(usize, usize)> {
+    /// The window holding tab `id`, and the index of its group there (`None`: in Unsorted).
+    fn locate(&self, id: &TabId) -> Option<(usize, Option<usize>)> {
         self.windows.iter().enumerate().find_map(|(wi, w)| {
+            if w.unsorted.iter().any(|t| &t.id == id) {
+                return Some((wi, None));
+            }
             w.groups
                 .iter()
                 .position(|g| &g.head.id == id || g.members.iter().any(|m| &m.id == id))
-                .map(|gi| (wi, gi))
+                .map(|gi| (wi, Some(gi)))
         })
+    }
+
+    /// The login store tab `id` is open in: its group's, else (in Unsorted) [`DEFAULT_STORE`].
+    pub fn store_of(&self, id: &TabId) -> Option<&str> {
+        let (wi, gi) = self.locate(id)?;
+        Some(gi.map_or(DEFAULT_STORE, |gi| &self.windows[wi].groups[gi].store))
     }
 
     /// The index of the window titled `title` (compared trimmed).
@@ -408,9 +446,10 @@ impl Workspace {
             return;
         }
         let w = &mut self.windows[wi];
-        let g = &mut w.groups[gi];
-        if &g.head.id != id {
-            g.collapsed = false;
+        if let Some(g) = gi.map(|gi| &mut w.groups[gi]) {
+            if &g.head.id != id {
+                g.collapsed = false;
+            }
         }
         w.active = Some(id.clone());
     }
@@ -460,19 +499,37 @@ impl Workspace {
         Some(Opened::Added(id))
     }
 
-    /// Opens document `url` from tab `from`, joining `from`'s group at the end. `None` when `url`
-    /// is not a document or `from` is not open. An already-open document is raised wherever it
-    /// is, in whichever window.
+    /// Opens document `url` from tab `from`, joining `from`'s group (or, from Unsorted, its
+    /// window's Unsorted) at the end. `None` when `url` is not a document or `from` is not open.
+    /// An already-open document is raised wherever it is, in whichever window.
     pub fn open_from(&mut self, from: &TabId, url: &Url) -> Option<Opened> {
         let (wi, gi) = self.locate(from)?;
-        let store = self.windows[wi].groups[gi].store.clone();
+        let store = self.store_of(from)?.to_string();
         let key = doc_key(&store, url)?;
         if let Some(id) = self.open_doc(&key) {
             return Some(self.raise(id));
         }
         let t = tab(url, url.as_str(), &store, false);
         let id = t.id.clone();
-        self.windows[wi].groups[gi].members.push(t);
+        let w = &mut self.windows[wi];
+        match gi {
+            Some(gi) => w.groups[gi].members.push(t),
+            None => w.unsorted.push(t),
+        }
+        self.activate(&id);
+        Some(Opened::Added(id))
+    }
+
+    /// Opens document `url` at the end of window `wi`'s Unsorted, or raises it where it is open.
+    /// `None` when `url` is not a document.
+    fn open_unsorted(&mut self, wi: usize, url: &Url) -> Option<Opened> {
+        let key = doc_key(DEFAULT_STORE, url)?;
+        if let Some(id) = self.open_doc(&key) {
+            return Some(self.raise(id));
+        }
+        let t = tab(url, url.as_str(), DEFAULT_STORE, false);
+        let id = t.id.clone();
+        self.windows[wi].unsorted.push(t);
         self.activate(&id);
         Some(Opened::Added(id))
     }
@@ -483,13 +540,15 @@ impl Workspace {
     /// woken to fill it.
     pub fn successor(&self, id: &TabId, live: impl Fn(&TabId) -> bool) -> Option<TabId> {
         let (wi, _, _) = self.find(id)?;
-        let rows: Vec<(&Tab, bool)> = self.windows[wi]
-            .groups
+        let w = &self.windows[wi];
+        let rows: Vec<(&Tab, bool)> = w
+            .unsorted
             .iter()
-            .flat_map(|g| {
+            .map(|t| (t, true))
+            .chain(w.groups.iter().flat_map(|g| {
                 std::iter::once((&g.head, true))
                     .chain(g.members.iter().map(move |m| (m, !g.collapsed)))
-            })
+            }))
             .collect();
         let at = rows.iter().position(|(t, _)| &t.id == id)?;
         let eligible: Vec<bool> = rows
@@ -505,12 +564,15 @@ impl Workspace {
         let Some((wi, gi)) = self.locate(id) else {
             return;
         };
-        if &self.windows[wi].groups[gi].head.id == id {
+        if gi.is_some_and(|gi| &self.windows[wi].groups[gi].head.id == id) {
             return self.close_group(id, live);
         }
         let next = self.successor(id, |t| live.contains(t));
-        let g = &mut self.windows[wi].groups[gi];
-        g.members.retain(|m| &m.id != id);
+        let w = &mut self.windows[wi];
+        match gi {
+            Some(gi) => w.groups[gi].members.retain(|m| &m.id != id),
+            None => w.unsorted.retain(|t| &t.id != id),
+        }
         if self.windows[wi].active.as_ref() == Some(id) {
             self.windows[wi].active = None;
             if let Some(n) = next {
@@ -523,7 +585,7 @@ impl Workspace {
     /// was in it, the head's [`Self::successor`] among `live` outside the group becomes active,
     /// else none.
     pub fn close_group(&mut self, head: &TabId, live: &HashSet<TabId>) {
-        let Some((wi, gi)) = self.locate(head) else {
+        let Some((wi, Some(gi))) = self.locate(head) else {
             return;
         };
         if &self.windows[wi].groups[gi].head.id != head {
@@ -561,10 +623,10 @@ impl Workspace {
         let entry = self.recent.get(index)?;
         if let Some(occupant) = self.open_doc(&entry.head.key) {
             let (wi, gi) = self.locate(&occupant)?;
-            if self.windows[wi].groups[gi].head.id != occupant {
+            let Some(gi) = gi.filter(|&gi| self.windows[wi].groups[gi].head.id == occupant) else {
                 self.raise(occupant.clone());
                 return Some(occupant);
-            }
+            };
             let entry = self.recent.remove(index);
             let members = self.restorable(entry.members, &[entry.head.key]);
             self.windows[wi].groups[gi].members.extend(members);
@@ -602,19 +664,33 @@ impl Workspace {
         }
     }
 
-    /// Lifts a member into a new group headed by it (same store), at the end of its window, where
-    /// the config appends the new group.
+    /// The documents list holding `id` as a member or Unsorted document (never a head), and its
+    /// index there.
+    fn doc_list_mut(&mut self, id: &TabId) -> Option<(&mut Vec<Tab>, usize)> {
+        let (wi, gi) = self.locate(id)?;
+        let w = &mut self.windows[wi];
+        let list = match gi {
+            Some(gi) => &mut w.groups[gi].members,
+            None => &mut w.unsorted,
+        };
+        let at = list.iter().position(|m| &m.id == id)?;
+        Some((list, at))
+    }
+
+    /// Lifts a member or Unsorted document into a new group headed by it (same store), at the end
+    /// of its window, where the config appends the new group.
     pub fn make_own_group(&mut self, member: &TabId) {
-        let Some((wi, gi)) = self.locate(member) else {
+        let Some(store) = self.store_of(member).map(str::to_string) else {
             return;
         };
-        let groups = &mut self.windows[wi].groups;
-        let Some(at) = groups[gi].members.iter().position(|m| &m.id == member) else {
+        let Some((wi, _)) = self.locate(member) else {
             return;
         };
-        let head = groups[gi].members.remove(at);
-        let store = groups[gi].store.clone();
-        groups.push(Group {
+        let Some((list, at)) = self.doc_list_mut(member) else {
+            return;
+        };
+        let head = list.remove(at);
+        self.windows[wi].groups.push(Group {
             head,
             members: vec![],
             collapsed: false,
@@ -623,27 +699,34 @@ impl Workspace {
         self.activate(member);
     }
 
-    /// Moves a member to the end of the group `head` belongs to, in whichever window. A move into
-    /// a group on another store re-keys the document to that store (and so gives it that key's
-    /// id), and is refused if it is already open there. An active member stays active, in its new
-    /// window; the window it left shows its [`Self::successor`] among `live`.
-    pub fn move_to_group(&mut self, member: &TabId, head: &TabId, live: &HashSet<TabId>) {
-        let (Some((fw, fg)), Some((tw, tg))) = (self.locate(member), self.locate(head)) else {
+    /// Moves a member or Unsorted document to the end of `dest`, in whichever window. A move onto
+    /// another store re-keys the document to that store (and so gives it that key's id), and is
+    /// refused if it is already open there. An active document stays active, in its new window;
+    /// the window it left shows its [`Self::successor`] among `live`.
+    pub fn move_tab(&mut self, member: &TabId, dest: Dest, live: &HashSet<TabId>) {
+        let Some((fw, fg)) = self.locate(member) else {
             return;
+        };
+        let (tw, tg) = match dest {
+            Dest::Group(head) => match self.locate(head) {
+                Some((tw, Some(tg))) => (tw, Some(tg)),
+                _ => return,
+            },
+            Dest::Unsorted(window) => match self.window_index(window) {
+                Some(tw) => (tw, None),
+                None => return,
+            },
         };
         if (fw, fg) == (tw, tg) {
             return;
         }
-        let Some(at) = self.windows[fw].groups[fg]
-            .members
-            .iter()
-            .position(|m| &m.id == member)
-        else {
+        let store = tg.map_or(DEFAULT_STORE, |tg| &self.windows[tw].groups[tg].store);
+        let store = store.to_string();
+        let Some((list, at)) = self.doc_list_mut(member) else {
             return;
         };
-        let mut moved = self.windows[fw].groups[fg].members[at].clone();
-        let store = self.windows[tw].groups[tg].store.clone();
-        if self.windows[fw].groups[fg].store != store {
+        let mut moved = list[at].clone();
+        if self.store_of(member) != Some(&store) {
             rekey(&mut moved, &store);
             if self.open_doc(&moved.key).is_some() {
                 return;
@@ -653,9 +736,15 @@ impl Workspace {
         let neighbour = (was_active && fw != tw)
             .then(|| self.successor(member, |t| live.contains(t)))
             .flatten();
-        self.windows[fw].groups[fg].members.remove(at);
+        if let Some((list, at)) = self.doc_list_mut(member) {
+            list.remove(at);
+        }
         let id = moved.id.clone();
-        self.windows[tw].groups[tg].members.push(moved);
+        let w = &mut self.windows[tw];
+        match tg {
+            Some(tg) => w.groups[tg].members.push(moved),
+            None => w.unsorted.push(moved),
+        }
         if was_active {
             if fw != tw {
                 self.windows[fw].active = None;
@@ -670,14 +759,8 @@ impl Workspace {
     fn tab_mut(&mut self, id: &TabId) -> Option<&mut Tab> {
         self.windows
             .iter_mut()
-            .flat_map(|w| w.groups.iter_mut())
-            .find_map(|g| {
-                if &g.head.id == id {
-                    Some(&mut g.head)
-                } else {
-                    g.members.iter_mut().find(|m| &m.id == id)
-                }
-            })
+            .flat_map(WindowWs::tabs_mut)
+            .find(|t| &t.id == id)
     }
 
     pub fn set_collapsed(&mut self, head: &TabId, collapsed: bool) {
@@ -708,20 +791,24 @@ impl Workspace {
         }
     }
 
-    /// The window index, group and tab of `id`.
-    pub fn find(&self, id: &TabId) -> Option<(usize, &Group, &Tab)> {
+    /// The window index, group (`None`: in Unsorted) and tab of `id`.
+    pub fn find(&self, id: &TabId) -> Option<(usize, Option<&Group>, &Tab)> {
         self.windows.iter().enumerate().find_map(|(wi, w)| {
+            if let Some(t) = w.unsorted.iter().find(|t| &t.id == id) {
+                return Some((wi, None, t));
+            }
             w.groups.iter().find_map(|g| {
                 std::iter::once(&g.head)
                     .chain(g.members.iter())
                     .find(|t| &t.id == id)
-                    .map(|t| (wi, g, t))
+                    .map(|t| (wi, Some(g), t))
             })
         })
     }
 
+    /// The group holding `id`; `None` also when it is in Unsorted.
     pub fn group_of(&self, id: &TabId) -> Option<&Group> {
-        self.find(id).map(|(_, g, _)| g)
+        self.find(id).and_then(|(_, g, _)| g)
     }
 }
 
@@ -763,10 +850,11 @@ impl Workspace {
 
     /// Takes a link handed to window `window` in `store`. A link that is not a web link is queued
     /// with its reason; one open already, in any window, is raised; a document joins the group
-    /// of that window whose head is titled `group`, else is queued; anything else heads a new
-    /// group in the window. A link opened leaves the queue, wherever it waited. With no
-    /// window at all, the link is queued in `stray`, with its reason if it is not a web link.
-    /// `None`, and nothing done, when the link is blank, or there is no such window but others.
+    /// of that window whose head is titled `group`, else opens under the window's Unsorted;
+    /// anything else heads a new group in the window. A link opened leaves the queue, wherever it
+    /// waited. With no window at all, the link is queued in `stray`, with its reason if it is not
+    /// a web link. `None`, and nothing done, when the link is blank, or there is no such window
+    /// but others.
     pub fn receive(
         &mut self,
         window: &str,
@@ -802,17 +890,17 @@ impl Workspace {
                 .find(|g| g.head.title.trim() == name.trim())
                 .map(|g| g.head.id.clone())
         });
-        match head.and_then(|h| self.open_from(&h, &url)) {
-            // The group's store may be another: the document can be open there already.
-            Some(opened) => {
-                self.dismiss_incoming(&incoming_id(link));
-                Some(match opened {
-                    Opened::Added(id) => Handed::Joined(id),
-                    Opened::Raised(id) => Handed::Raised(id),
-                })
-            }
-            None => Some(self.enqueue(Some(wi), link, None)),
-        }
+        // The group's store may be another: the document can be open there already.
+        let handed = match head.and_then(|h| self.open_from(&h, &url)) {
+            Some(Opened::Added(id)) => Handed::Joined(id),
+            Some(Opened::Raised(id)) => Handed::Raised(id),
+            None => match self.open_unsorted(wi, &url)? {
+                Opened::Added(id) => Handed::Unsorted(id),
+                Opened::Raised(id) => Handed::Raised(id),
+            },
+        };
+        self.dismiss_incoming(&incoming_id(link));
+        Some(handed)
     }
 
     /// Queues `link` under window `window` as one that can't be opened, for `problem`, unless it
@@ -897,7 +985,8 @@ impl Workspace {
     /// Why tab `id`, showing `current` (`None`: nothing loaded), can't make `current` its home,
     /// if it can't.
     pub fn set_home_blocked(&self, id: &TabId, current: Option<&Url>) -> Option<SetHomeBlock> {
-        let (_, g, t) = self.find(id)?;
+        let (_, _, t) = self.find(id)?;
+        let store = self.store_of(id)?;
         // At home when the page is its home, by `head_key`: an address the page decorated on
         // load (`?tab=…`, `#heading=…`, `/u/0/`) is still home; another view of it is not.
         let home = Url::parse(&t.home_url).map(|h| head_key(&h));
@@ -911,7 +1000,7 @@ impl Workspace {
         if !matches!(current.scheme(), "http" | "https") {
             return Some(SetHomeBlock::NotWeb);
         }
-        self.open_doc(&identity(&g.store, current))
+        self.open_doc(&identity(store, current))
             .filter(|other| other != id)
             .map(|_| SetHomeBlock::OpenElsewhere)
     }
@@ -927,8 +1016,8 @@ impl Workspace {
         {
             return Err(block);
         }
-        let (wi, gi) = self.locate(id).ok_or(SetHomeBlock::AtHome)?;
-        let store = self.windows[wi].groups[gi].store.clone();
+        let (wi, _) = self.locate(id).ok_or(SetHomeBlock::AtHome)?;
+        let store = self.store_of(id).ok_or(SetHomeBlock::AtHome)?.to_string();
         let fresh = tab(url, "", &store, false);
         let t = self.tab_mut(id).expect("located");
         // A title that is still the URL moves with it, so the page's title can still replace it.
@@ -948,10 +1037,26 @@ impl Workspace {
 
 /// Whether window `w` holds `id` as a docked tab.
 fn docked_in(w: &WindowWs, id: &TabId) -> bool {
-    w.groups
-        .iter()
-        .flat_map(|g| std::iter::once(&g.head).chain(g.members.iter()))
-        .any(|t| &t.id == id && !t.detached)
+    w.tabs().any(|t| &t.id == id && !t.detached)
+}
+
+impl WindowWs {
+    /// The window's tabs in sidebar order: Unsorted, then each group's head and members.
+    pub fn tabs(&self) -> impl Iterator<Item = &Tab> {
+        self.unsorted.iter().chain(
+            self.groups
+                .iter()
+                .flat_map(|g| std::iter::once(&g.head).chain(g.members.iter())),
+        )
+    }
+
+    fn tabs_mut(&mut self) -> impl Iterator<Item = &mut Tab> {
+        self.unsorted.iter_mut().chain(
+            self.groups
+                .iter_mut()
+                .flat_map(|g| std::iter::once(&mut g.head).chain(g.members.iter_mut())),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -979,6 +1084,7 @@ mod tests {
 
     fn window(title: &str) -> ConfigWindow {
         ConfigWindow {
+            unsorted: vec![],
             title: title.into(),
             groups: vec![],
         }
@@ -1032,6 +1138,7 @@ mod tests {
     fn two_windows() -> Vec<ConfigWindow> {
         vec![
             ConfigWindow {
+                unsorted: vec![],
                 title: "A".into(),
                 groups: vec![cgroup(
                     "One",
@@ -1041,6 +1148,7 @@ mod tests {
                 )],
             },
             ConfigWindow {
+                unsorted: vec![],
                 title: "B".into(),
                 groups: vec![cgroup("Two", &folder(2), "default", &[("Roster", &doc(3))])],
             },
@@ -1198,6 +1306,7 @@ mod tests {
         let mut w = Workspace::from_config(&two_windows());
         let budget = w.windows[0].groups[0].members[0].id.clone();
         let mut recent = Workspace::from_config(&[ConfigWindow {
+            unsorted: vec![],
             title: "X".into(),
             groups: vec![cgroup("Old", &folder(9), "default", &[("D", &doc(9))])],
         }])
@@ -1395,7 +1504,7 @@ mod tests {
         let h1 = head_of(&mut w, 1);
         let h2 = head_of(&mut w, 2);
         let d = id(w.open_from(&h1, &doc(1)).unwrap());
-        w.move_to_group(&d, &h2, &Default::default());
+        w.move_tab(&d, Dest::Group(&h2), &Default::default());
         assert!(member_ids(&w, &h1).is_empty());
         assert_eq!(member_ids(&w, &h2), vec![d.clone()]);
         assert_eq!(w.open_from(&h1, &doc(1)), Some(Opened::Raised(d)));
@@ -1408,7 +1517,7 @@ mod tests {
         let one = w.windows[0].groups[0].head.id.clone();
         let two = w.windows[1].groups[0].head.id.clone();
         w.activate(&budget);
-        w.move_to_group(&budget, &two, &live(&[&one, &budget]));
+        w.move_tab(&budget, Dest::Group(&two), &live(&[&one, &budget]));
         assert_eq!(member_ids(&w, &two).last(), Some(&budget));
         assert_eq!(w.windows[1].active, Some(budget));
         // The window it left shows the tab the member's close would have picked.
@@ -1417,6 +1526,115 @@ mod tests {
 
     fn live(ids: &[&TabId]) -> HashSet<TabId> {
         ids.iter().map(|id| (*id).clone()).collect()
+    }
+
+    /// Window `W` with a folder head and one document in Unsorted.
+    fn with_unsorted() -> (Workspace, TabId, TabId) {
+        let mut w = ws();
+        let h = head_of(&mut w, 1);
+        let Some(Handed::Unsorted(d)) = w.receive(W, None, doc(1).as_str(), "default") else {
+            panic!()
+        };
+        (w, h, d)
+    }
+
+    #[test]
+    fn an_unsorted_document_moves_into_a_group_and_back() {
+        let (mut w, h, d) = with_unsorted();
+        w.move_tab(&d, Dest::Group(&h), &Default::default());
+        assert!(w.windows[0].unsorted.is_empty());
+        assert_eq!(member_ids(&w, &h), vec![d.clone()]);
+        assert_eq!(
+            active(&w),
+            Some(d.clone()),
+            "the active document stays active"
+        );
+        w.move_tab(&d, Dest::Unsorted(W), &Default::default());
+        assert!(member_ids(&w, &h).is_empty());
+        assert_eq!(w.windows[0].unsorted[0].id, d);
+        assert_eq!(w.group_of(&d), None);
+        // Onto where it already is: nothing.
+        let before = w.clone();
+        w.move_tab(&d, Dest::Unsorted(W), &Default::default());
+        assert_eq!(w, before);
+    }
+
+    #[test]
+    fn moving_into_unsorted_rekeys_to_the_default_store() {
+        let mut w = ws();
+        let work = id(w.new_group(W, &folder(2), "work").unwrap());
+        let d = id(w.open_from(&work, &doc(1)).unwrap());
+        w.move_tab(&d, Dest::Unsorted(W), &Default::default());
+        let moved = &w.windows[0].unsorted[0];
+        assert_eq!(moved.key, identity(DEFAULT_STORE, &doc(1)));
+        assert_ne!(moved.id, d);
+        // Refused while the document is open in the default store already.
+        let e = id(w.open_from(&work, &doc(2)).unwrap());
+        let Some(Handed::Unsorted(_)) = w.receive(W, None, doc(2).as_str(), "default") else {
+            panic!()
+        };
+        w.move_tab(&e, Dest::Unsorted(W), &Default::default());
+        assert_eq!(member_ids(&w, &work), vec![e]);
+    }
+
+    #[test]
+    fn an_unsorted_document_can_head_its_own_group() {
+        let (mut w, _, d) = with_unsorted();
+        w.make_own_group(&d);
+        assert!(w.windows[0].unsorted.is_empty());
+        let g = w.windows[0].groups.last().unwrap();
+        assert_eq!((g.head.id.clone(), g.store.as_str()), (d, DEFAULT_STORE));
+    }
+
+    #[test]
+    fn closing_an_unsorted_document_activates_its_neighbour() {
+        let (mut w, h, d) = with_unsorted();
+        w.close_tab(&d, &live(&[&h, &d]));
+        assert!(w.windows[0].unsorted.is_empty());
+        assert_eq!(active(&w), Some(h));
+        assert!(
+            w.recent.is_empty(),
+            "a document is not a group: nothing for Recent"
+        );
+    }
+
+    #[test]
+    fn a_document_opened_from_unsorted_joins_unsorted() {
+        let (mut w, _, d) = with_unsorted();
+        let e = id(w.open_from(&d, &doc(2)).unwrap());
+        assert_eq!(unsorted_ids(&w, W), vec![d, e]);
+    }
+
+    #[test]
+    fn from_config_reads_unsorted_and_never_drops_a_member_for_it() {
+        let w = Workspace::from_config(&[ConfigWindow {
+            title: W.into(),
+            unsorted: vec![
+                ConfigTab {
+                    title: "Loose".into(),
+                    url: doc(1).to_string(),
+                    detached: false,
+                },
+                ConfigTab {
+                    title: "Twice".into(),
+                    url: doc(2).to_string(),
+                    detached: false,
+                },
+            ],
+            groups: vec![ConfigGroup {
+                name: "G".into(),
+                url: folder(1).to_string(),
+                store: DEFAULT_STORE.into(),
+                tabs: vec![ConfigTab {
+                    title: "Member".into(),
+                    url: doc(2).to_string(),
+                    detached: false,
+                }],
+                ..Default::default()
+            }],
+        }]);
+        let titles: Vec<&str> = w.windows[0].tabs().map(|t| t.title.as_str()).collect();
+        assert_eq!(titles, ["Loose", "G", "Member"]);
     }
 
     #[test]
@@ -1579,7 +1797,7 @@ mod tests {
         let h2 = head_of(&mut w, 2);
         let d = id(w.open_from(&h1, &doc(1)).unwrap());
         w.set_collapsed(&h2, true);
-        w.move_to_group(&d, &h2, &Default::default());
+        w.move_tab(&d, Dest::Group(&h2), &Default::default());
         assert_eq!(active(&w), Some(d));
         assert!(!w.group_of(&h2).unwrap().collapsed);
     }
@@ -1590,8 +1808,8 @@ mod tests {
         let h = head_of(&mut w, 1);
         let a = id(w.open_from(&h, &doc(1)).unwrap());
         let b = id(w.open_from(&h, &doc(2)).unwrap());
-        w.move_to_group(&a, &h, &Default::default());
-        w.move_to_group(&a, &b, &Default::default());
+        w.move_tab(&a, Dest::Group(&h), &Default::default());
+        w.move_tab(&a, Dest::Group(&b), &Default::default());
         assert_eq!(member_ids(&w, &h), vec![a, b]);
     }
 
@@ -1611,7 +1829,7 @@ mod tests {
         let h1 = head_of(&mut w, 1);
         let work = id(w.new_group(W, &folder(2), "work").unwrap());
         let d = id(w.open_from(&h1, &doc(1)).unwrap());
-        w.move_to_group(&d, &work, &Default::default());
+        w.move_tab(&d, Dest::Group(&work), &Default::default());
         // Re-keyed into the work store, the tab's id is that key's.
         let moved = tab_id(&identity("work", &doc(1)));
         assert_eq!(w.find(&moved).unwrap().2.key.store, "work");
@@ -1620,7 +1838,7 @@ mod tests {
         // doc 2 is open in both stores: moving the default copy into work collides
         let e = id(w.open_from(&h1, &doc(2)).unwrap());
         let e2 = id(w.open_from(&work, &doc(2)).unwrap());
-        w.move_to_group(&e, &work, &Default::default());
+        w.move_tab(&e, Dest::Group(&work), &Default::default());
         assert_eq!(member_ids(&w, &h1), vec![e]);
         assert_eq!(member_ids(&w, &work), vec![moved, e2]);
     }
@@ -1745,7 +1963,7 @@ mod tests {
     fn moving_a_detached_member_keeps_active() {
         let (mut w, _, a, b, h2) = two_groups();
         w.set_detached(&a, true);
-        w.move_to_group(&a, &h2, &Default::default());
+        w.move_tab(&a, Dest::Group(&h2), &Default::default());
         assert_eq!(member_ids(&w, &h2), vec![a]);
         assert_eq!(active(&w), Some(b));
         assert_eq!(w.take_raise(), None);
@@ -1920,47 +2138,67 @@ mod tests {
         }
     }
 
+    fn unsorted_ids(w: &Workspace, title: &str) -> Vec<TabId> {
+        let wi = w.window_index(title).unwrap();
+        w.windows[wi]
+            .unsorted
+            .iter()
+            .map(|t| t.id.clone())
+            .collect()
+    }
+
     #[test]
-    fn receive_queues_a_document() {
+    fn receive_opens_a_document_under_unsorted() {
         let (mut w, h1) = fleet();
-        let id = queued(w.receive(W, None, doc(1).as_str(), "default"));
-        assert!(id.starts_with("in-") && id.len() == 19, "{id}");
-        assert_eq!(queue(&w, W), [doc(1).as_str()]);
+        let Some(Handed::Unsorted(d)) = w.receive(W, None, doc(1).as_str(), "default") else {
+            panic!()
+        };
+        assert_eq!(unsorted_ids(&w, W), vec![d.clone()]);
+        assert_eq!(active(&w), Some(d.clone()));
+        assert_eq!(w.store_of(&d), Some(DEFAULT_STORE));
         assert!(member_ids(&w, &h1).is_empty());
+        assert!(queue(&w, W).is_empty());
+        // Handed again, it is raised where it is.
+        let again = format!("{}?usp=x", doc(1));
+        assert_eq!(
+            w.receive("V", None, &again, "default"),
+            Some(Handed::Raised(d))
+        );
+        assert!(unsorted_ids(&w, "V").is_empty());
         assert_eq!(w.receive("nowhere", None, doc(2).as_str(), "default"), None);
     }
 
     #[test]
-    fn receive_queues_each_document_once() {
+    fn queue_holds_each_document_once() {
         let (mut w, _) = fleet();
-        let a = queued(w.receive(W, None, doc(1).as_str(), "default"));
-        let b = queued(w.receive(W, None, doc(2).as_str(), "default"));
+        let a = queued(w.queue(W, doc(1).as_str(), None));
+        assert!(a.starts_with("in-") && a.len() == 19, "{a}");
+        let b = queued(w.queue(W, doc(2).as_str(), None));
         assert_ne!(a, b);
         let again = format!("{}?usp=x", doc(1));
         assert_eq!(
-            w.receive(W, None, &again, "default"),
+            w.queue(W, &again, None),
             Some(Handed::AlreadyQueued(a.clone()))
         );
-        // In another window, on another store: still the same document.
-        assert_eq!(
-            w.receive("V", None, &again, "work"),
-            Some(Handed::AlreadyQueued(a))
-        );
+        // In another window: still the same document.
+        assert_eq!(w.queue("V", &again, None), Some(Handed::AlreadyQueued(a)));
         assert_eq!(queue(&w, W), [doc(1).as_str(), doc(2).as_str()]);
         assert!(queue(&w, "V").is_empty());
     }
 
-    /// A share link and the document it names are one item, as they are one tab.
+    /// A share link and the document it names are one item, as they are one tab: opening the
+    /// document clears the share link's row.
     #[test]
-    fn receive_queues_a_share_link_and_its_document_once() {
+    fn receive_clears_a_share_link_waiting_for_its_document() {
         let mut w = Workspace::from_config(&[]);
         let share = "https://drive.google.com/open?id=1AbCdEfGhIjKlMnOpQrSt01";
-        let a = queued(w.receive(W, None, share, "default"));
+        queued(w.receive(W, None, share, "default"));
         w.rebase(Workspace::from_config(&[window(W), window("V")]));
-        assert_eq!(
-            w.receive("V", None, doc(1).as_str(), "default"),
-            Some(Handed::AlreadyQueued(a))
-        );
+        assert_eq!(queue(&w, W), [share]);
+        let Some(Handed::Unsorted(_)) = w.receive("V", None, doc(1).as_str(), "default") else {
+            panic!()
+        };
+        assert!(queue(&w, W).is_empty());
     }
 
     /// A link that waited while no window was open leaves the queue once it opens as a group.
@@ -2004,7 +2242,7 @@ mod tests {
     #[test]
     fn receive_raises_a_document_open_in_another_window() {
         let (mut w, h1) = fleet();
-        queued(w.receive(W, None, doc(1).as_str(), "default"));
+        queued(w.queue(W, doc(1).as_str(), None));
         let m = id(w.open_from(&h1, &doc(1)).unwrap());
         w.activate(&h1);
         assert_eq!(
@@ -2025,7 +2263,7 @@ mod tests {
     #[test]
     fn receive_into_a_named_group_joins_it() {
         let (mut w, h1) = fleet();
-        queued(w.receive("V", None, doc(1).as_str(), "default"));
+        queued(w.queue("V", doc(1).as_str(), None));
         let again = format!("{}?usp=x", doc(1));
         let Some(Handed::Joined(m)) = w.receive(W, Some("Fleet"), &again, "default") else {
             panic!()
@@ -2056,14 +2294,20 @@ mod tests {
     }
 
     #[test]
-    fn receive_into_a_missing_group_queues() {
+    fn receive_into_a_missing_group_opens_under_unsorted() {
         let (mut w, h1) = fleet();
-        queued(w.receive(W, Some("Gone"), doc(1).as_str(), "default"));
+        let Some(Handed::Unsorted(a)) = w.receive(W, Some("Gone"), doc(1).as_str(), "default")
+        else {
+            panic!()
+        };
         // A group of that name in another window is not this window's.
-        queued(w.receive("V", Some("Fleet"), doc(2).as_str(), "default"));
+        let Some(Handed::Unsorted(b)) = w.receive("V", Some("Fleet"), doc(2).as_str(), "default")
+        else {
+            panic!()
+        };
         assert!(member_ids(&w, &h1).is_empty());
-        assert_eq!(queue(&w, W), [doc(1).as_str()]);
-        assert_eq!(queue(&w, "V"), [doc(2).as_str()]);
+        assert_eq!(unsorted_ids(&w, W), vec![a]);
+        assert_eq!(unsorted_ids(&w, "V"), vec![b]);
     }
 
     #[test]
@@ -2102,8 +2346,8 @@ mod tests {
     #[test]
     fn add_incoming_joins_the_group_and_clears_the_row() {
         let (mut w, h1) = fleet();
-        let a = queued(w.receive(W, None, doc(1).as_str(), "default"));
-        let b = queued(w.receive(W, None, doc(2).as_str(), "default"));
+        let a = queued(w.queue(W, doc(1).as_str(), None));
+        let b = queued(w.queue(W, doc(2).as_str(), None));
         let Some(Opened::Added(m)) = w.add_incoming(&a, &h1) else {
             panic!()
         };
@@ -2117,7 +2361,7 @@ mod tests {
     #[test]
     fn add_incoming_to_a_closed_group_keeps_it() {
         let (mut w, h1) = fleet();
-        let a = queued(w.receive(W, None, doc(1).as_str(), "default"));
+        let a = queued(w.queue(W, doc(1).as_str(), None));
         w.close_group(&h1, &Default::default());
         assert_eq!(w.add_incoming(&a, &h1), None);
         assert_eq!(queue(&w, W), [doc(1).as_str()]);
@@ -2131,7 +2375,7 @@ mod tests {
     #[test]
     fn incoming_as_group_heads_a_group_in_its_window() {
         let (mut w, _) = fleet();
-        let a = queued(w.receive("V", None, doc(1).as_str(), "work"));
+        let a = queued(w.queue("V", doc(1).as_str(), None));
         let Some(Opened::Added(h)) = w.incoming_as_group(&a, "work") else {
             panic!()
         };
@@ -2148,15 +2392,15 @@ mod tests {
     #[test]
     fn dismiss_removes_only_that_item() {
         let (mut w, _) = fleet();
-        let a = queued(w.receive(W, None, doc(1).as_str(), "default"));
-        queued(w.receive(W, None, doc(2).as_str(), "default"));
-        queued(w.receive("V", None, doc(3).as_str(), "default"));
+        let a = queued(w.queue(W, doc(1).as_str(), None));
+        queued(w.queue(W, doc(2).as_str(), None));
+        queued(w.queue("V", doc(3).as_str(), None));
         w.dismiss_incoming(&a);
         w.dismiss_incoming("in-nothing");
         assert_eq!(queue(&w, W), [doc(2).as_str()]);
         assert_eq!(queue(&w, "V"), [doc(3).as_str()]);
         // Dismissed, it can be queued again.
-        queued(w.receive(W, None, doc(1).as_str(), "default"));
+        queued(w.queue(W, doc(1).as_str(), None));
     }
 
     #[test]
@@ -2172,8 +2416,8 @@ mod tests {
     #[test]
     fn rebase_keeps_the_queue() {
         let mut w = Workspace::from_config(&two_windows());
-        queued(w.receive("A", None, doc(7).as_str(), "default"));
-        queued(w.receive("B", None, doc(8).as_str(), "default"));
+        queued(w.queue("A", doc(7).as_str(), None));
+        queued(w.queue("B", doc(8).as_str(), None));
         let mut cfg = two_windows();
         cfg.reverse();
         w.rebase(Workspace::from_config(&cfg));
@@ -2184,7 +2428,7 @@ mod tests {
     #[test]
     fn a_link_handed_with_no_window_waits_for_the_first() {
         let mut w = Workspace::from_config(&[]);
-        let a = queued(w.receive("anything", None, doc(1).as_str(), "default"));
+        let a = queued(w.queue("anything", doc(1).as_str(), None));
         queued(w.receive("", None, folder(2).as_str(), "default"));
         let r = queued(w.reject("", "flotilla://open", "No link in flotilla://open".into()));
         assert_eq!(
@@ -2210,8 +2454,8 @@ mod tests {
     #[test]
     fn a_removed_windows_queue_moves_to_the_first() {
         let mut w = Workspace::from_config(&two_windows());
-        queued(w.receive("A", None, doc(7).as_str(), "default"));
-        queued(w.receive("B", None, doc(8).as_str(), "default"));
+        queued(w.queue("A", doc(7).as_str(), None));
+        queued(w.queue("B", doc(8).as_str(), None));
         let cfg = vec![window("C"), two_windows().remove(0)];
         w.rebase(Workspace::from_config(&cfg));
         assert_eq!(queue(&w, "C"), [doc(8).as_str()]);
@@ -2245,8 +2489,8 @@ mod tests {
     #[test]
     fn a_config_with_no_windows_keeps_the_queue_for_the_next_window() {
         let mut w = Workspace::from_config(&two_windows());
-        queued(w.receive("A", None, doc(7).as_str(), "default"));
-        queued(w.receive("B", None, doc(8).as_str(), "default"));
+        queued(w.queue("A", doc(7).as_str(), None));
+        queued(w.queue("B", doc(8).as_str(), None));
         w.rebase(Workspace::from_config(&[]));
         assert!(w.windows.is_empty());
         let held = crate::session::Session::of(&w).incoming;

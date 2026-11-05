@@ -223,6 +223,7 @@ mod tests {
     /// Windows A and B; A shows a docked member, B its head, and one group is in Recent.
     fn sample() -> Workspace {
         let window = |t: &str| ConfigWindow {
+            unsorted: vec![],
             title: t.into(),
             groups: vec![],
         };
@@ -328,7 +329,7 @@ mod tests {
         let p = dir.path().join("session.json");
         let mut w = sample();
         let doc = "https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrSt02/edit";
-        w.receive("B", None, doc, "default").unwrap();
+        w.queue("B", doc, None).unwrap();
         w.receive("B", None, "mailto:x", "default").unwrap();
         save(&p, &w, []).unwrap();
         let Loaded::Restored(s) = load(&p) else {
