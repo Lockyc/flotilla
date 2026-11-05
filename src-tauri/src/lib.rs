@@ -300,6 +300,7 @@ fn on_spine_action(app: &tauri::AppHandle, routed: shell_core::menu::Routed) {
             }
             emit("find-in-sidebar");
         }
+        SpineAction::ToggleSidebar => emit("toggle-sidebar"),
         SpineAction::CheckUpdates => emit("check-update"),
         // A pop-out's close docks its tab; a window's goes through the `WindowSet`'s
         // `CloseRequested` like the red button.

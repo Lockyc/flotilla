@@ -364,6 +364,7 @@ fn build_app_menu(
         shell_core::menu::SpineConfig {
             app_name: "flotilla",
             windows,
+            toggle_sidebar: true,
         },
         env!("CARGO_PKG_VERSION"),
         env!("BUILD_GIT_SHA"),

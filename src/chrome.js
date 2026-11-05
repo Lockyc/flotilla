@@ -89,6 +89,8 @@ async function mountChrome() {
         setSidebarWidth(width);
         reportRect();
       },
+      // Collapse and peek move the hole; a peek only by a transform, which the ResizeObserver misses.
+      onLayout: reportRect,
       onNav(action) {
         if (activeId) invoke(NAV_COMMANDS[action], { id: activeId }).catch((err) => sb.setError(String(err)));
       },
@@ -106,6 +108,7 @@ async function mountChrome() {
       downloads: true,
       appName: "flotilla",
       emptyState: document.getElementById("empty-state"),
+      hole: document.getElementById("content-hole"),
       storageKey: "flotilla:sidebar-width",
       defaultWidth: identity.default_width,
       minWidth: MIN_W,
@@ -207,6 +210,7 @@ listen("nav-tab", (e) =>
   sb && sb.selectByOffset(e.payload.dir, { liveOnly: true, from: e.payload.from ?? undefined }));
 listen("jump-tab", (e) => sb && sb.selectByIndex(e.payload));
 listen("find-in-sidebar", () => sb && sb.focusSearch());
+listen("toggle-sidebar", () => sb && sb.toggleSidebar());
 // Group ▸ New Group… (⌘N).
 listen("focus-new-group", () => sb && sb.focusUrlField());
 listen("downloads-state", (e) => sb && sb.setDownloads(e.payload));
