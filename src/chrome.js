@@ -150,10 +150,12 @@ function update(dto) {
 }
 
 function endRename(save) {
-  // Cleared before the field is removed: removing it blurs it, which calls back in here.
+  // Cleared first: the blur below calls back in here. The blur is explicit because removing a
+  // focused field fires no focusout, and the sidebar's focusout is what lets a peek it held close.
   const r = renaming;
   if (!r) return;
   renaming = null;
+  r.input.blur();
   r.input.remove();
   r.title.style.display = "";
   if (heldDto) {
