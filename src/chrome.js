@@ -36,6 +36,7 @@ function windowDto(ws) {
     density: identity.density,
     windowDrag: identity.sidebar_drag !== false,
     openSection: identity.open_section === true,
+    rail: identity.rail,
     ...ws,
   };
 }
@@ -201,7 +202,7 @@ function beginRename(id, name) {
 
 listen("rename-row", (e) => sb && beginRename(e.payload.id, e.payload.title));
 listen("workspace", (e) => sb && identity && update(e.payload));
-// A reloaded config: re-read the identity (density, the Open section) and drop an earlier config error.
+// A reloaded config: re-read the identity (density, the Open section, the rail) and drop an earlier config error.
 listen("config-reloaded", async () => {
   if (!sb) return;
   identity = await invoke("window_identity");

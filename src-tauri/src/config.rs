@@ -4,7 +4,7 @@
 use config_core::{Colour, Density, TabDigitKeys};
 use flotilla_core::identity::{identity, DocKey};
 use flotilla_core::model::{ConfigGroup, ConfigTab, ConfigWindow};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use url::Url;
@@ -37,10 +37,25 @@ pub struct Config {
     pub format_on_save: bool,
     /// Pin the Open section in every window whose own `open_tabs_section` is unset. Hot-reloads.
     pub open_tabs_section: bool,
+    /// What a collapsed sidebar shows down the window's left edge. Hot-reloads.
+    pub rail: Rail,
     /// The windows, in file order; `parse` normalises each `colour` to `#rrggbb`. A file with no
     /// `[[window]]` has none; the default (a missing file, or the starter) has [`STARTER_WINDOW`].
     #[serde(rename = "window", default)]
     pub windows: Vec<FlotillaWindow>,
+}
+
+/// chrome-core's collapsed-sidebar rail (`RAIL_STYLES`), as the lowercase token its DTO takes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Rail {
+    /// The strip's window colour carried down the edge, with an expand chevron.
+    #[default]
+    Handle,
+    /// The bare strip.
+    Edge,
+    /// A mark per tab: active, loaded, attention.
+    Map,
 }
 
 /// The title of the starter config's one window.
@@ -116,6 +131,7 @@ impl Default for Config {
             allow_insecure: Vec::new(),
             format_on_save: false,
             open_tabs_section: false,
+            rail: Rail::Handle,
         }
     }
 }
@@ -247,7 +263,7 @@ mod tests {
     use super::*;
 
     /// Every top-level key the app reads; the starter config sets each one.
-    const KEYS: [&str; 8] = [
+    const KEYS: [&str; 9] = [
         "window",
         "density",
         "dark_mode",
@@ -256,6 +272,7 @@ mod tests {
         "allow_insecure",
         "format_on_save",
         "open_tabs_section",
+        "rail",
     ];
     /// Every `[[window]]`, `[[window.group]]` and `[[window.group.tab]]` key; the starter
     /// config's commented example documents each one.
@@ -327,7 +344,7 @@ mod tests {
         let cfg = parse(&format!(
             "density = \"compact\"\ndark_mode = true\ntab_digit_keys = \"cycle\"\n\
              auto_update = false\nallow_insecure = [\"10.0.0.1\"]\nformat_on_save = true\n\
-             open_tabs_section = true\n\
+             open_tabs_section = true\nrail = \"map\"\n\
              [[window]]\ntitle = \"Club\"\ncolour = \"#2A6F4E\"\nwidth = 1200\nheight = 800\n\
              open_on_start = false\nopen_tabs_section = false\n\
              [[window.group]]\nname = \"Newsletters\"\nurl = \"{FOLDER}\"\nstore = \"club\"\n\
@@ -336,6 +353,7 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(cfg.density, Density::Compact);
+        assert_eq!(cfg.rail, Rail::Map);
         assert!(cfg.tab_digit_keys.is_cycle());
         assert!(cfg.dark_mode && cfg.format_on_save && !cfg.auto_update);
         assert_eq!(cfg.allow_insecure, vec!["10.0.0.1".to_string()]);

@@ -23,6 +23,10 @@ format_on_save = false
 # A window's own open_tabs_section overrides this.
 open_tabs_section = false
 
+# What a collapsed sidebar shows down the window's left edge: "handle" — the window colour and
+# an expand chevron; "edge" — a bare strip; "map" — a mark per document (active, loaded, attention).
+rail = "handle"
+
 # Windows, each holding groups of documents. flotilla writes these as you work; a hand edit
 # sticks. A document is open once across every window.
 [[window]]

@@ -32,6 +32,7 @@ struct WindowIdentity {
     density: &'static str,
     sidebar_drag: bool,
     open_section: bool,
+    rail: config::Rail,
     auto_update: bool,
 }
 
@@ -50,6 +51,7 @@ fn window_identity(
         default_width: DEFAULT_SIDEBAR_W,
         density: cfg.density.as_str(),
         sidebar_drag: true,
+        rail: cfg.rail,
         auto_update: cfg.auto_update,
     }
 }

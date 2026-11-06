@@ -86,6 +86,7 @@ A document is open once across every window: two heads or tabs naming the same d
 | `auto_update` | `true` | Check for a new release on launch and every 6 hours. `false` stops the automatic checks; **Check for Updates…** still works. Read as each window opens. |
 | `allow_insecure` | `[]` | Hosts whose self-signed or invalid TLS certificate is accepted. Read at launch (restart to change). |
 | `open_tabs_section` | `false` | Pin an **Open** section above the groups, listing every document that is loaded or popped out under its group, which collapses there as it does below. Each keeps its row in its group too, so the list never shuffles; ⌘1–⌘9 and tab cycling ignore the section. It grows to 2/5 of the window, then scrolls on its own; its header collapses it. A window's own `open_tabs_section` overrides it. Hot-reloads. |
+| `rail` | `"handle"` | What a collapsed sidebar shows down the window's left edge: `handle` — the window colour and an expand chevron; `edge` — a bare strip; `map` — a mark per document (active, loaded, attention). Hot-reloads. |
 | `format_on_save` | `false` | Reformat the config in house style on each clean reload. A file that fails to parse is left untouched. |
 
 ## For link routers
