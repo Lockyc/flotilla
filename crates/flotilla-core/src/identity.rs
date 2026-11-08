@@ -57,8 +57,13 @@ impl Recogniser for Google {
     }
 
     /// A Drive folder view: `/drive[/u/N]/folders/<id>` is that folder, `/drive[/u/N]/my-drive`
-    /// is the `root` alias, which Drive's API accepts wherever a folder id goes.
+    /// is the `root` alias, which Drive's API accepts wherever a folder id goes. An `open?id=<id>`
+    /// share link may be a folder, so `<id>` is its container (a document's id is never an
+    /// ancestor, so it matches nothing).
     fn container_id(&self, url: &Url) -> Option<String> {
+        if let Some(id) = open_id(url) {
+            return Some(id);
+        }
         if url.host_str() != Some("drive.google.com") {
             return None;
         }
@@ -162,16 +167,21 @@ pub fn head_container(url: &Url) -> Option<(&'static str, String)> {
 /// (no member), and a folder's is no document at all. Members still need [`doc_key`].
 pub fn head_doc_key(store: &str, url: &Url) -> Option<DocKey> {
     doc_key(store, url).or_else(|| {
-        if !google_host(url) || url.path() != "/open" {
-            return None;
-        }
-        let (_, id) = url.query_pairs().find(|(k, _)| k == "id")?;
-        valid_file_id(&id).then(|| DocKey {
+        Some(DocKey {
             store: store.to_string(),
             provider: Google.name().to_string(),
-            id: id.into_owned(),
+            id: open_id(url)?,
         })
     })
+}
+
+/// The file a Drive `open?id=<id>` share link names.
+fn open_id(url: &Url) -> Option<String> {
+    if !google_host(url) || url.path() != "/open" {
+        return None;
+    }
+    let (_, id) = url.query_pairs().find(|(k, _)| k == "id")?;
+    valid_file_id(&id).then(|| id.into_owned())
 }
 
 /// A tab's identity within its group's login `store`: the document it opens (`head_doc_key`, which
@@ -603,6 +613,12 @@ mod tests {
             c("https://drive.google.com/drive/u/2/my-drive"),
             Some(("google", "root".into()))
         );
+        // A share link heads its folder, as `head_doc_key` keys it.
+        assert_eq!(
+            c(&format!("https://drive.google.com/open?id={ID}")),
+            Some(("google", ID.into()))
+        );
+        assert_eq!(c("https://drive.google.com/open?id=short"), None);
         assert_eq!(c("https://docs.google.com/document/d/D1/edit"), None);
         assert_eq!(c("https://drive.google.com/drive/recent"), None);
         assert_eq!(c("https://example.com/folders/F1"), None);
