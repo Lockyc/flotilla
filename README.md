@@ -96,7 +96,7 @@ flotilla takes `flotilla://open?window=<title>&group=<name>&url=<link>`, every v
 The windows and their groups are published in `~/Library/Application Support/au.lsjc.flotilla/windows.json`, written at launch and whenever they change. Windows are in config order and groups in sidebar order; `colour` is `null` for a window without one:
 
 ```json
-{"version":1,"windows":[{"title":"Rotary","colour":"#17458f","groups":["Rotary (interim)","Bulletins"]}]}
+{"version":1,"windows":[{"title":"Club","colour":"#17458f","groups":["Club (interim)","Bulletins"]}]}
 ```
 
 ## Build

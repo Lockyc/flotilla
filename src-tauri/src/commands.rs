@@ -818,7 +818,7 @@ mod tests {
             title: t.into(),
             groups: vec![],
         };
-        Workspace::from_config(&[window("Rotary"), window("Work")])
+        Workspace::from_config(&[window("Club"), window("Work")])
     }
 
     fn parse(s: &str) -> Handoff {
@@ -840,11 +840,11 @@ mod tests {
         );
         assert_eq!(
             parse(
-                "flotilla://open?window=Rotary%20Club&group=Bulletins&url=https%3A%2F%2Fdocs.google.com\
+                "flotilla://open?window=Book%20Club&group=Bulletins&url=https%3A%2F%2Fdocs.google.com\
                  %2Fdocument%2Fd%2FA%2Fedit%3Fusp%3Dsharing%26x%3D1%2Bb%23heading%3Dh.1"
             ),
             Handoff {
-                window: Some("Rotary Club".into()),
+                window: Some("Book Club".into()),
                 group: Some("Bulletins".into()),
                 link: DOC.into(),
                 problem: None,
@@ -852,11 +852,11 @@ mod tests {
         );
         // No link to place: queued as rejected, under its own text.
         for bare in [
-            "flotilla://open?window=Rotary",
-            "flotilla://open?window=Rotary&url=%20",
+            "flotilla://open?window=Club",
+            "flotilla://open?window=Club&url=%20",
         ] {
             let h = parse(bare);
-            assert_eq!(h.window.as_deref(), Some("Rotary"));
+            assert_eq!(h.window.as_deref(), Some("Club"));
             assert_eq!(h.link, bare);
             assert_eq!(h.problem, Some(format!("No link in {bare}")));
         }
@@ -869,11 +869,11 @@ mod tests {
     fn a_handed_link_goes_to_the_named_window_else_the_last_focused_else_the_first() {
         let ws = two_windows();
         let to = |req: Option<&str>, last: Option<&str>| target_window(&ws, req, last);
-        assert_eq!(to(Some(" Work "), Some("Rotary")).as_deref(), Some("Work"));
+        assert_eq!(to(Some(" Work "), Some("Club")).as_deref(), Some("Work"));
         assert_eq!(to(Some("Gone"), Some("Work")).as_deref(), Some("Work"));
         assert_eq!(to(None, Some("Work")).as_deref(), Some("Work"));
-        assert_eq!(to(None, None).as_deref(), Some("Rotary"));
-        assert_eq!(to(None, Some("Gone")).as_deref(), Some("Rotary"));
+        assert_eq!(to(None, None).as_deref(), Some("Club"));
+        assert_eq!(to(None, Some("Gone")).as_deref(), Some("Club"));
         assert_eq!(
             target_window(&Workspace::default(), Some("Work"), None),
             None
@@ -895,28 +895,28 @@ mod tests {
             panic!()
         };
         assert_eq!(
-            handed_front(&ws, "Rotary", Some(&Handed::Queued("x".into())), None),
-            window("Rotary")
+            handed_front(&ws, "Club", Some(&Handed::Queued("x".into())), None),
+            window("Club")
         );
         assert_eq!(
-            handed_front(&ws, "Rotary", Some(&Handed::AlreadyQueued(q)), None),
+            handed_front(&ws, "Club", Some(&Handed::AlreadyQueued(q)), None),
             window("Work")
         );
         // Raised, grouped or joined: the tab's own window.
         assert_eq!(
-            handed_front(&ws, "Rotary", Some(&Handed::Raised(h.clone())), None),
+            handed_front(&ws, "Club", Some(&Handed::Raised(h.clone())), None),
             window("Work")
         );
         assert_eq!(
             handed_front(
                 &ws,
-                "Rotary",
+                "Club",
                 Some(&Handed::Raised(h.clone())),
                 Some(h.clone())
             ),
             Some(Forward::Detached(h))
         );
-        assert_eq!(handed_front(&ws, "Rotary", None, None), None);
+        assert_eq!(handed_front(&ws, "Club", None, None), None);
     }
 
     /// With no window configured, a handed link waits in `stray`, nothing comes forward, and the
@@ -927,7 +927,7 @@ mod tests {
         let doc = "https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrSt01/edit";
         let placed = place(
             &mut ws,
-            &parse(&format!("flotilla://open?window=Rotary&url={doc}")),
+            &parse(&format!("flotilla://open?window=Club&url={doc}")),
             None,
         );
         assert!(matches!(placed.handed, Some(Handed::Queued(_))));
@@ -955,11 +955,11 @@ mod tests {
         let mut placed = place(&mut ws, &h, None);
         ws.rebase(Workspace::from_config(&[ConfigWindow {
             unsorted: vec![],
-            title: "Rotary".into(),
+            title: "Club".into(),
             groups: vec![],
         }]));
         requeue(&mut ws, &h, None, &mut placed);
-        assert_eq!(placed.window, "Rotary");
+        assert_eq!(placed.window, "Club");
         assert_eq!(ws.windows[0].incoming[0].link, folder);
     }
 

@@ -352,7 +352,7 @@ mod tests {
         let Some(Opened::Added(h4)) = w.new_group("A", &f4, "default") else {
             panic!()
         };
-        w.set_title(&w.windows[0].groups[0].head.id.clone(), "Rotary (interim)");
+        w.set_title(&w.windows[0].groups[0].head.id.clone(), "Club (interim)");
         w.set_title(&h4, "Bulletins");
         let colour_of = |t: &str| (t == "A").then(|| "#17458f".to_string());
         let m: serde_json::Value = serde_json::from_str(&windows_manifest(&w, colour_of)).unwrap();
@@ -361,7 +361,7 @@ mod tests {
             serde_json::json!({
                 "version": 1,
                 "windows": [
-                    { "title": "A", "colour": "#17458f", "groups": ["Rotary (interim)", "Bulletins"] },
+                    { "title": "A", "colour": "#17458f", "groups": ["Club (interim)", "Bulletins"] },
                     { "title": "B", "colour": null, "groups": ["https://drive.google.com/drive/folders/f3"] },
                 ],
             })
