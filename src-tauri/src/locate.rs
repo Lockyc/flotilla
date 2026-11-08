@@ -282,28 +282,37 @@ fn sort(ws: &mut Workspace, sorts: &[(TabId, TabId)], live: &HashSet<TabId>) -> 
     fronts
 }
 
-/// Every document in every window's Unsorted looked up again, one after another on one thread: a
-/// newly connected account may see documents no account could before.
-pub fn all_unsorted(app: &AppHandle) {
+/// The Unsorted documents a lookup left with a reason, in sidebar order. A document moved to
+/// Unsorted by hand has none, so a retry never takes it out of where the user put it.
+fn retry(ws: &Workspace, reasons: &HashMap<TabId, String>) -> Vec<TabId> {
+    ws.windows
+        .iter()
+        .flat_map(|w| &w.unsorted)
+        .filter(|t| reasons.contains_key(&t.id))
+        .map(|t| t.id.clone())
+        .collect()
+}
+
+/// The Unsorted documents left with a reason ([`retry`]) looked up again, one after another on
+/// one thread: a newly connected account may see documents no account could before.
+fn retry_unsorted(app: &AppHandle) {
     let Some(client) = crate::google::client() else {
         return;
     };
-    let docs: Vec<TabId> = app
-        .state::<AppState>()
-        .ws
-        .lock()
-        .unwrap()
-        .windows
-        .iter()
-        .flat_map(|w| w.unsorted.iter().map(|t| t.id.clone()))
-        .collect();
+    let docs = {
+        let state = app.state::<AppState>();
+        let ws = state.ws.lock().unwrap();
+        let reasons = state.unsorted_reason.lock().unwrap();
+        retry(&ws, &reasons)
+    };
     let jobs = docs.iter().filter_map(|d| begin(app, d)).collect();
     spawn(app, client, jobs);
 }
 
 /// Connect Google Account…: consent in the default browser, on a thread of its own since it waits
-/// for the browser. A connected account is listed in the Group menu and every Unsorted document is
-/// looked up again; a consent left unanswered until it times out raises nothing.
+/// for the browser. A connected account is listed in the Group menu and the Unsorted documents
+/// left with a reason are looked up again; a consent left unanswered until it times out raises
+/// nothing.
 pub fn connect(app: &AppHandle) {
     let Some(client) = crate::google::client() else {
         return;
@@ -315,7 +324,7 @@ pub fn connect(app: &AppHandle) {
         crate::defer(&app, move || match connected {
             Ok(_) => {
                 crate::menu::refresh(&handle);
-                all_unsorted(&handle);
+                retry_unsorted(&handle);
             }
             Err(e) if e == "timed out" => {}
             Err(e) => tabs::notice(&handle, format!("Couldn't connect a Google account: {e}")),
@@ -440,6 +449,24 @@ mod tests {
         assert_eq!(ws.group_of(&there).unwrap().members[0].id, b);
         // Already sorted: nothing moves, nothing comes forward.
         assert_eq!(sort(&mut ws, &[(b, there)], &live), []);
+    }
+
+    /// Only a handed document left in Unsorted with a reason is looked up again; one moved to
+    /// Unsorted by hand carries none and stays where the user put it.
+    #[test]
+    fn a_retry_takes_only_documents_left_with_a_reason() {
+        let mut ws = one_window();
+        let doc2 = DOC.replace("01/", "02/");
+        let Some(Handed::Unsorted(left)) = ws.receive("W", None, DOC, "default") else {
+            panic!()
+        };
+        let Some(Handed::Unsorted(by_hand)) = ws.receive("W", None, &doc2, "default") else {
+            panic!()
+        };
+        let gone = TabId::from("t-gone");
+        let reasons = HashMap::from([(left.clone(), "x".into()), (gone, "y".into())]);
+        assert_eq!(retry(&ws, &reasons), [left]);
+        assert!(!retry(&ws, &reasons).contains(&by_hand));
     }
 
     #[test]
