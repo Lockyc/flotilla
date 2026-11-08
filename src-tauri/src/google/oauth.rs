@@ -16,7 +16,7 @@ use super::http::Transport;
 use super::Client;
 
 const AUTH: &str = "https://accounts.google.com/o/oauth2/v2/auth";
-const TOKEN: &str = "https://oauth2.googleapis.com/token";
+pub const TOKEN: &str = "https://oauth2.googleapis.com/token";
 const ABOUT: &str = "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)";
 const SCOPE: &str = "https://www.googleapis.com/auth/drive.metadata.readonly";
 

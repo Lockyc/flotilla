@@ -5,6 +5,7 @@
 #![allow(dead_code)]
 
 pub mod accounts;
+pub mod drive;
 pub mod http;
 pub mod oauth;
 
