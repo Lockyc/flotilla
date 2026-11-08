@@ -699,6 +699,24 @@ impl Workspace {
         self.activate(member);
     }
 
+    /// Moves `doc` from some window's Unsorted into the group `head` heads, and says whether it
+    /// left: `false` when it is not in an Unsorted (a drag already placed it), `head` no longer
+    /// heads a group, or [`Self::move_tab`] refuses (the re-keyed document is open in that store).
+    pub fn sort_into(&mut self, doc: &TabId, head: &TabId, live: &HashSet<TabId>) -> bool {
+        if !self
+            .windows
+            .iter()
+            .any(|w| w.unsorted.iter().any(|t| &t.id == doc))
+        {
+            return false;
+        }
+        if !matches!(self.locate(head), Some((_, Some(_)))) {
+            return false;
+        }
+        self.move_tab(doc, Dest::Group(head), live);
+        !matches!(self.locate(doc), Some((_, None)))
+    }
+
     /// Moves a member or Unsorted document to the end of `dest`, in whichever window. A move onto
     /// another store re-keys the document to that store (and so gives it that key's id), and is
     /// refused if it is already open there. An active document stays active, in its new window;
@@ -2166,6 +2184,52 @@ mod tests {
         );
         assert!(unsorted_ids(&w, "V").is_empty());
         assert_eq!(w.receive("nowhere", None, doc(2).as_str(), "default"), None);
+    }
+
+    fn homes(w: &Workspace, head: &TabId) -> Vec<String> {
+        w.group_of(head)
+            .unwrap()
+            .members
+            .iter()
+            .map(|t| t.home_url.clone())
+            .collect()
+    }
+
+    #[test]
+    fn sort_into_moves_an_unsorted_document() {
+        let (mut w, h1) = fleet();
+        let Some(Handed::Unsorted(d)) = w.receive(W, None, doc(1).as_str(), "default") else {
+            panic!()
+        };
+        assert!(w.sort_into(&d, &h1, &HashSet::new()));
+        assert_eq!(homes(&w, &h1), [doc(1).to_string()]);
+        assert!(unsorted_ids(&w, W).is_empty());
+    }
+
+    #[test]
+    fn sort_into_leaves_a_dragged_document() {
+        let (mut w, h1) = fleet();
+        let h2 = head_of(&mut w, 2);
+        let Some(Handed::Unsorted(d)) = w.receive(W, None, doc(1).as_str(), "default") else {
+            panic!()
+        };
+        w.move_tab(&d, Dest::Group(&h2), &HashSet::new());
+        let before = homes(&w, &h2);
+        assert_eq!(before.len(), 1);
+        assert!(!w.sort_into(&d, &h1, &HashSet::new()));
+        assert_eq!(homes(&w, &h2), before);
+        assert!(homes(&w, &h1).is_empty());
+    }
+
+    #[test]
+    fn sort_into_with_a_closed_head_does_nothing() {
+        let (mut w, h1) = fleet();
+        let Some(Handed::Unsorted(d)) = w.receive(W, None, doc(1).as_str(), "default") else {
+            panic!()
+        };
+        w.close_group(&h1, &HashSet::new());
+        assert!(!w.sort_into(&d, &h1, &HashSet::new()));
+        assert_eq!(unsorted_ids(&w, W), vec![d]);
     }
 
     #[test]

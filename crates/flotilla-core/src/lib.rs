@@ -6,4 +6,5 @@
 pub mod identity;
 pub mod model;
 pub mod nav;
+pub mod route;
 pub mod session;
