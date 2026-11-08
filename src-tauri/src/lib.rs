@@ -7,6 +7,7 @@ mod commands;
 mod config;
 mod detach;
 mod google;
+mod locate;
 mod menu;
 mod migrate;
 mod persist;
@@ -219,6 +220,7 @@ fn load_state(
         created: Default::default(),
         warm: std::sync::Mutex::new(warm),
         failed: Default::default(),
+        unsorted_reason: Default::default(),
         shown: Default::default(),
         menu: Default::default(),
         config: std::sync::Mutex::new(config),

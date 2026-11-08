@@ -70,15 +70,28 @@ pub enum Action {
     ClearRecent,
     /// Add to group…'s item: open Incoming item `.0` into the group headed by `.1`.
     AddIncoming(String, TabId),
+    /// Connect a Google account, in the default browser.
+    ConnectGoogle,
+    /// Disconnect the Google account with this email.
+    DisconnectGoogle(String),
 }
 
 const PREFIX: &str = "flotilla:";
 
 /// The menu item id for `a`: `flotilla:<verb>[:<arg>][@<tab>]`. Tab ids (`t-<n>`) and Incoming
-/// item ids (`in-<n>`, in the tab's place) contain neither `:` nor `@`.
+/// item ids (`in-<n>`, in the tab's place) contain neither `:` nor `@`; an email argument is
+/// percent-encoded, so its own `@` and `:` are not read as the scheme's.
 pub fn id(a: &Action) -> String {
     let (verb, tab) = match a {
         Action::AddIncoming(item, head) => (format!("add_incoming:{head}"), Some(item)),
+        Action::ConnectGoogle => ("connect_google".into(), None),
+        Action::DisconnectGoogle(email) => (
+            format!(
+                "disconnect_google:{}",
+                url::form_urlencoded::byte_serialize(email.as_bytes()).collect::<String>()
+            ),
+            None,
+        ),
         Action::NewGroup => ("new_group".into(), None),
         Action::Home(t) => ("home".into(), t.as_ref()),
         Action::Rename(t) => ("rename".into(), t.as_ref()),
@@ -123,6 +136,12 @@ pub fn action(id: &str) -> Option<Action> {
         ("recent", Some(i), None) => Action::Reopen(i.parse().ok()?),
         ("clear_recent", None, None) => Action::ClearRecent,
         ("add_incoming", Some(head), Some(item)) => Action::AddIncoming(item, head.to_string()),
+        ("connect_google", None, None) => Action::ConnectGoogle,
+        ("disconnect_google", Some(email), None) => Action::DisconnectGoogle(
+            url::form_urlencoded::parse(email.as_bytes())
+                .next()
+                .map(|(email, _)| email.into_owned())?,
+        ),
         _ => return None,
     })
 }
@@ -352,20 +371,48 @@ pub fn incoming_menu(
     menu.build()
 }
 
-/// What the menu bar is built from: the Group menu's state and the Window menu's rows (label,
-/// title, open).
+/// What the menu bar is built from: the Group menu's state, the Window menu's rows (label,
+/// title, open) and the connected Google accounts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MenuKey {
     pub group: MenuState,
     pub windows: Vec<(String, String, bool)>,
+    pub accounts: Vec<String>,
+}
+
+/// The Group menu's account items, after a separator: Connect Google Account… (disabled in a
+/// build without the OAuth client, saying so), then a Disconnect submenu of the connected
+/// `accounts`, disabled while there are none.
+fn google_items(app: &AppHandle, accounts: &[String]) -> tauri::Result<Vec<MenuItemKind<Wry>>> {
+    let connect = match crate::google::client() {
+        Some(_) => MenuItemBuilder::with_id(id(&Action::ConnectGoogle), "Connect Google Account…"),
+        None => MenuItemBuilder::with_id(
+            id(&Action::ConnectGoogle),
+            "Connect Google Account… (not in this build)",
+        )
+        .enabled(false),
+    };
+    let mut disconnect =
+        SubmenuBuilder::new(app, "Disconnect Google Account").enabled(!accounts.is_empty());
+    for email in accounts {
+        let a = Action::DisconnectGoogle(email.clone());
+        disconnect = disconnect.item(&MenuItemBuilder::with_id(id(&a), email).build(app)?);
+    }
+    Ok(vec![
+        MenuItemKind::Predefined(PredefinedMenuItem::separator(app)?),
+        MenuItemKind::MenuItem(connect.build(app)?),
+        MenuItemKind::Submenu(disconnect.build()?),
+    ])
 }
 
 /// The menu bar: shell-core's App, Edit, Tab, Config and Window menus (every configured window, open
-/// or closed) around flotilla's Group menu, which acts on the focused window's active tab.
+/// or closed) around flotilla's Group menu, which acts on the focused window's active tab and ends
+/// with the Google account items.
 fn build_app_menu(
     app: &AppHandle,
     ms: &MenuState,
     windows: &[WindowEntry],
+    accounts: &[String],
 ) -> tauri::Result<Menu<Wry>> {
     let cycle_digits = app
         .state::<AppState>()
@@ -387,7 +434,8 @@ fn build_app_menu(
     )?;
     let tabs_menu = shell_core::menu::build_tab_menu(app, &spine, cycle_digits, &[])?;
 
-    let group = group_items(app, ms, None, Some(&spine.close_tab))?;
+    let mut group = group_items(app, ms, None, Some(&spine.close_tab))?;
+    group.extend(google_items(app, accounts)?);
     let group_menu: Submenu<Wry> = SubmenuBuilder::new(app, "Group")
         .items(&refs(&group))
         .build()?;
@@ -463,13 +511,14 @@ fn focused_label(app: &AppHandle) -> Option<String> {
 }
 
 /// What the menu bar shows with `tab` the one it acts on ([`menu_tab`]): its Group menu, and the
-/// Window menu's rows. `current` is the page `tab` shows.
+/// Window menu's rows, and the connected Google `accounts`. `current` is the page `tab` shows.
 pub fn key_for(
     ws: &Workspace,
     live: &HashSet<TabId>,
     tab: Option<&TabId>,
     current: Option<&Url>,
     windows: &[WindowEntry],
+    accounts: Vec<String>,
 ) -> MenuKey {
     MenuKey {
         group: menu_state_for(ws, live, current, tab),
@@ -477,6 +526,7 @@ pub fn key_for(
             .iter()
             .map(|e| (e.id.clone(), e.title.clone(), e.open))
             .collect(),
+        accounts,
     }
 }
 
@@ -503,12 +553,13 @@ pub fn refresh(app: &AppHandle) {
         tab.as_ref(),
         current.as_ref(),
         &windows,
+        crate::locate::accounts(),
     );
-    let group = key.group.clone();
+    let (group, accounts) = (key.group.clone(), key.accounts.clone());
     if !needs_rebuild(&mut state.menu.lock().unwrap(), key) {
         return;
     }
-    match build_app_menu(app, &group, &windows) {
+    match build_app_menu(app, &group, &windows, &accounts) {
         Ok(menu) => {
             let _ = app.set_menu(menu);
         }
@@ -624,6 +675,8 @@ pub fn handle(app: &AppHandle, menu_id: &str) -> bool {
                 });
             }
         }
+        Action::ConnectGoogle => crate::locate::connect(app),
+        Action::DisconnectGoogle(email) => crate::locate::disconnect(app, &email),
     }
     true
 }
@@ -745,6 +798,20 @@ mod tests {
         assert_eq!(action("shell:close_tab"), None);
         assert_eq!(action("flotilla:recent:x"), None);
         assert_eq!(action("flotilla:nope"), None);
+    }
+
+    /// An email's `@` would read as the id's tab suffix, so the id carries it encoded.
+    #[test]
+    fn connect_actions_round_trip_through_ids() {
+        for a in [
+            Action::ConnectGoogle,
+            Action::DisconnectGoogle("a@x.com".into()),
+            Action::DisconnectGoogle("o'neil+tag:1%@x.com".into()),
+        ] {
+            assert_eq!(action(&id(&a)), Some(a.clone()), "{}", id(&a));
+        }
+        let disconnect = id(&Action::DisconnectGoogle("a@x.com".into()));
+        assert!(!disconnect.contains('@'), "{disconnect}");
     }
 
     #[test]
@@ -943,13 +1010,13 @@ mod tests {
         // A in front, its member active: the member's items.
         let tab_a = menu_tab(&ws, Some("a"), Some("A"));
         assert_eq!(tab_a.as_ref(), Some(&m));
-        let in_a = key_for(&ws, &cold(), tab_a.as_ref(), None, &entries);
+        let in_a = key_for(&ws, &cold(), tab_a.as_ref(), None, &entries, vec![]);
         assert_eq!(in_a.group, menu_state_for(&ws, &cold(), None, Some(&m)));
         assert_eq!(in_a.group.make_own_group, on("Make Own Group"));
         // B in front, nothing active there: no tab, so nothing acts on A's member.
         let tab_b = menu_tab(&ws, Some("b"), Some("B"));
         assert_eq!(tab_b, None);
-        let in_b = key_for(&ws, &cold(), tab_b.as_ref(), None, &entries);
+        let in_b = key_for(&ws, &cold(), tab_b.as_ref(), None, &entries, vec![]);
         assert_eq!(in_b.group, menu_state_for(&ws, &cold(), None, None));
         assert_ne!(in_a, in_b, "a focus change rebuilds the menu bar");
         assert_eq!(in_b.windows.len(), 2);

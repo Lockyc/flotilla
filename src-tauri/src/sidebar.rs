@@ -3,7 +3,7 @@
 use flotilla_core::identity::{kind, Kind};
 use flotilla_core::model::{Tab, TabId, WindowWs, Workspace};
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use url::Url;
 
 /// The DTO `group` of a window's Unsorted rows; tab ids are `t-…`, so it is never a head's.
@@ -19,8 +19,13 @@ pub const DISMISS: &str = "dismiss";
 const NO_GROUP: &str = "No group is open";
 
 /// Window `title`'s whole chrome DTO: [`sidebar_dto`] plus its [`incoming_dto`].
-pub fn window_dto(ws: &Workspace, title: &str, created: &HashSet<TabId>) -> Value {
-    let mut dto = sidebar_dto(crate::tabs::window(ws, title), created);
+pub fn window_dto(
+    ws: &Workspace,
+    title: &str,
+    created: &HashSet<TabId>,
+    reasons: &HashMap<TabId, String>,
+) -> Value {
+    let mut dto = sidebar_dto(crate::tabs::window(ws, title), created, reasons);
     dto["incoming"] = incoming_dto(ws, title);
     dto
 }
@@ -79,12 +84,18 @@ fn remove_confirm(g: &flotilla_core::model::Group) -> String {
 /// The window's Unsorted documents come first, a headless run keyed [`UNSORTED`], which
 /// chrome-core labels "Unsorted"; with none, there is no such run, and `dropSections` offers it
 /// as a drop zone while a row is dragged. Every document (any row but a head) is `movable`:
-/// dragged onto another group or Unsorted, it moves there (`commands::move_tab`).
-pub fn sidebar_dto(window: Option<&WindowWs>, created: &HashSet<TabId>) -> Value {
+/// dragged onto another group or Unsorted, it moves there (`commands::move_tab`). An Unsorted
+/// document with a `reasons` entry (why it was not sorted into its folder's group) shows it as
+/// its row's `warn`.
+pub fn sidebar_dto(
+    window: Option<&WindowWs>,
+    created: &HashSet<TabId>,
+    reasons: &HashMap<TabId, String>,
+) -> Value {
     let groups = window.map_or(&[][..], |w| &w.groups[..]);
     let unsorted = window.map_or(&[][..], |w| &w.unsorted[..]);
     let row = |t: &Tab, group: &str, name: &str, head: bool, confirm: Option<String>| {
-        json!({
+        let mut row = json!({
             "id": t.id,
             "title": t.title,
             "group": group,
@@ -100,8 +111,11 @@ pub fn sidebar_dto(window: Option<&WindowWs>, created: &HashSet<TabId>) -> Value
             "killable": false,
             "suspendable": false,
             "startable": false,
-            "warn": false,
-        })
+        });
+        if let Some(reason) = reasons.get(&t.id).filter(|_| group == UNSORTED) {
+            row["warn"] = json!(reason);
+        }
+        row
     };
     let tabs: Vec<Value> = unsorted
         .iter()
@@ -166,7 +180,7 @@ mod tests {
         else {
             panic!()
         };
-        let none = sidebar_dto(ws.windows.first(), &HashSet::new());
+        let none = sidebar_dto(ws.windows.first(), &HashSet::new(), &HashMap::new());
         assert!(none["tabs"]
             .as_array()
             .unwrap()
@@ -176,7 +190,7 @@ mod tests {
         else {
             panic!()
         };
-        let dto = sidebar_dto(ws.windows.first(), &HashSet::new());
+        let dto = sidebar_dto(ws.windows.first(), &HashSet::new(), &HashMap::new());
         let rows = dto["tabs"].as_array().unwrap();
         assert_eq!(rows[0]["id"], json!(d));
         assert_eq!(rows[0]["group"], json!(UNSORTED));
@@ -215,7 +229,11 @@ mod tests {
         ws.set_collapsed(&h1, true);
         ws.set_detached(&m1, true);
 
-        let dto = sidebar_dto(ws.windows.first(), &HashSet::from([h2.clone()]));
+        let dto = sidebar_dto(
+            ws.windows.first(),
+            &HashSet::from([h2.clone()]),
+            &HashMap::new(),
+        );
         assert_eq!(dto["active"], json!(h2));
         assert_eq!(dto["collapsed"], json!([h1]));
         let rows: Vec<(String, String, String, bool, bool)> = dto["tabs"]
@@ -398,19 +416,42 @@ mod tests {
         };
         let mut ws = flotilla_core::model::Workspace::from_config(&[window("A"), window("B")]);
         ws.queue("B", DOC, None).unwrap();
-        let none = HashSet::new();
-        assert_eq!(window_dto(&ws, "A", &none)["incoming"], json!([]));
-        assert_eq!(
-            window_dto(&ws, "B", &none)["incoming"],
-            incoming_dto(&ws, "B")
-        );
-        assert_eq!(window_dto(&ws, "B", &none)["tabs"], json!([]));
+        let dto = |t| window_dto(&ws, t, &HashSet::new(), &HashMap::new());
+        assert_eq!(dto("A")["incoming"], json!([]));
+        assert_eq!(dto("B")["incoming"], incoming_dto(&ws, "B"));
+        assert_eq!(dto("B")["tabs"], json!([]));
+    }
+
+    #[test]
+    fn an_unsorted_reason_is_the_rows_warn() {
+        let mut ws = one_window();
+        let doc =
+            |n: u8| format!("https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrSt0{n}/edit");
+        let mut unsorted = |n| match ws.receive("W", None, &doc(n), "default") {
+            Some(flotilla_core::model::Handed::Unsorted(d)) => d,
+            _ => panic!(),
+        };
+        let (a, b) = (unsorted(1), unsorted(2));
+        let reasons = HashMap::from([(a.clone(), "Couldn't look up its folder: x".to_string())]);
+        let dto = sidebar_dto(ws.windows.first(), &HashSet::new(), &reasons);
+        let row = |id: &TabId| {
+            dto["tabs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["id"] == json!(id))
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(row(&a)["warn"], json!("Couldn't look up its folder: x"));
+        assert!(row(&b).get("warn").is_none());
     }
 
     #[test]
     fn empty_workspace_has_no_rows_and_no_active() {
-        let dto = sidebar_dto(one_window().windows.first(), &HashSet::new());
-        assert_eq!(dto, sidebar_dto(None, &HashSet::new()));
+        let none = HashMap::new();
+        let dto = sidebar_dto(one_window().windows.first(), &HashSet::new(), &none);
+        assert_eq!(dto, sidebar_dto(None, &HashSet::new(), &none));
         assert_eq!(dto["active"], Value::Null);
         assert_eq!(dto["collapsed"], json!([]));
         assert_eq!(dto["tabs"], json!([]));

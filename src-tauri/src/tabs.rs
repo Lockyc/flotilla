@@ -328,15 +328,20 @@ fn hole_of(app: &AppHandle, label: &str) -> HoleRect {
 }
 
 /// Sends each open window's sidebar DTO to its chrome and rebuilds the menu bar, whose Group menu
-/// follows the workspace.
+/// follows the workspace. Reasons for documents no longer in Unsorted are dropped first.
 pub fn push_dto(app: &AppHandle) {
     let state = app.state::<AppState>();
+    crate::locate::prune(
+        &state.ws.lock().unwrap(),
+        &mut state.unsorted_reason.lock().unwrap(),
+    );
     for (label, title) in open_windows(app) {
         let dto = {
             let ws = state.ws.lock().unwrap();
             let created = state.created.lock().unwrap();
+            let reasons = state.unsorted_reason.lock().unwrap();
             let none = HashSet::new();
-            crate::sidebar::window_dto(&ws, &title, created.get(&label).unwrap_or(&none))
+            crate::sidebar::window_dto(&ws, &title, created.get(&label).unwrap_or(&none), &reasons)
         };
         let _ = app.emit_to(label.as_str(), "workspace", dto);
     }

@@ -1,9 +1,6 @@
 //! The Google OAuth client flotilla ships with, baked in at build time by `build.rs`, and the
 //! accounts connected through it.
 
-// No caller yet; the Drive routing that consumes this module removes this.
-#![allow(dead_code)]
-
 pub mod accounts;
 pub mod drive;
 pub mod http;

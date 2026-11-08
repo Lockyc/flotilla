@@ -38,6 +38,7 @@ pub fn get_workspace(
         &ws,
         &title,
         created.get(webview.label()).unwrap_or(&none),
+        &state.unsorted_reason.lock().unwrap(),
     ))
 }
 
@@ -250,16 +251,27 @@ pub fn handoff(url: &Url) -> Handoff {
             window: None,
             group: None,
             link: url.to_string(),
-            problem: None,
+            problem: sign_in(url.as_str()),
         };
     };
     let link = req.param("url").filter(|l| !l.trim().is_empty());
     Handoff {
         group: req.param("group").map(str::to_string),
-        problem: link.is_none().then(|| format!("No link in {url}")),
+        problem: match link {
+            None => Some(format!("No link in {url}")),
+            Some(link) => sign_in(link),
+        },
         link: link.map_or_else(|| url.to_string(), str::to_string),
         window: req.window,
     }
+}
+
+/// Why `link` is not opened when it is a Google consent page: Google refuses sign-in inside
+/// embedded webviews, so accounts connect from the Group menu, in the default browser.
+fn sign_in(link: &str) -> Option<String> {
+    let url = Url::parse(link).ok()?;
+    (url.host_str() == Some("accounts.google.com") && url.path().starts_with("/o/oauth2"))
+        .then(|| "Google sign-in opens in your browser".to_string())
 }
 
 /// The window a handed link goes to: the one titled `requested`, else the one titled
@@ -306,7 +318,8 @@ pub fn handed_front(
 /// ([`target_window`]); with no window at all it waits for the first one there is. That window
 /// decides what the link does (`Workspace::receive`), and the window showing the result comes
 /// forward, reopened if closed ([`handed_front`]). A group or member whose config write fails
-/// leaves the link queued instead ([`requeue`]).
+/// leaves the link queued instead ([`requeue`]). A document that lands in Unsorted is then looked
+/// up in Drive and sorted into the group showing its folder ([`crate::locate::after_handoff`]).
 pub fn open_handed(app: &AppHandle, url: &Url) {
     if app.try_state::<AppState>().is_none() {
         EARLY_LINKS.lock().unwrap().push(url.clone());
@@ -324,6 +337,9 @@ pub fn open_handed(app: &AppHandle, url: &Url) {
     );
     tabs::bring(app, placed.front.as_ref());
     tabs::changed(app);
+    if let Some(Handed::Unsorted(id)) = &placed.handed {
+        crate::locate::after_handoff(app, id);
+    }
 }
 
 /// Where a handed link went: its window, what that window did with it, and the window to bring
@@ -952,6 +968,35 @@ mod tests {
         let before = (ws.clone(), placed.handed.clone());
         requeue(&mut ws, &h, None, &mut placed);
         assert_eq!((ws, placed.handed), before);
+    }
+
+    /// Google refuses sign-in inside embedded webviews: a consent link waits under Incoming, bare
+    /// or aimed by an open request.
+    #[test]
+    fn a_google_consent_link_is_never_opened() {
+        let consent = "https://accounts.google.com/o/oauth2/v2/auth?client_id=x&response_type=code";
+        for h in [
+            parse(consent),
+            parse(&format!(
+                "flotilla://open?window=Work&url={}",
+                url::form_urlencoded::byte_serialize(consent.as_bytes()).collect::<String>()
+            )),
+        ] {
+            let mut ws = two_windows();
+            let placed = place(&mut ws, &h, Some("Work"));
+            assert!(matches!(placed.handed, Some(Handed::Queued(_))));
+            let item = &ws.windows[1].incoming[0];
+            assert_eq!(item.link, consent);
+            assert_eq!(
+                item.problem.as_deref(),
+                Some("Google sign-in opens in your browser")
+            );
+        }
+        // Another accounts.google.com page is just a link.
+        assert_eq!(
+            parse("https://accounts.google.com/ServiceLogin").problem,
+            None
+        );
     }
 
     #[test]
