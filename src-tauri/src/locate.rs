@@ -207,9 +207,10 @@ pub fn after_handoff(app: &AppHandle, doc: &TabId) {
 }
 
 /// The main thread's half of a lookup. Each account Google revoked is reported once. An answer a
-/// later lookup of its document superseded is dropped. A document whose folder a group shows moves
-/// there ([`sort`]); a drag in the meantime wins, since only a document still in Unsorted moves. Otherwise
-/// its row's reason becomes what it now is: why it couldn't be looked up, or none.
+/// later lookup of its document superseded is dropped. A document whose folder a group shows
+/// moves there ([`sort`]), its new window coming forward ([`fronts`]); a drag in the meantime
+/// wins, since only a document still in Unsorted moves. Otherwise its row's reason becomes what it
+/// now is: why it couldn't be looked up, or none.
 fn settle(app: &AppHandle, answers: Vec<Answer>) {
     for email in unique(answers.iter().flat_map(|a| &a.dropped)) {
         tabs::notice(
@@ -240,14 +241,15 @@ fn settle(app: &AppHandle, answers: Vec<Answer>) {
     }
     if !sorts.is_empty() {
         let live = tabs::live(app);
-        let (fronts, raised) = crate::write::through(app, |ws| {
-            let mut fronts = Vec::new();
-            let raised = crate::detach::apply(ws, |ws| fronts = sort(ws, &sorts, &live));
-            (fronts, raised)
+        let (moved, raised) = crate::write::through(app, |ws| {
+            let mut moved = Vec::new();
+            let raised = crate::detach::apply(ws, |ws| moved = sort(ws, &sorts, &live));
+            (moved, raised)
         });
         if let Some(id) = &raised {
             crate::detach::raise(app, id);
         }
+        let fronts = fronts(&state.ws.lock().unwrap(), &moved);
         for front in &fronts {
             tabs::bring(app, Some(front));
         }
@@ -260,22 +262,36 @@ fn settle(app: &AppHandle, answers: Vec<Answer>) {
     }
 }
 
-/// Sorts each `(document, head)` that still can be, and answers the windows to bring forward: a
-/// document that left for another window shows there, so that window comes forward (reopened if
-/// closed) as it does for a handed link ([`handed_front`]).
-fn sort(ws: &mut Workspace, sorts: &[(TabId, TabId)], live: &HashSet<TabId>) -> Vec<Forward> {
-    let mut fronts = Vec::new();
+/// Sorts each `(document, head)` that still can be, and answers each moved document as the title
+/// of the window it left and its id in its group.
+fn sort(
+    ws: &mut Workspace,
+    sorts: &[(TabId, TabId)],
+    live: &HashSet<TabId>,
+) -> Vec<(String, TabId)> {
+    let mut moved = Vec::new();
     for (doc, head) in sorts {
         let Some(from) = tabs::window_title_of(ws, doc) else {
             continue;
         };
-        let Some(id) = ws.sort_into(doc, head, live) else {
-            continue;
-        };
-        if tabs::window_title_of(ws, &id).as_ref() == Some(&from) {
+        if let Some(id) = ws.sort_into(doc, head, live) {
+            moved.push((from, id));
+        }
+    }
+    moved
+}
+
+/// The windows to bring forward once the sorts behind `moved` are written: a document still in a
+/// group of another window than the one it left shows there, so that window comes forward
+/// (reopened if closed) as it does for a handed link ([`handed_front`]). Read from the workspace
+/// after the write, so a failed write's reload, which puts the document back, brings nothing.
+fn fronts(ws: &Workspace, moved: &[(String, TabId)]) -> Vec<Forward> {
+    let mut fronts = Vec::new();
+    for (from, id) in moved {
+        if ws.group_of(id).is_none() || tabs::window_title_of(ws, id).as_ref() == Some(from) {
             continue;
         }
-        let front = handed_front(ws, &from, Some(&Handed::Grouped(id)), None);
+        let front = handed_front(ws, from, Some(&Handed::Grouped(id.clone())), None);
         if let Some(front) = front.filter(|f| !fronts.contains(f)) {
             fronts.push(front);
         }
@@ -475,14 +491,18 @@ mod tests {
             panic!()
         };
         let live = HashSet::new();
-        assert_eq!(sort(&mut ws, &[(a, here)], &live), []);
-        assert_eq!(
-            sort(&mut ws, &[(b.clone(), there.clone())], &live),
-            [Forward::Window("V".into())]
-        );
+        let moved = sort(&mut ws, &[(a, here)], &live);
+        assert_eq!(fronts(&ws, &moved), []);
+        let before = ws.clone();
+        let moved = sort(&mut ws, &[(b.clone(), there.clone())], &live);
+        assert_eq!(fronts(&ws, &moved), [Forward::Window("V".into())]);
         assert_eq!(ws.group_of(&there).unwrap().members[0].id, b);
         // Already sorted: nothing moves, nothing comes forward.
-        assert_eq!(sort(&mut ws, &[(b, there)], &live), []);
+        assert!(sort(&mut ws, &[(b.clone(), there)], &live).is_empty());
+        // The write failed and the reload put it back in Unsorted: nothing comes forward.
+        ws.rebase(before);
+        assert!(ws.windows[0].unsorted.iter().any(|t| t.id == b));
+        assert_eq!(fronts(&ws, &moved), []);
     }
 
     /// Only a handed document left in Unsorted with a reason is looked up again; one moved to
