@@ -1,7 +1,12 @@
-//! The Google OAuth client flotilla ships with, baked in at build time by `build.rs`.
+//! The Google OAuth client flotilla ships with, baked in at build time by `build.rs`, and the
+//! accounts connected through it.
 
-// No caller yet; the Drive routing that consumes `client()` removes this.
+// No caller yet; the Drive routing that consumes this module removes this.
 #![allow(dead_code)]
+
+pub mod accounts;
+pub mod http;
+pub mod oauth;
 
 /// An installed-app OAuth client: Google treats its secret as public, so it is baked into the binary.
 #[derive(Clone, Copy, PartialEq, Eq)]

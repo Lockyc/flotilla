@@ -913,6 +913,7 @@ dependencies = [
  "flotilla-core",
  "getrandom 0.4.3",
  "reqwest",
+ "rustls",
  "security-framework",
  "serde",
  "serde_json",
