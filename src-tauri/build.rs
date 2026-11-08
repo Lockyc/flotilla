@@ -32,8 +32,13 @@ fn bake_google_client() {
         .map(std::path::PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| std::path::Path::new(&h).join(".config")));
     let file = base.map(|b| b.join("flotilla").join("google-client.env"));
-    if let Some(file) = &file {
-        println!("cargo:rerun-if-changed={}", file.display());
+    // A missing path is always stale to Cargo, so watch the nearest existing ancestor until the
+    // file exists; creating it then still triggers a rerun.
+    if let Some(watch) = file
+        .as_deref()
+        .and_then(|f| f.ancestors().find(|p| p.exists()))
+    {
+        println!("cargo:rerun-if-changed={}", watch.display());
     }
     let contents = file
         .and_then(|f| std::fs::read_to_string(f).ok())
@@ -44,8 +49,17 @@ fn bake_google_client() {
             .filter(|v| !v.is_empty())
             .or_else(|| {
                 contents.lines().find_map(|line| {
-                    let (k, v) = line.trim().split_once('=')?;
-                    (k.trim() == key).then(|| v.trim().to_string())
+                    let line = line.trim();
+                    let (k, v) = line
+                        .strip_prefix("export ")
+                        .unwrap_or(line)
+                        .split_once('=')?;
+                    let v = v.trim();
+                    let v = ['"', '\'']
+                        .iter()
+                        .find_map(|q| v.strip_prefix(*q)?.strip_suffix(*q))
+                        .unwrap_or(v);
+                    (k.trim() == key).then(|| v.to_string())
                 })
             })
             .unwrap_or_default();

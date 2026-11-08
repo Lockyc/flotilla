@@ -4,10 +4,19 @@
 #![allow(dead_code)]
 
 /// An installed-app OAuth client: Google treats its secret as public, so it is baked into the binary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Client {
     pub id: &'static str,
     pub secret: &'static str,
+}
+
+impl std::fmt::Debug for Client {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Client")
+            .field("id", &self.id)
+            .field("secret", &"<redacted>")
+            .finish()
+    }
 }
 
 /// The baked client, or `None` in a build made without one (Drive features then stay off).
