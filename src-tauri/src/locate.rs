@@ -14,6 +14,7 @@ use crate::tabs::{self, Forward};
 use flotilla_core::identity::{doc_key, head_container};
 use flotilla_core::model::{Handed, TabId, Workspace};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 use tauri::{AppHandle, Manager};
 use url::Url;
@@ -309,17 +310,42 @@ fn retry_unsorted(app: &AppHandle) {
     spawn(app, client, jobs);
 }
 
+/// Whether a Connect is waiting on the browser.
+static CONNECTING: AtomicBool = AtomicBool::new(false);
+
+/// One run of a flag's work: held while it runs, and the flag clears when it drops, on every exit
+/// of the thread holding it, a panic included.
+struct Flight(&'static AtomicBool);
+
+impl Flight {
+    /// `None` while another run holds `flag`.
+    fn begin(flag: &'static AtomicBool) -> Option<Flight> {
+        (!flag.swap(true, Ordering::AcqRel)).then_some(Flight(flag))
+    }
+}
+
+impl Drop for Flight {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
 /// Connect Google Account…: consent in the default browser, on a thread of its own since it waits
-/// for the browser. A connected account is listed in the Group menu and the Unsorted documents
-/// left with a reason are looked up again; a consent left unanswered until it times out raises
-/// nothing.
+/// for the browser. Choosing it again while one waits does nothing ([`Flight`]), so no second
+/// consent page races the first. A connected account is listed in the Group menu and the Unsorted
+/// documents left with a reason are looked up again; a consent left unanswered until it times out
+/// raises nothing.
 pub fn connect(app: &AppHandle) {
     let Some(client) = crate::google::client() else {
+        return;
+    };
+    let Some(flight) = Flight::begin(&CONNECTING) else {
         return;
     };
     let app = app.clone();
     std::thread::spawn(move || {
         let connected = Http::new().and_then(|http| oauth::connect(&client, &http, &accounts::APP));
+        drop(flight);
         let handle = app.clone();
         crate::defer(&app, move || match connected {
             Ok(_) => {
@@ -475,6 +501,24 @@ mod tests {
         let reasons = HashMap::from([(left.clone(), "x".into()), (gone, "y".into())]);
         assert_eq!(retry(&ws, &reasons), [left]);
         assert!(!retry(&ws, &reasons).contains(&by_hand));
+    }
+
+    /// A second Connect while one runs does nothing; once it ends, however, Connect works again.
+    #[test]
+    fn one_connect_at_a_time() {
+        static FLAG: AtomicBool = AtomicBool::new(false);
+        let first = Flight::begin(&FLAG).expect("nothing in flight");
+        assert!(Flight::begin(&FLAG).is_none());
+        drop(first);
+        let again = Flight::begin(&FLAG);
+        assert!(again.is_some());
+        let panicked = std::thread::spawn(move || {
+            let _held = again;
+            panic!("connect failed");
+        })
+        .join();
+        assert!(panicked.is_err());
+        assert!(Flight::begin(&FLAG).is_some());
     }
 
     #[test]
