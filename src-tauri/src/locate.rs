@@ -4,15 +4,15 @@
 //! (`Workspace::sort_into`). A document that can't be sorted keeps the reason on its row
 //! (`AppState::unsorted_reason`). Also the Group menu's Connect and Disconnect Google Account.
 
-use crate::commands::mutate;
+use crate::commands::handed_front;
 use crate::config::DEFAULT_STORE;
 use crate::google::drive::{Located, Locator};
 use crate::google::http::Http;
 use crate::google::{accounts, oauth, Client};
 use crate::state::AppState;
-use crate::tabs;
+use crate::tabs::{self, Forward};
 use flotilla_core::identity::{doc_key, head_container};
-use flotilla_core::model::{TabId, Workspace};
+use flotilla_core::model::{Handed, TabId, Workspace};
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 use tauri::{AppHandle, Manager};
@@ -207,7 +207,7 @@ pub fn after_handoff(app: &AppHandle, doc: &TabId) {
 
 /// The main thread's half of a lookup. Each account Google revoked is reported once. An answer a
 /// later lookup of its document superseded is dropped. A document whose folder a group shows moves
-/// there; a drag in the meantime wins, since only a document still in Unsorted moves. Otherwise
+/// there ([`sort`]); a drag in the meantime wins, since only a document still in Unsorted moves. Otherwise
 /// its row's reason becomes what it now is: why it couldn't be looked up, or none.
 fn settle(app: &AppHandle, answers: Vec<Answer>) {
     for email in unique(answers.iter().flat_map(|a| &a.dropped)) {
@@ -239,17 +239,47 @@ fn settle(app: &AppHandle, answers: Vec<Answer>) {
     }
     if !sorts.is_empty() {
         let live = tabs::live(app);
-        mutate(app, |ws| {
-            for (doc, head) in &sorts {
-                ws.sort_into(doc, head, &live);
-            }
+        let (fronts, raised) = crate::write::through(app, |ws| {
+            let mut fronts = Vec::new();
+            let raised = crate::detach::apply(ws, |ws| fronts = sort(ws, &sorts, &live));
+            (fronts, raised)
         });
+        if let Some(id) = &raised {
+            crate::detach::raise(app, id);
+        }
+        for front in &fronts {
+            tabs::bring(app, Some(front));
+        }
+        tabs::changed(app);
     } else if changed {
         tabs::push_dto(app);
     }
     if answers.iter().any(|a| !a.dropped.is_empty()) {
         crate::menu::refresh(app);
     }
+}
+
+/// Sorts each `(document, head)` that still can be, and answers the windows to bring forward: a
+/// document that left for another window shows there, so that window comes forward (reopened if
+/// closed) as it does for a handed link ([`handed_front`]).
+fn sort(ws: &mut Workspace, sorts: &[(TabId, TabId)], live: &HashSet<TabId>) -> Vec<Forward> {
+    let mut fronts = Vec::new();
+    for (doc, head) in sorts {
+        let Some(from) = tabs::window_title_of(ws, doc) else {
+            continue;
+        };
+        let Some(id) = ws.sort_into(doc, head, live) else {
+            continue;
+        };
+        if tabs::window_title_of(ws, &id).as_ref() == Some(&from) {
+            continue;
+        }
+        let front = handed_front(ws, &from, Some(&Handed::Grouped(id)), None);
+        if let Some(front) = front.filter(|f| !fronts.contains(f)) {
+            fronts.push(front);
+        }
+    }
+    fronts
 }
 
 /// Every document in every window's Unsorted looked up again, one after another on one thread: a
@@ -303,7 +333,6 @@ pub fn disconnect(app: &AppHandle, email: &str) {
 mod tests {
     use super::*;
     use crate::tabs::testing::{new_group, one_window};
-    use flotilla_core::model::Handed;
 
     const DOC: &str = "https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrSt01/edit";
 
@@ -379,6 +408,38 @@ mod tests {
         assert!(record(&mut reasons, &d, Some("y".into())));
         assert!(record(&mut reasons, &d, None));
         assert!(reasons.is_empty());
+    }
+
+    /// A document sorted into another window brings that window forward, as a handed link's does;
+    /// one sorted where it already is brings nothing.
+    #[test]
+    fn a_sort_into_another_window_brings_it_forward() {
+        use flotilla_core::model::{opened_id, ConfigWindow};
+        let window = |t: &str| ConfigWindow {
+            unsorted: vec![],
+            title: t.into(),
+            groups: vec![],
+        };
+        let mut ws = Workspace::from_config(&[window("W"), window("V")]);
+        let folder = |n: u32| Url::parse(&format!("https://drive.google.com/drive/folders/f{n}"));
+        let here = opened_id(ws.new_group("W", &folder(1).unwrap(), "default").unwrap());
+        let there = opened_id(ws.new_group("V", &folder(2).unwrap(), "default").unwrap());
+        let doc2 = DOC.replace("01/", "02/");
+        let Some(Handed::Unsorted(a)) = ws.receive("W", None, DOC, "default") else {
+            panic!()
+        };
+        let Some(Handed::Unsorted(b)) = ws.receive("W", None, &doc2, "default") else {
+            panic!()
+        };
+        let live = HashSet::new();
+        assert_eq!(sort(&mut ws, &[(a, here)], &live), []);
+        assert_eq!(
+            sort(&mut ws, &[(b.clone(), there.clone())], &live),
+            [Forward::Window("V".into())]
+        );
+        assert_eq!(ws.group_of(&there).unwrap().members[0].id, b);
+        // Already sorted: nothing moves, nothing comes forward.
+        assert_eq!(sort(&mut ws, &[(b, there)], &live), []);
     }
 
     #[test]

@@ -699,26 +699,31 @@ impl Workspace {
         self.activate(member);
     }
 
-    /// Moves `doc` from some window's Unsorted into the group `head` heads, and says whether it
-    /// left: `false` when it is not in an Unsorted (a drag already placed it), `head` no longer
-    /// heads a group, or [`Self::move_tab`] refuses (the re-keyed document is open in that store).
-    pub fn sort_into(&mut self, doc: &TabId, head: &TabId, live: &HashSet<TabId>) -> bool {
+    /// Moves `doc` from some window's Unsorted into the group `head` heads, and answers its id
+    /// there (a group of another store re-keys it). `None` when it did not move: it is not in an
+    /// Unsorted (a drag already placed it), `head` no longer heads a group, or [`Self::move_tab`]
+    /// refuses (the re-keyed document is open in that store).
+    pub fn sort_into(&mut self, doc: &TabId, head: &TabId, live: &HashSet<TabId>) -> Option<TabId> {
         if !self
             .windows
             .iter()
             .any(|w| w.unsorted.iter().any(|t| &t.id == doc))
         {
-            return false;
+            return None;
         }
         if !self
             .windows
             .iter()
             .any(|w| w.groups.iter().any(|g| &g.head.id == head))
         {
-            return false;
+            return None;
         }
         self.move_tab(doc, Dest::Group(head), live);
-        !matches!(self.locate(doc), Some((_, None)))
+        if matches!(self.locate(doc), Some((_, None))) {
+            return None;
+        }
+        // A move appends: the document is its group's last member.
+        self.group_of(head)?.members.last().map(|t| t.id.clone())
     }
 
     /// Moves a member or Unsorted document to the end of `dest`, in whichever window. A move onto
@@ -2205,8 +2210,22 @@ mod tests {
         let Some(Handed::Unsorted(d)) = w.receive(W, None, doc(1).as_str(), "default") else {
             panic!()
         };
-        assert!(w.sort_into(&d, &h1, &HashSet::new()));
+        assert_eq!(w.sort_into(&d, &h1, &HashSet::new()), Some(d.clone()));
         assert_eq!(homes(&w, &h1), [doc(1).to_string()]);
+        assert!(unsorted_ids(&w, W).is_empty());
+    }
+
+    /// Into a group of another store, in another window: the id it has there.
+    #[test]
+    fn sort_into_another_store_answers_the_new_id() {
+        let (mut w, _) = fleet();
+        let h = id(w.new_group("V", &folder(2), "work").unwrap());
+        let Some(Handed::Unsorted(d)) = w.receive(W, None, doc(1).as_str(), "default") else {
+            panic!()
+        };
+        let moved = w.sort_into(&d, &h, &HashSet::new()).unwrap();
+        assert_ne!(moved, d);
+        assert_eq!(member_ids(&w, &h), [moved]);
         assert!(unsorted_ids(&w, W).is_empty());
     }
 
@@ -2220,7 +2239,7 @@ mod tests {
         w.move_tab(&d, Dest::Group(&h2), &HashSet::new());
         let before = homes(&w, &h2);
         assert_eq!(before.len(), 1);
-        assert!(!w.sort_into(&d, &h1, &HashSet::new()));
+        assert_eq!(w.sort_into(&d, &h1, &HashSet::new()), None);
         assert_eq!(homes(&w, &h2), before);
         assert!(homes(&w, &h1).is_empty());
     }
@@ -2232,7 +2251,7 @@ mod tests {
         let Some(Handed::Unsorted(d)) = w.receive(W, None, doc(1).as_str(), "default") else {
             panic!()
         };
-        assert!(!w.sort_into(&d, &m, &HashSet::new()));
+        assert_eq!(w.sort_into(&d, &m, &HashSet::new()), None);
         assert_eq!(unsorted_ids(&w, W), vec![d]);
         assert_eq!(homes(&w, &h1), [doc(2).to_string()]);
     }
@@ -2244,7 +2263,7 @@ mod tests {
             panic!()
         };
         w.close_group(&h1, &HashSet::new());
-        assert!(!w.sort_into(&d, &h1, &HashSet::new()));
+        assert_eq!(w.sort_into(&d, &h1, &HashSet::new()), None);
         assert_eq!(unsorted_ids(&w, W), vec![d]);
     }
 
