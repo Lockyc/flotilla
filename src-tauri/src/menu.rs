@@ -51,6 +51,8 @@ pub struct MenuState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     NewGroup,
+    /// Reload the focused page: a pop-out's own, else its window's active tab.
+    ReloadTab,
     Home(Option<TabId>),
     /// Edit the row's name in place in its sidebar.
     Rename(Option<TabId>),
@@ -93,6 +95,7 @@ pub fn id(a: &Action) -> String {
             None,
         ),
         Action::NewGroup => ("new_group".into(), None),
+        Action::ReloadTab => ("reload_tab".into(), None),
         Action::Home(t) => ("home".into(), t.as_ref()),
         Action::Rename(t) => ("rename".into(), t.as_ref()),
         Action::SetHome(t) => ("set_home".into(), t.as_ref()),
@@ -124,6 +127,7 @@ pub fn action(id: &str) -> Option<Action> {
     };
     Some(match (verb, arg, tab) {
         ("new_group", None, None) => Action::NewGroup,
+        ("reload_tab", None, None) => Action::ReloadTab,
         ("home", None, t) => Action::Home(t),
         ("rename", None, t) => Action::Rename(t),
         ("set_home", None, t) => Action::SetHome(t),
@@ -432,7 +436,10 @@ fn build_app_menu(
         env!("BUILD_GIT_SHA"),
         env!("BUILD_DATE"),
     )?;
-    let tabs_menu = shell_core::menu::build_tab_menu(app, &spine, cycle_digits, &[])?;
+    let reload = MenuItemBuilder::with_id(id(&Action::ReloadTab), "Reload Tab")
+        .accelerator(shell_core::menu::ACCEL_RELOAD_TAB)
+        .build(app)?;
+    let tabs_menu = shell_core::menu::build_tab_menu(app, &spine, cycle_digits, &[&[&reload]])?;
 
     let mut group = group_items(app, ms, None, Some(&spine.close_tab))?;
     group.extend(google_items(app, accounts)?);
@@ -587,6 +594,11 @@ pub fn handle(app: &AppHandle, menu_id: &str) -> bool {
                     let _ = chrome.set_focus();
                 }
                 let _ = app.emit_to(label.as_str(), "focus-new-group", ());
+            }
+        }
+        Action::ReloadTab => {
+            if let Some(wv) = crate::tabs::focused_webview(app) {
+                let _ = wv.eval("location.reload()");
             }
         }
         Action::Home(t) => {
@@ -772,6 +784,7 @@ mod tests {
         let t = || Some("t-3".to_string());
         for a in [
             Action::NewGroup,
+            Action::ReloadTab,
             Action::Home(None),
             Action::Home(t()),
             Action::MakeOwnGroup(None),
