@@ -332,8 +332,16 @@ pub fn connect(app: &AppHandle) {
     });
 }
 
-/// Disconnect Google Account ▸ `email`: forgets its grant; the Group menu drops it.
+/// Disconnect Google Account ▸ `email`: asks Google to revoke its grant, on a thread of its own and
+/// best effort ([`oauth::revoke`]), and forgets it whatever Google answers; the Group menu drops it.
 pub fn disconnect(app: &AppHandle, email: &str) {
+    if let Some(refresh) = accounts::APP.refresh_token(email) {
+        std::thread::spawn(move || {
+            if let Ok(http) = Http::new() {
+                oauth::revoke(&http, &refresh);
+            }
+        });
+    }
     accounts::APP.forget(email);
     crate::menu::refresh(app);
 }

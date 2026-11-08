@@ -17,6 +17,7 @@ use super::Client;
 
 const AUTH: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 pub const TOKEN: &str = "https://oauth2.googleapis.com/token";
+const REVOKE: &str = "https://oauth2.googleapis.com/revoke";
 const ABOUT: &str = "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)";
 const SCOPE: &str = "https://www.googleapis.com/auth/drive.metadata.readonly";
 
@@ -289,6 +290,12 @@ fn redeem(
     Ok(email)
 }
 
+/// Asks Google to revoke a refresh token's grant, best effort: the answer, or a failure to get
+/// one, is ignored, since the account is forgotten locally either way. Blocks.
+pub fn revoke(http: &dyn Transport, refresh: &str) {
+    let _ = http.post_form(REVOKE, &[("token", refresh)]);
+}
+
 /// The body as JSON, or `null` when it isn't, so a missing field reads the same either way.
 fn json(body: &str) -> serde_json::Value {
     serde_json::from_str(body).unwrap_or_default()
@@ -494,6 +501,21 @@ mod tests {
                  &redirect_uri=http://127.0.0.1:9&client_id=cid&client_secret=csecret&code_verifier=ver",
                 "GET https://www.googleapis.com/drive/v3/about?fields=user(emailAddress) at",
             ]
+        );
+    }
+
+    /// The refresh token goes to Google's revoke endpoint as a form; whatever comes back is ignored.
+    #[test]
+    fn revoke_posts_the_refresh_token() {
+        let fake = Fake {
+            token: (400, r#"{"error":"invalid_token"}"#),
+            about: (200, "{}"),
+            seen: RefCell::default(),
+        };
+        revoke(&fake, "rt");
+        assert_eq!(
+            *fake.seen.borrow(),
+            ["POST https://oauth2.googleapis.com/revoke token=rt"]
         );
     }
 
