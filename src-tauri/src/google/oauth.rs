@@ -277,7 +277,7 @@ fn redeem(
     };
     let (status, body) = http.get(ABOUT, access)?;
     if status != 200 {
-        return Err(format!("reading the account failed ({status})"));
+        return Err(super::failed("reading the account", status, &body));
     }
     let Some(email) = json(&body)["user"]["emailAddress"]
         .as_str()
@@ -516,6 +516,21 @@ mod tests {
             seen: RefCell::default(),
         };
         assert!(redeem(&CLIENT, &no_refresh, kc, "C", "r", "v").is_err());
+        let about_refused = Fake {
+            token: (200, r#"{"access_token":"at","refresh_token":"rt"}"#),
+            about: (
+                403,
+                r#"{"error":{"code":403,"message":"Drive API is disabled.","errors":[{"reason":"accessNotConfigured"}]}}"#,
+            ),
+            seen: RefCell::default(),
+        };
+        assert_eq!(
+            redeem(&CLIENT, &about_refused, kc, "C", "r", "v"),
+            Err(
+                "reading the account failed (403 accessNotConfigured: Drive API is disabled.)"
+                    .into()
+            )
+        );
         assert!(kc.list().is_empty());
     }
 }

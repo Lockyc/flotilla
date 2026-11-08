@@ -10,7 +10,7 @@ use flotilla_core::identity::valid_file_id;
 use super::accounts::Keychain;
 use super::http::Transport;
 use super::oauth::TOKEN;
-use super::Client;
+use super::{failed, reason, Client};
 
 const FILES: &str = "https://www.googleapis.com/drive/v3/files";
 
@@ -190,9 +190,15 @@ impl<T: Transport> Locator<T> {
             200 => Ok(Lookup::Parent(
                 json(&body)["parents"][0].as_str().map(str::to_owned),
             )),
-            403 if is_rate_limit(&body) => Err("Drive rate limit reached".into()),
-            403 | 404 => Ok(Lookup::Hidden),
-            _ => Err(format!("reading a file failed ({status})")),
+            404 => Ok(Lookup::Hidden),
+            403 => match reason(&body).as_deref() {
+                Some("insufficientFilePermissions" | "notFound") => Ok(Lookup::Hidden),
+                Some("rateLimitExceeded" | "userRateLimitExceeded") => {
+                    Err("Drive rate limit reached".into())
+                }
+                _ => Err(failed("reading a file", status, &body)),
+            },
+            _ => Err(failed("reading a file", status, &body)),
         }
     }
 
@@ -205,7 +211,7 @@ impl<T: Transport> Locator<T> {
         let (status, body) = self.get(email, token, &url)?;
         let id = json(&body)["id"].as_str().map(str::to_owned);
         let (200, Some(id)) = (status, id) else {
-            return Err(format!("reading the Drive root failed ({status})"));
+            return Err(failed("reading the Drive root", status, &body));
         };
         self.roots
             .lock()
@@ -219,16 +225,10 @@ impl<T: Transport> Locator<T> {
 enum Lookup {
     /// The first parent, or `None` for an item with none.
     Parent(Option<String>),
-    /// Refused or unknown to this account.
+    /// Unknown to this account (404), or a 403 whose reason is about this file alone. Any other
+    /// 403 (the project's Drive API off, the account's scopes, a domain policy, a quota) is a
+    /// failure, since it hides every file alike.
     Hidden,
-}
-
-/// Whether a 403 body says the quota was exceeded rather than that the file is off limits.
-fn is_rate_limit(body: &str) -> bool {
-    matches!(
-        json(body)["error"]["errors"][0]["reason"].as_str(),
-        Some("rateLimitExceeded" | "userRateLimitExceeded")
-    )
 }
 
 /// The body as JSON, or `null` when it isn't.
@@ -407,13 +407,56 @@ mod tests {
         assert_eq!(ids(located), [P1, P2, "root"]);
     }
 
+    /// Google's 403 body naming `reason`.
+    fn refused(reason: &str) -> String {
+        format!(r#"{{"error":{{"code":403,"message":"m","errors":[{{"reason":"{reason}"}}]}}}}"#)
+    }
+
+    /// Unknown to the account (404), or refused for this file alone.
     #[test]
     fn nobody_can_see_it() {
-        let scratch = Scratch::new("au.lsjc.flotilla.test.drive_nobody_can_see_it");
-        scratch.0.save("a@x", "ra").unwrap();
-        let fake = Fake::default().file("ra", D1, 403, &[]);
-        let (located, _) = locator(fake, &scratch).ancestors(D1, &|_| false);
-        assert_eq!(located, Located::NotVisible);
+        for (n, (status, body)) in [
+            (404, "{}".to_string()),
+            (403, refused("insufficientFilePermissions")),
+            (403, refused("notFound")),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let scratch = Scratch::new(
+                [
+                    "au.lsjc.flotilla.test.drive_nobody_can_see_it_0",
+                    "au.lsjc.flotilla.test.drive_nobody_can_see_it_1",
+                    "au.lsjc.flotilla.test.drive_nobody_can_see_it_2",
+                ][n],
+            );
+            scratch.0.save("a@x", "ra").unwrap();
+            let fake = Fake::default().file_with("ra", D1, status, &[], &body);
+            let (located, _) = locator(fake, &scratch).ancestors(D1, &|_| false);
+            assert_eq!(located, Located::NotVisible, "{status} {body}");
+        }
+    }
+
+    /// A 403 that is about the project or the account, not the file, fails with Google's words.
+    #[test]
+    fn any_other_refusal_is_a_failure_with_googles_reason() {
+        let body = r#"{"error":{"code":403,"message":"Google Drive API has not been used in project 1 before or it is disabled.","errors":[{"reason":"accessNotConfigured"}]}}"#;
+        let fake = Fake::default().file_with("ra", D1, 403, &[], body);
+        let (located, _) = locate("au.lsjc.flotilla.test.drive_not_configured", fake, D1);
+        assert_eq!(
+            located,
+            Located::Failed(
+                "reading a file failed (403 accessNotConfigured: Google Drive API has not been \
+                 used in project 1 before or it is disabled.)"
+                    .into()
+            )
+        );
+        let fake = Fake::default().file_with("ra", D1, 403, &[], "{}");
+        let (located, _) = locate("au.lsjc.flotilla.test.drive_bare_403", fake, D1);
+        assert_eq!(
+            located,
+            Located::Failed("reading a file failed (403)".into())
+        );
     }
 
     #[test]
@@ -514,7 +557,7 @@ mod tests {
     fn a_hidden_parent_ends_the_walk_with_what_was_seen() {
         let fake = Fake::default()
             .file("ra", D1, 200, &[P1])
-            .file("ra", P1, 403, &[]);
+            .file("ra", P1, 404, &[]);
         let (located, loc) = locate("au.lsjc.flotilla.test.drive_hidden_parent", fake, D1);
         assert_eq!(ids(located), [P1]);
         assert!(!loc
