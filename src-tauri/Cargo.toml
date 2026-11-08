@@ -38,6 +38,12 @@ toml = "0.8"
 # House-style formatter, starter-config seeding and path resolution, shared with curator, warden and lector. Pinned by rev, same as curator.
 config-core = { git = "https://github.com/Lockyc/config-core", rev = "69b38586661ff44df21f01d715484792014cdd82" }
 url = "2"
+# Google Drive access (OAuth + REST). reqwest keeps the rustls backend the updater already resolves.
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls-no-provider"] }
+security-framework = "3"
+sha2 = "0.10"
+base64 = "0.23"
+getrandom = "0.4"
 
 [dev-dependencies]
 tempfile = "3"

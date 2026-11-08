@@ -6,6 +6,7 @@
 mod commands;
 mod config;
 mod detach;
+mod google;
 mod menu;
 mod migrate;
 mod persist;
