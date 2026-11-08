@@ -32,13 +32,10 @@ fn bake_google_client() {
         .map(std::path::PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| std::path::Path::new(&h).join(".config")));
     let file = base.map(|b| b.join("flotilla").join("google-client.env"));
-    // A missing path is always stale to Cargo, so watch the nearest existing ancestor until the
-    // file exists; creating it then still triggers a rerun.
-    if let Some(watch) = file
-        .as_deref()
-        .and_then(|f| f.ancestors().find(|p| p.exists()))
-    {
-        println!("cargo:rerun-if-changed={}", watch.display());
+    // A missing path is always stale to Cargo, so only an existing file is watched. A file created
+    // later is still read: `shell_core::build_stamp()` reruns this script on every build.
+    if let Some(f) = file.as_deref().filter(|f| f.exists()) {
+        println!("cargo:rerun-if-changed={}", f.display());
     }
     let contents = file
         .and_then(|f| std::fs::read_to_string(f).ok())
