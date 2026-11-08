@@ -16,6 +16,8 @@ pub trait Recogniser {
     fn name(&self) -> &'static str;
     /// The provider's stable id for the document `url` opens, or `None` when it is not a document.
     fn document_id(&self, url: &Url) -> Option<String>;
+    /// The provider's id for the container (folder) `url` shows, or `None` when it shows none.
+    fn container_id(&self, url: &Url) -> Option<String>;
 }
 
 /// Google Drive files: Docs, Sheets, Slides and Forms editors and `drive.google.com/file/d/…`.
@@ -52,6 +54,27 @@ impl Recogniser for Google {
             _ => false,
         };
         (viewed && valid_file_id(id)).then(|| id.to_string())
+    }
+
+    /// A Drive folder view: `/drive[/u/N]/folders/<id>` is that folder, `/drive[/u/N]/my-drive`
+    /// is the `root` alias, which Drive's API accepts wherever a folder id goes.
+    fn container_id(&self, url: &Url) -> Option<String> {
+        if url.host_str() != Some("drive.google.com") {
+            return None;
+        }
+        let segments: Vec<&str> = url.path_segments()?.collect();
+        let ["drive", rest @ ..] = segments.as_slice() else {
+            return None;
+        };
+        let mut rest = rest;
+        if let ["u", _, tail @ ..] = rest {
+            rest = tail;
+        }
+        match rest {
+            ["folders", id, ..] if !id.is_empty() => Some(id.to_string()),
+            ["my-drive", ..] => Some("root".to_string()),
+            _ => None,
+        }
     }
 }
 
@@ -123,6 +146,14 @@ pub fn doc_key(store: &str, url: &Url) -> Option<DocKey> {
             id,
         })
     })
+}
+
+/// The provider name and container id of the folder a group head `url` shows, from the first
+/// recogniser that knows it.
+pub fn head_container(url: &Url) -> Option<(&'static str, String)> {
+    RECOGNISERS
+        .iter()
+        .find_map(|r| r.container_id(url).map(|id| (r.name(), id)))
 }
 
 /// The key `url` has as a group head: [`doc_key`], or for a Drive `open?id=<id>` share link the
@@ -551,5 +582,29 @@ mod tests {
         ] {
             assert_eq!(kind_of(u), None, "{u}");
         }
+    }
+
+    #[test]
+    fn folder_heads_name_their_container() {
+        let c = |s: &str| head_container(&Url::parse(s).unwrap());
+        assert_eq!(
+            c("https://drive.google.com/drive/folders/F1"),
+            Some(("google", "F1".into()))
+        );
+        assert_eq!(
+            c("https://drive.google.com/drive/u/1/folders/F1?usp=sharing"),
+            Some(("google", "F1".into()))
+        );
+        assert_eq!(
+            c("https://drive.google.com/drive/my-drive"),
+            Some(("google", "root".into()))
+        );
+        assert_eq!(
+            c("https://drive.google.com/drive/u/2/my-drive"),
+            Some(("google", "root".into()))
+        );
+        assert_eq!(c("https://docs.google.com/document/d/D1/edit"), None);
+        assert_eq!(c("https://drive.google.com/drive/recent"), None);
+        assert_eq!(c("https://example.com/folders/F1"), None);
     }
 }
