@@ -270,8 +270,13 @@ pub fn handoff(url: &Url) -> Handoff {
 /// embedded webviews, so accounts connect from the Group menu, in the default browser.
 fn sign_in(link: &str) -> Option<String> {
     let url = Url::parse(link).ok()?;
-    (url.host_str() == Some("accounts.google.com") && url.path().starts_with("/o/oauth2"))
-        .then(|| "Google sign-in opens in your browser".to_string())
+    (url.host_str() == Some("accounts.google.com") && url.path().starts_with("/o/oauth2")).then(
+        || {
+            "Google sign-in must open in a browser — set your link router to send \
+             accounts.google.com to one"
+                .to_string()
+        },
+    )
 }
 
 /// The window a handed link goes to: the one titled `requested`, else the one titled
@@ -989,7 +994,10 @@ mod tests {
             assert_eq!(item.link, consent);
             assert_eq!(
                 item.problem.as_deref(),
-                Some("Google sign-in opens in your browser")
+                Some(
+                    "Google sign-in must open in a browser — set your link router to send \
+                     accounts.google.com to one"
+                )
             );
         }
         // Another accounts.google.com page is just a link.
