@@ -26,6 +26,9 @@ const WAIT: Duration = Duration::from_secs(5 * 60);
 /// The most read of a loopback request's line, and again of its headers.
 const REQUEST_LIMIT: u64 = 8 * 1024;
 
+/// The most time one loopback request's line and headers together may take to arrive.
+const REQUEST_BUDGET: Duration = Duration::from_secs(5);
+
 /// A PKCE pair: the verifier stays here, the S256 challenge goes in the consent URL.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Pkce {
@@ -145,7 +148,7 @@ fn await_code(listener: &TcpListener, state: &str, deadline: Instant) -> Result<
     listener.set_nonblocking(true).map_err(|e| e.to_string())?;
     loop {
         match listener.accept() {
-            Ok((stream, _)) => match answer(stream, state) {
+            Ok((stream, _)) => match answer(stream, state, REQUEST_BUDGET) {
                 Some(Callback::Code(code)) => return Ok(code),
                 Some(Callback::Denied(error)) => return Err(format!("consent denied: {error}")),
                 Some(Callback::Mismatch) | None => {}
@@ -171,19 +174,23 @@ fn await_code(listener: &TcpListener, state: &str, deadline: Instant) -> Result<
 
 /// Read one request and reply with a page for the browser tab. `None` when the connection sent
 /// no request (a browser's speculative preconnect). The request line and the headers are each
-/// read to at most [`REQUEST_LIMIT`] bytes, so an endless line ends as a `Mismatch`; the headers
+/// read to at most [`REQUEST_LIMIT`] bytes, and both within `budget`, so an endless or trickling
+/// line ends as a `Mismatch`; the headers
 /// are drained before replying because closing a socket with unread input resets it, and the
 /// browser then shows a connection error instead of the page.
-fn answer(stream: TcpStream, state: &str) -> Option<Callback> {
+fn answer(stream: TcpStream, state: &str, budget: Duration) -> Option<Callback> {
     stream.set_nonblocking(false).ok()?;
-    stream.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
-    let mut reader = BufReader::new((&stream).take(REQUEST_LIMIT));
+    let budgeted = Budgeted {
+        stream: &stream,
+        deadline: Instant::now() + budget,
+    };
+    let mut reader = BufReader::new(budgeted.take(REQUEST_LIMIT));
     let mut line = String::new();
-    reader.read_line(&mut line).ok()?;
+    let read = reader.read_line(&mut line);
     if line.is_empty() {
         return None;
     }
-    let callback = if line.ends_with('\n') {
+    let callback = if read.is_ok() && line.ends_with('\n') {
         parse_callback(&line, state)
     } else {
         Callback::Mismatch
@@ -211,6 +218,25 @@ fn answer(stream: TcpStream, state: &str) -> Option<Callback> {
         body.len()
     );
     Some(callback)
+}
+
+/// A stream whose reads all share one deadline: each read waits at most for the time left, and
+/// none starts once it has passed. A per-read timeout alone would let a client trickling a
+/// byte at a time hold [`await_code`] far past [`WAIT`].
+struct Budgeted<'a> {
+    stream: &'a TcpStream,
+    deadline: Instant,
+}
+
+impl Read for Budgeted<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let left = self.deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(ErrorKind::TimedOut.into());
+        }
+        self.stream.set_read_timeout(Some(left))?;
+        self.stream.read(buf)
+    }
 }
 
 /// Exchange the code for tokens, read the account's email, and store its refresh token.
@@ -295,8 +321,32 @@ mod tests {
             reply
         });
         let (stream, _) = listener.accept().unwrap();
-        assert_eq!(answer(stream, "S"), Some(Callback::Mismatch));
+        assert_eq!(
+            answer(stream, "S", REQUEST_BUDGET),
+            Some(Callback::Mismatch)
+        );
         assert!(browser.join().unwrap().starts_with("HTTP/1.1 400"));
+    }
+
+    #[test]
+    fn a_trickling_request_ends_at_the_budget() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let browser = std::thread::spawn(move || {
+            let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            for byte in b"GET /?state=S&code=C" {
+                if s.write_all(&[*byte]).is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        });
+        let (stream, _) = listener.accept().unwrap();
+        let started = Instant::now();
+        let got = answer(stream, "S", Duration::from_millis(300));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_eq!(got, Some(Callback::Mismatch));
+        browser.join().unwrap();
     }
 
     const CLIENT: Client = Client {
