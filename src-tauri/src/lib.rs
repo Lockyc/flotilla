@@ -221,6 +221,7 @@ fn load_state(
         warm: std::sync::Mutex::new(warm),
         failed: Default::default(),
         unsorted_reason: Default::default(),
+        lookups: Default::default(),
         shown: Default::default(),
         menu: Default::default(),
         config: std::sync::Mutex::new(config),

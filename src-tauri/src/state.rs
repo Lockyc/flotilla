@@ -14,9 +14,8 @@ use std::sync::Mutex;
 /// `open_or_focus`, `rename`, `delete`): the host takes them.
 ///
 /// Lock order: `gate`, then `ws`, then `created`, then `unsorted_reason`, then `warm`, then `hole`,
-/// then `failed`; and `Persist`'s
-/// writer lock before `ws` (the session snapshot is taken inside it). `menu`, `notice`,
-/// `chrome_queue` and `shown` are each taken alone.
+/// then `failed`; and `Persist`'s writer lock before `ws` (the session snapshot is taken inside
+/// it). `menu`, `notice`, `chrome_queue`, `shown` and `lookups` are each taken alone.
 pub struct AppState {
     /// Serialises config writes and reloads (`crate::write::Gate`).
     pub gate: crate::write::Gate,
@@ -36,6 +35,8 @@ pub struct AppState {
     /// on its row. In memory only; an entry goes when its document leaves Unsorted or is looked up
     /// again.
     pub unsorted_reason: Mutex<HashMap<TabId, String>>,
+    /// The Drive lookups in flight, so only each document's latest answer settles it.
+    pub lookups: Mutex<crate::locate::Lookups>,
     /// The tab each open window showed at its last sync, by window label: a change closes the
     /// window's downloads popup.
     pub shown: Mutex<HashMap<String, Option<TabId>>>,

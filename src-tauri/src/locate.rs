@@ -93,41 +93,124 @@ pub fn accounts() -> Vec<String> {
     }
 }
 
+/// The lookups in flight, by document: each begun lookup gets the next sequence number, and only
+/// the latest of a document's lookups may settle it, so a slow earlier answer never overwrites a
+/// newer one.
+#[derive(Debug, Default)]
+pub struct Lookups {
+    next: u64,
+    latest: HashMap<TabId, u64>,
+}
+
+impl Lookups {
+    /// Starts a lookup of `doc`, superseding any still in flight.
+    pub fn begin(&mut self, doc: &TabId) -> u64 {
+        self.next += 1;
+        self.latest.insert(doc.clone(), self.next);
+        self.next
+    }
+
+    /// Whether the answer to lookup `seq` settles `doc`: it is the latest begun; then it is done.
+    pub fn settled(&mut self, doc: &TabId, seq: u64) -> bool {
+        if self.latest.get(doc) != Some(&seq) {
+            return false;
+        }
+        self.latest.remove(doc);
+        true
+    }
+}
+
+/// Sets `doc`'s reason to `why` (`None` clears it), and says whether its row changed.
+fn record(reasons: &mut HashMap<TabId, String>, doc: &TabId, why: Option<String>) -> bool {
+    match why {
+        Some(why) => reasons.insert(doc.clone(), why.clone()).as_ref() != Some(&why),
+        None => reasons.remove(doc).is_some(),
+    }
+}
+
+/// Each email once, in first-seen order.
+fn unique<'a>(emails: impl Iterator<Item = &'a String>) -> Vec<&'a String> {
+    let mut seen = HashSet::new();
+    emails.filter(|e| seen.insert(*e)).collect()
+}
+
+/// One begun lookup: what it asks, and the sequence number it settles under.
+struct Job {
+    doc: TabId,
+    seq: u64,
+    lookup: Lookup,
+}
+
+/// Drive's answer to a [`Job`], and the accounts forgotten on the way.
+struct Answer {
+    doc: TabId,
+    seq: u64,
+    provider: String,
+    located: Located,
+    dropped: Vec<String>,
+}
+
+/// Snapshots `doc` for a lookup and begins it; `None` when it is not an Unsorted document.
+fn begin(app: &AppHandle, doc: &TabId) -> Option<Job> {
+    let state = app.state::<AppState>();
+    let lookup = lookup(&state.ws.lock().unwrap(), doc)?;
+    let seq = state.lookups.lock().unwrap().begin(doc);
+    Some(Job {
+        doc: doc.clone(),
+        seq,
+        lookup,
+    })
+}
+
+/// Asks Drive; blocks, so never on the main thread or an async runtime's.
+fn run(client: Client, job: Job) -> Answer {
+    let Lookup {
+        provider,
+        file_id,
+        containers,
+    } = job.lookup;
+    let (located, dropped) = match locator(client) {
+        Ok(l) => l.ancestors(&file_id, &|id| containers.contains(id)),
+        Err(e) => (Located::Failed(e), Vec::new()),
+    };
+    Answer {
+        doc: job.doc,
+        seq: job.seq,
+        provider,
+        located,
+        dropped,
+    }
+}
+
+/// Runs `jobs` one after another on a thread of their own, then settles their answers together
+/// on the main thread.
+fn spawn(app: &AppHandle, client: Client, jobs: Vec<Job>) {
+    if jobs.is_empty() {
+        return;
+    }
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let answers: Vec<Answer> = jobs.into_iter().map(|j| run(client, j)).collect();
+        let handle = app.clone();
+        crate::defer(&app, move || settle(&handle, answers));
+    });
+}
+
 /// Looks Unsorted document `doc` up in Drive and, on the main thread once Drive answers, sorts it
-/// into the group showing the nearest of its folders. A drag in the meantime wins: only a document
-/// still in Unsorted moves. Its earlier reason goes now; a new one is kept when it can't be looked
-/// up. Each account Google revoked is reported once, as it is forgotten.
+/// into the group showing the nearest of its folders ([`settle`]).
 pub fn after_handoff(app: &AppHandle, doc: &TabId) {
     let Some(client) = crate::google::client() else {
         return;
     };
-    let state = app.state::<AppState>();
-    let found = lookup(&state.ws.lock().unwrap(), doc);
-    state.unsorted_reason.lock().unwrap().remove(doc);
-    let Some(Lookup {
-        provider,
-        file_id,
-        containers,
-    }) = found
-    else {
-        return;
-    };
-    let (app, doc) = (app.clone(), doc.clone());
-    std::thread::spawn(move || {
-        let (located, dropped) = match locator(client) {
-            Ok(l) => l.ancestors(&file_id, &|id| containers.contains(id)),
-            Err(e) => (Located::Failed(e), Vec::new()),
-        };
-        let handle = app.clone();
-        crate::defer(&app, move || {
-            settle(&handle, &doc, &provider, located, &dropped)
-        });
-    });
+    spawn(app, client, begin(app, doc).into_iter().collect());
 }
 
-/// The main thread's half of [`after_handoff`].
-fn settle(app: &AppHandle, doc: &TabId, provider: &str, located: Located, dropped: &[String]) {
-    for email in dropped {
+/// The main thread's half of a lookup. Each account Google revoked is reported once. An answer a
+/// later lookup of its document superseded is dropped. A document whose folder a group shows moves
+/// there; a drag in the meantime wins, since only a document still in Unsorted moves. Otherwise
+/// its row's reason becomes what it now is: why it couldn't be looked up, or none.
+fn settle(app: &AppHandle, answers: Vec<Answer>) {
+    for email in unique(answers.iter().flat_map(|a| &a.dropped)) {
         tabs::notice(
             app,
             format!(
@@ -135,35 +218,46 @@ fn settle(app: &AppHandle, doc: &TabId, provider: &str, located: Located, droppe
             ),
         );
     }
-    match &located {
-        Located::Ancestors(ids) => {
-            let live = tabs::live(app);
-            mutate(app, |ws| {
-                if let Some(head) = flotilla_core::route::route(ws, provider, ids) {
-                    ws.sort_into(doc, &head, &live);
+    let state = app.state::<AppState>();
+    let mut sorts = Vec::new();
+    let mut changed = false;
+    for a in &answers {
+        if !state.lookups.lock().unwrap().settled(&a.doc, a.seq) {
+            continue;
+        }
+        let why = match &a.located {
+            Located::Ancestors(ids) => {
+                let head = flotilla_core::route::route(&state.ws.lock().unwrap(), &a.provider, ids);
+                if let Some(head) = head {
+                    sorts.push((a.doc.clone(), head));
                 }
-            });
-        }
-        other => {
-            if let Some(why) = reason(other) {
-                let state = app.state::<AppState>();
-                state
-                    .unsorted_reason
-                    .lock()
-                    .unwrap()
-                    .insert(doc.clone(), why);
-                tabs::push_dto(app);
+                None
             }
-        }
+            other => reason(other),
+        };
+        changed |= record(&mut state.unsorted_reason.lock().unwrap(), &a.doc, why);
     }
-    if !dropped.is_empty() {
+    if !sorts.is_empty() {
+        let live = tabs::live(app);
+        mutate(app, |ws| {
+            for (doc, head) in &sorts {
+                ws.sort_into(doc, head, &live);
+            }
+        });
+    } else if changed {
+        tabs::push_dto(app);
+    }
+    if answers.iter().any(|a| !a.dropped.is_empty()) {
         crate::menu::refresh(app);
     }
 }
 
-/// [`after_handoff`] for every document in every window's Unsorted: a newly connected account
-/// may see documents no account could before.
+/// Every document in every window's Unsorted looked up again, one after another on one thread: a
+/// newly connected account may see documents no account could before.
 pub fn all_unsorted(app: &AppHandle) {
+    let Some(client) = crate::google::client() else {
+        return;
+    };
     let docs: Vec<TabId> = app
         .state::<AppState>()
         .ws
@@ -173,9 +267,8 @@ pub fn all_unsorted(app: &AppHandle) {
         .iter()
         .flat_map(|w| w.unsorted.iter().map(|t| t.id.clone()))
         .collect();
-    for doc in &docs {
-        after_handoff(app, doc);
-    }
+    let jobs = docs.iter().filter_map(|d| begin(app, d)).collect();
+    spawn(app, client, jobs);
 }
 
 /// Connect Google Account…: consent in the default browser, on a thread of its own since it waits
@@ -259,5 +352,38 @@ mod tests {
         let mut reasons = HashMap::from([(d.clone(), "x".into()), (gone, "y".into())]);
         prune(&ws, &mut reasons);
         assert_eq!(reasons.into_keys().collect::<Vec<_>>(), [d]);
+    }
+
+    /// An answer counts only while no later lookup of its document has begun, and once.
+    #[test]
+    fn only_the_latest_lookup_of_a_document_settles() {
+        let (a, b) = (TabId::from("t-a"), TabId::from("t-b"));
+        let mut l = Lookups::default();
+        let first = l.begin(&a);
+        let other = l.begin(&b);
+        let second = l.begin(&a);
+        assert!(!l.settled(&a, first));
+        assert!(l.settled(&b, other));
+        assert!(l.settled(&a, second));
+        assert!(!l.settled(&a, second));
+    }
+
+    /// Whether the row changed: a reason set, replaced or cleared.
+    #[test]
+    fn recording_a_reason_says_whether_the_row_changed() {
+        let d = TabId::from("t-d");
+        let mut reasons = HashMap::new();
+        assert!(!record(&mut reasons, &d, None));
+        assert!(record(&mut reasons, &d, Some("x".into())));
+        assert!(!record(&mut reasons, &d, Some("x".into())));
+        assert!(record(&mut reasons, &d, Some("y".into())));
+        assert!(record(&mut reasons, &d, None));
+        assert!(reasons.is_empty());
+    }
+
+    #[test]
+    fn a_dropped_account_is_reported_once_per_pass() {
+        let dropped = [vec!["a@x".to_string(), "b@x".into()], vec!["a@x".into()]];
+        assert_eq!(unique(dropped.iter().flatten()), ["a@x", "b@x"]);
     }
 }
