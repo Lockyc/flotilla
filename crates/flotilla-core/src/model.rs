@@ -710,7 +710,11 @@ impl Workspace {
         {
             return false;
         }
-        if !matches!(self.locate(head), Some((_, Some(_)))) {
+        if !self
+            .windows
+            .iter()
+            .any(|w| w.groups.iter().any(|g| &g.head.id == head))
+        {
             return false;
         }
         self.move_tab(doc, Dest::Group(head), live);
@@ -2219,6 +2223,18 @@ mod tests {
         assert!(!w.sort_into(&d, &h1, &HashSet::new()));
         assert_eq!(homes(&w, &h2), before);
         assert!(homes(&w, &h1).is_empty());
+    }
+
+    #[test]
+    fn sort_into_onto_a_member_does_nothing() {
+        let (mut w, h1) = fleet();
+        let m = id(w.open_from(&h1, &doc(2)).unwrap());
+        let Some(Handed::Unsorted(d)) = w.receive(W, None, doc(1).as_str(), "default") else {
+            panic!()
+        };
+        assert!(!w.sort_into(&d, &m, &HashSet::new()));
+        assert_eq!(unsorted_ids(&w, W), vec![d]);
+        assert_eq!(homes(&w, &h1), [doc(2).to_string()]);
     }
 
     #[test]
