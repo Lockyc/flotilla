@@ -21,7 +21,8 @@ fn main() {
 
 /// Bakes the Google OAuth client into the binary: `FLOTILLA_GOOGLE_CLIENT_ID` / `_SECRET` from the
 /// environment, else from `$XDG_CONFIG_HOME/flotilla/google-client.env` (`KEY=value` lines). Either
-/// stays empty when absent, and `google::client()` is then `None`. The values never reach build output.
+/// stays empty when absent, and `google::client()` is then `None`. The script never prints the
+/// values itself; Cargo keeps its `rustc-env` lines under `target/`.
 fn bake_google_client() {
     const KEYS: [&str; 2] = ["FLOTILLA_GOOGLE_CLIENT_ID", "FLOTILLA_GOOGLE_CLIENT_SECRET"];
     for var in KEYS.iter().copied().chain(["XDG_CONFIG_HOME", "HOME"]) {
