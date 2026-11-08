@@ -125,7 +125,7 @@ pub fn kind(url: &Url) -> Option<Kind> {
 }
 
 /// Drive file ids are long runs of ASCII letters, digits, `-` and `_`.
-fn valid_file_id(id: &str) -> bool {
+pub fn valid_file_id(id: &str) -> bool {
     id.len() >= 20
         && id
             .bytes()

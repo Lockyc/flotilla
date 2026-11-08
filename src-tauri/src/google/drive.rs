@@ -1,9 +1,11 @@
 //! Locating a Drive file: the folders above it, asked of each connected account in turn, so a
 //! handed document can be sorted into the group whose folder holds it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+
+use flotilla_core::identity::valid_file_id;
 
 use super::accounts::Keychain;
 use super::http::Transport;
@@ -11,6 +13,9 @@ use super::oauth::TOKEN;
 use super::Client;
 
 const FILES: &str = "https://www.googleapis.com/drive/v3/files";
+
+/// Folders walked before giving up; real trees are far shallower.
+const MAX_DEPTH: usize = 100;
 
 /// Where a file turned out to be.
 #[derive(Debug, PartialEq, Eq)]
@@ -87,11 +92,25 @@ impl<T: Transport> Locator<T> {
             Ok(None) => return Asked::Revoked,
             Err(why) => return Asked::Failed(why),
         };
+        let mut token = token;
         let mut chain: Vec<String> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
         let mut current = file_id.to_owned();
         loop {
-            match self.parent(&token, &current) {
-                Ok(Lookup::Hidden) => return Asked::NotVisible,
+            // An id that is not a Drive id is never put in a request path. A parent that fails
+            // this ends the walk (the My Drive root id can be shorter than a file id).
+            if !valid_file_id(&current) {
+                if chain.is_empty() {
+                    return Asked::NotVisible;
+                }
+                break;
+            }
+            if chain.len() >= MAX_DEPTH || !seen.insert(current.clone()) {
+                return Asked::Failed("folder chain too deep".into());
+            }
+            match self.parent(email, &mut token, &current) {
+                Ok(Lookup::Hidden) if chain.is_empty() => return Asked::NotVisible,
+                Ok(Lookup::Hidden) => return Asked::Found(chain),
                 Ok(Lookup::Parent(Some(parent))) => {
                     chain.push(parent.clone());
                     if stop(&parent) {
@@ -103,7 +122,7 @@ impl<T: Transport> Locator<T> {
                 Err(why) => return Asked::Failed(why),
             }
         }
-        match self.root(email, &token) {
+        match self.root(email, &mut token) {
             Ok(root) if chain.last() == Some(&root) => chain.push("root".into()),
             Ok(_) => {}
             Err(why) => return Asked::Failed(why),
@@ -120,7 +139,7 @@ impl<T: Transport> Locator<T> {
             }
         }
         let Some(refresh) = self.keychain.refresh_token(email) else {
-            return Ok(None);
+            return Err("couldn't read the account's credentials".into());
         };
         let (status, body) = self.transport.post_form(
             TOKEN,
@@ -148,26 +167,42 @@ impl<T: Transport> Locator<T> {
         Ok(Some(access.to_owned()))
     }
 
-    /// The first parent of a file or folder.
-    fn parent(&self, token: &str, id: &str) -> Result<Lookup, String> {
+    /// `GET url`; a 401 drops the cached token and retries once with a fresh one, left in
+    /// `token`.
+    fn get(&self, email: &str, token: &mut String, url: &str) -> Result<(u16, String), String> {
+        let first = self.transport.get(url, token)?;
+        if first.0 != 401 {
+            return Ok(first);
+        }
+        self.tokens.lock().unwrap().remove(email);
+        match self.token(email)? {
+            Some(fresh) => *token = fresh,
+            None => return Ok(first),
+        }
+        self.transport.get(url, token)
+    }
+
+    /// The first parent of a file or folder; `id` must already be a valid Drive id.
+    fn parent(&self, email: &str, token: &mut String, id: &str) -> Result<Lookup, String> {
         let url = format!("{FILES}/{id}?fields=id,parents&supportsAllDrives=true");
-        let (status, body) = self.transport.get(&url, token)?;
+        let (status, body) = self.get(email, token, &url)?;
         match status {
             200 => Ok(Lookup::Parent(
                 json(&body)["parents"][0].as_str().map(str::to_owned),
             )),
+            403 if is_rate_limit(&body) => Err("Drive rate limit reached".into()),
             403 | 404 => Ok(Lookup::Hidden),
             _ => Err(format!("reading a file failed ({status})")),
         }
     }
 
     /// The account's My Drive root id, fetched once per locator.
-    fn root(&self, email: &str, token: &str) -> Result<String, String> {
+    fn root(&self, email: &str, token: &mut String) -> Result<String, String> {
         if let Some(id) = self.roots.lock().unwrap().get(email) {
             return Ok(id.clone());
         }
         let url = format!("{FILES}/root?fields=id");
-        let (status, body) = self.transport.get(&url, token)?;
+        let (status, body) = self.get(email, token, &url)?;
         let id = json(&body)["id"].as_str().map(str::to_owned);
         let (200, Some(id)) = (status, id) else {
             return Err(format!("reading the Drive root failed ({status})"));
@@ -188,6 +223,14 @@ enum Lookup {
     Hidden,
 }
 
+/// Whether a 403 body says the quota was exceeded rather than that the file is off limits.
+fn is_rate_limit(body: &str) -> bool {
+    matches!(
+        json(body)["error"]["errors"][0]["reason"].as_str(),
+        Some("rateLimitExceeded" | "userRateLimitExceeded")
+    )
+}
+
 /// The body as JSON, or `null` when it isn't.
 fn json(body: &str) -> serde_json::Value {
     serde_json::from_str(body).unwrap_or_default()
@@ -204,34 +247,56 @@ mod tests {
         secret: "secret",
     };
 
-    /// Answers by `(bearer, url)`; the refresh grant answers a token named for the refresh token.
+    // Real Drive ids are 20+ characters, which is what the locator accepts.
+    const D1: &str = "D1aaaaaaaaaaaaaaaaaaaa";
+    const P1: &str = "P1aaaaaaaaaaaaaaaaaaaa";
+    const P2: &str = "P2aaaaaaaaaaaaaaaaaaaa";
+
+    /// Answers by `(bearer, url)`; the refresh grant answers a token named for the refresh token
+    /// (`tok-<refresh>`, then `tok-<refresh>-2` for the second grant), and a bearer listed as
+    /// expired answers 401 to everything.
     #[derive(Default)]
     struct Fake {
         gets: HashMap<(String, String), (u16, String)>,
         refused: HashMap<String, (u16, String)>,
+        expired: Vec<String>,
         seen: RefCell<Vec<String>>,
+        grants: RefCell<Vec<String>>,
     }
 
     impl Fake {
-        fn file(mut self, refresh: &str, id: &str, status: u16, parents: &[&str]) -> Self {
+        fn file(self, refresh: &str, id: &str, status: u16, parents: &[&str]) -> Self {
+            self.file_with(refresh, id, status, parents, "{}")
+        }
+
+        fn file_with(
+            mut self,
+            refresh: &str,
+            id: &str,
+            status: u16,
+            parents: &[&str],
+            failure: &str,
+        ) -> Self {
             let body = if status == 200 {
                 let list: Vec<String> = parents.iter().map(|p| format!("\"{p}\"")).collect();
                 format!(r#"{{"id":"{id}","parents":[{}]}}"#, list.join(","))
             } else {
-                "{}".into()
+                failure.into()
             };
             let url = format!("{FILES}/{id}?fields=id,parents&supportsAllDrives=true");
-            self.gets
-                .insert((format!("tok-{refresh}"), url), (status, body));
+            for bearer in [format!("tok-{refresh}"), format!("tok-{refresh}-2")] {
+                self.gets
+                    .insert((bearer, url.clone()), (status, body.clone()));
+            }
             self
         }
 
         fn root(mut self, refresh: &str, id: &str) -> Self {
             let url = format!("{FILES}/root?fields=id");
-            self.gets.insert(
-                (format!("tok-{refresh}"), url),
-                (200, format!(r#"{{"id":"{id}"}}"#)),
-            );
+            for bearer in [format!("tok-{refresh}"), format!("tok-{refresh}-2")] {
+                self.gets
+                    .insert((bearer, url.clone()), (200, format!(r#"{{"id":"{id}"}}"#)));
+            }
             self
         }
 
@@ -239,11 +304,19 @@ mod tests {
             self.refused.insert(refresh.into(), (status, body.into()));
             self
         }
+
+        fn expiring(mut self, refresh: &str) -> Self {
+            self.expired.push(format!("tok-{refresh}"));
+            self
+        }
     }
 
     impl Transport for Fake {
         fn get(&self, url: &str, bearer: &str) -> Result<(u16, String), String> {
             self.seen.borrow_mut().push(url.to_owned());
+            if self.expired.iter().any(|b| b == bearer) {
+                return Ok((401, "{}".into()));
+            }
             self.gets
                 .get(&(bearer.to_owned(), url.to_owned()))
                 .cloned()
@@ -253,22 +326,34 @@ mod tests {
         fn post_form(&self, url: &str, form: &[(&str, &str)]) -> Result<(u16, String), String> {
             assert_eq!(url, TOKEN);
             let refresh = form.iter().find(|(k, _)| *k == "refresh_token").unwrap().1;
+            self.grants.borrow_mut().push(refresh.to_owned());
             if let Some(answer) = self.refused.get(refresh) {
                 return Ok(answer.clone());
             }
+            let nth = self
+                .grants
+                .borrow()
+                .iter()
+                .filter(|r| *r == refresh)
+                .count();
+            let suffix = if nth > 1 {
+                format!("-{nth}")
+            } else {
+                String::new()
+            };
             Ok((
                 200,
-                format!(r#"{{"access_token":"tok-{refresh}","expires_in":3600}}"#),
+                format!(r#"{{"access_token":"tok-{refresh}{suffix}","expires_in":3600}}"#),
             ))
         }
     }
 
     fn tree(refresh: &str) -> Fake {
         Fake::default()
-            .file(refresh, "D1", 200, &["P1"])
-            .file(refresh, "P1", 200, &["P2"])
-            .file(refresh, "P2", 200, &[])
-            .root(refresh, "P2")
+            .file(refresh, D1, 200, &[P1])
+            .file(refresh, P1, 200, &[P2])
+            .file(refresh, P2, 200, &[])
+            .root(refresh, P2)
     }
 
     fn locator(fake: Fake, scratch: &Scratch) -> Locator<Fake> {
@@ -292,8 +377,8 @@ mod tests {
     fn walks_to_the_top() {
         let scratch = Scratch::new("au.lsjc.flotilla.test.drive_walks_to_the_top");
         scratch.0.save("a@x", "ra").unwrap();
-        let (located, dropped) = locator(tree("ra"), &scratch).ancestors("D1", &|_| false);
-        assert_eq!(ids(located), ["P1", "P2", "root"]);
+        let (located, dropped) = locator(tree("ra"), &scratch).ancestors(D1, &|_| false);
+        assert_eq!(ids(located), [P1, P2, "root"]);
         assert!(dropped.is_empty());
     }
 
@@ -302,14 +387,14 @@ mod tests {
         let scratch = Scratch::new("au.lsjc.flotilla.test.drive_stops_at_a_head");
         scratch.0.save("a@x", "ra").unwrap();
         let loc = locator(tree("ra"), &scratch);
-        let (located, _) = loc.ancestors("D1", &|id| id == "P1");
-        assert_eq!(ids(located), ["P1"]);
+        let (located, _) = loc.ancestors(D1, &|id| id == P1);
+        assert_eq!(ids(located), [P1]);
         assert!(!loc
             .transport
             .seen
             .borrow()
             .iter()
-            .any(|u| u.contains("/P2?")));
+            .any(|u| u.contains(&format!("/{P2}?"))));
     }
 
     #[test]
@@ -317,24 +402,24 @@ mod tests {
         let scratch = Scratch::new("au.lsjc.flotilla.test.drive_tries_the_next_account");
         scratch.0.save("a@x", "ra").unwrap();
         scratch.0.save("b@x", "rb").unwrap();
-        let fake = tree("rb").file("ra", "D1", 404, &[]);
-        let (located, _) = locator(fake, &scratch).ancestors("D1", &|_| false);
-        assert_eq!(ids(located), ["P1", "P2", "root"]);
+        let fake = tree("rb").file("ra", D1, 404, &[]);
+        let (located, _) = locator(fake, &scratch).ancestors(D1, &|_| false);
+        assert_eq!(ids(located), [P1, P2, "root"]);
     }
 
     #[test]
     fn nobody_can_see_it() {
         let scratch = Scratch::new("au.lsjc.flotilla.test.drive_nobody_can_see_it");
         scratch.0.save("a@x", "ra").unwrap();
-        let fake = Fake::default().file("ra", "D1", 403, &[]);
-        let (located, _) = locator(fake, &scratch).ancestors("D1", &|_| false);
+        let fake = Fake::default().file("ra", D1, 403, &[]);
+        let (located, _) = locator(fake, &scratch).ancestors(D1, &|_| false);
         assert_eq!(located, Located::NotVisible);
     }
 
     #[test]
     fn no_accounts() {
         let scratch = Scratch::new("au.lsjc.flotilla.test.drive_no_accounts");
-        let (located, dropped) = locator(Fake::default(), &scratch).ancestors("D1", &|_| false);
+        let (located, dropped) = locator(Fake::default(), &scratch).ancestors(D1, &|_| false);
         assert_eq!(located, Located::NoAccount);
         assert!(dropped.is_empty());
     }
@@ -345,8 +430,8 @@ mod tests {
         scratch.0.save("a@x", "ra").unwrap();
         scratch.0.save("b@x", "rb").unwrap();
         let fake = tree("rb").refusing("ra", 400, r#"{"error":"invalid_grant"}"#);
-        let (located, dropped) = locator(fake, &scratch).ancestors("D1", &|_| false);
-        assert_eq!(ids(located), ["P1", "P2", "root"]);
+        let (located, dropped) = locator(fake, &scratch).ancestors(D1, &|_| false);
+        assert_eq!(ids(located), [P1, P2, "root"]);
         assert_eq!(dropped, ["a@x"]);
         assert_eq!(scratch.0.list(), ["b@x"]);
     }
@@ -356,7 +441,7 @@ mod tests {
         let scratch = Scratch::new("au.lsjc.flotilla.test.drive_failing_account");
         scratch.0.save("a@x", "ra").unwrap();
         // The file is unknown to the fake, so the call fails in transit.
-        let (located, dropped) = locator(Fake::default(), &scratch).ancestors("D1", &|_| false);
+        let (located, dropped) = locator(Fake::default(), &scratch).ancestors(D1, &|_| false);
         assert_eq!(located, Located::Failed("connection refused".into()));
         assert!(dropped.is_empty());
         assert_eq!(scratch.0.list(), ["a@x"]);
@@ -367,8 +452,8 @@ mod tests {
         let scratch = Scratch::new("au.lsjc.flotilla.test.drive_cache");
         scratch.0.save("a@x", "ra").unwrap();
         let loc = locator(tree("ra"), &scratch);
-        loc.ancestors("D1", &|_| false);
-        loc.ancestors("D1", &|_| false);
+        loc.ancestors(D1, &|_| false);
+        loc.ancestors(D1, &|_| false);
         let roots = loc
             .transport
             .seen
@@ -377,5 +462,96 @@ mod tests {
             .filter(|u| u.contains("/root?"))
             .count();
         assert_eq!(roots, 1);
+        assert_eq!(*loc.transport.grants.borrow(), ["ra"]);
+    }
+
+    /// One account `ra`, a locator over `fake`, and what it says of `id`.
+    fn locate(test: &'static str, fake: Fake, id: &str) -> (Located, Locator<Fake>) {
+        let scratch = Scratch::new(test);
+        scratch.0.save("a@x", "ra").unwrap();
+        let loc = locator(fake, &scratch);
+        let (located, _) = loc.ancestors(id, &|_| false);
+        (located, loc)
+    }
+
+    #[test]
+    fn an_id_with_a_slash_is_never_requested() {
+        let (located, loc) = locate(
+            "au.lsjc.flotilla.test.drive_slash_id",
+            tree("ra"),
+            "x/../about",
+        );
+        assert_eq!(located, Located::NotVisible);
+        assert!(loc.transport.seen.borrow().is_empty());
+    }
+
+    #[test]
+    fn an_invalid_parent_ends_the_walk() {
+        let fake = Fake::default()
+            .file("ra", D1, 200, &["../about"])
+            .root("ra", P2);
+        let (located, loc) = locate("au.lsjc.flotilla.test.drive_bad_parent", fake, D1);
+        assert_eq!(ids(located), ["../about"]);
+        assert!(!loc
+            .transport
+            .seen
+            .borrow()
+            .iter()
+            .any(|u| u.contains("about")));
+    }
+
+    #[test]
+    fn a_folder_loop_fails() {
+        let fake = Fake::default()
+            .file("ra", D1, 200, &[P1])
+            .file("ra", P1, 200, &[P2])
+            .file("ra", P2, 200, &[P1]);
+        let (located, _) = locate("au.lsjc.flotilla.test.drive_loop", fake, D1);
+        assert_eq!(located, Located::Failed("folder chain too deep".into()));
+    }
+
+    #[test]
+    fn a_hidden_parent_ends_the_walk_with_what_was_seen() {
+        let fake = Fake::default()
+            .file("ra", D1, 200, &[P1])
+            .file("ra", P1, 403, &[]);
+        let (located, loc) = locate("au.lsjc.flotilla.test.drive_hidden_parent", fake, D1);
+        assert_eq!(ids(located), [P1]);
+        assert!(!loc
+            .transport
+            .seen
+            .borrow()
+            .iter()
+            .any(|u| u.contains("/root?")));
+    }
+
+    #[test]
+    fn a_rate_limit_is_a_failure_not_a_hidden_file() {
+        let limited = r#"{"error":{"errors":[{"reason":"userRateLimitExceeded"}]}}"#;
+        let fake = Fake::default().file_with("ra", D1, 403, &[], limited);
+        let (located, _) = locate("au.lsjc.flotilla.test.drive_rate_limit", fake, D1);
+        assert!(matches!(located, Located::Failed(_)), "{located:?}");
+    }
+
+    #[test]
+    fn a_rejected_token_is_refreshed_once() {
+        let fake = tree("ra").expiring("ra");
+        let (located, loc) = locate("au.lsjc.flotilla.test.drive_401", fake, D1);
+        assert_eq!(ids(located), [P1, P2, "root"]);
+        assert_eq!(*loc.transport.grants.borrow(), ["ra", "ra"]);
+    }
+
+    #[test]
+    fn a_file_with_no_parents_has_no_ancestors() {
+        let fake = Fake::default().file("ra", D1, 200, &[]).root("ra", P2);
+        let (located, _) = locate("au.lsjc.flotilla.test.drive_orphan", fake, D1);
+        assert_eq!(ids(located), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_shared_drive_top_is_not_the_root() {
+        let fake = tree("ra").root("ra", "0Aother");
+        let (located, _) = locate("au.lsjc.flotilla.test.drive_shared_top", fake, D1);
+        assert_eq!(ids(located), [P1, P2]);
     }
 }
