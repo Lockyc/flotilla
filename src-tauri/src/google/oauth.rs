@@ -2,7 +2,7 @@
 //! runs in the default browser, never a flotilla webview, because Google refuses sign-in inside
 //! embedded webviews.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::time::{Duration, Instant};
 
@@ -23,11 +23,24 @@ const SCOPE: &str = "https://www.googleapis.com/auth/drive.metadata.readonly";
 /// How long the browser has to come back with consent.
 const WAIT: Duration = Duration::from_secs(5 * 60);
 
+/// The most read of a loopback request's line, and again of its headers.
+const REQUEST_LIMIT: u64 = 8 * 1024;
+
 /// A PKCE pair: the verifier stays here, the S256 challenge goes in the consent URL.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Pkce {
     pub verifier: String,
     pub challenge: String,
+}
+
+/// The verifier is the secret half of the pair, so it never reaches a log.
+impl std::fmt::Debug for Pkce {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Pkce")
+            .field("verifier", &"<redacted>")
+            .field("challenge", &self.challenge)
+            .finish()
+    }
 }
 
 impl Pkce {
@@ -137,7 +150,16 @@ fn await_code(listener: &TcpListener, state: &str, deadline: Instant) -> Result<
                 Some(Callback::Denied(error)) => return Err(format!("consent denied: {error}")),
                 Some(Callback::Mismatch) | None => {}
             },
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            // No connection yet, or one the peer dropped before it was accepted (a cancelled
+            // preconnect, a closed tab): the browser can still come back, so keep waiting.
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    ErrorKind::WouldBlock
+                        | ErrorKind::ConnectionAborted
+                        | ErrorKind::ConnectionReset
+                        | ErrorKind::Interrupted
+                ) => {}
             Err(e) => return Err(e.to_string()),
         }
         if Instant::now() >= deadline {
@@ -147,17 +169,30 @@ fn await_code(listener: &TcpListener, state: &str, deadline: Instant) -> Result<
     }
 }
 
-/// Read one request's line and reply with a page for the browser tab. `None` when the
-/// connection sent no request (a browser's speculative preconnect).
+/// Read one request and reply with a page for the browser tab. `None` when the connection sent
+/// no request (a browser's speculative preconnect). The request line and the headers are each
+/// read to at most [`REQUEST_LIMIT`] bytes, so an endless line ends as a `Mismatch`; the headers
+/// are drained before replying because closing a socket with unread input resets it, and the
+/// browser then shows a connection error instead of the page.
 fn answer(stream: TcpStream, state: &str) -> Option<Callback> {
     stream.set_nonblocking(false).ok()?;
     stream.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
+    let mut reader = BufReader::new((&stream).take(REQUEST_LIMIT));
     let mut line = String::new();
-    BufReader::new(&stream).read_line(&mut line).ok()?;
+    reader.read_line(&mut line).ok()?;
     if line.is_empty() {
         return None;
     }
-    let callback = parse_callback(&line, state);
+    let callback = if line.ends_with('\n') {
+        parse_callback(&line, state)
+    } else {
+        Callback::Mismatch
+    };
+    reader.get_mut().set_limit(REQUEST_LIMIT);
+    let mut header = String::new();
+    while matches!(reader.read_line(&mut header), Ok(n) if n > 0) && header.trim_end() != "" {
+        header.clear();
+    }
     let (status, text) = match &callback {
         Callback::Code(_) => ("200 OK", "You can close this tab and return to flotilla."),
         Callback::Denied(_) => (
@@ -235,8 +270,34 @@ fn json(body: &str) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
+    use super::super::accounts::Scratch;
     use super::*;
     use std::cell::RefCell;
+
+    #[test]
+    fn pkce_debug_hides_the_verifier() {
+        let shown = format!("{:?}", Pkce::from_verifier("secret-verifier".into()));
+        assert!(!shown.contains("secret-verifier"));
+        assert!(shown.contains("<redacted>"));
+    }
+
+    #[test]
+    fn an_endless_request_line_is_a_mismatch() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let browser = std::thread::spawn(move || {
+            let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            let line = format!("GET /?state=S&code=C&pad={}", "x".repeat(10 * 1024));
+            s.write_all(line.as_bytes()).unwrap();
+            s.shutdown(std::net::Shutdown::Write).unwrap();
+            let mut reply = String::new();
+            std::io::Read::read_to_string(&mut s, &mut reply).unwrap();
+            reply
+        });
+        let (stream, _) = listener.accept().unwrap();
+        assert_eq!(answer(stream, "S"), Some(Callback::Mismatch));
+        assert!(browser.join().unwrap().starts_with("HTTP/1.1 400"));
+    }
 
     const CLIENT: Client = Client {
         id: "cid",
@@ -366,19 +427,16 @@ mod tests {
 
     #[test]
     fn redeem_stores_the_refresh_token_under_the_email() {
-        let kc = Keychain {
-            service: "au.lsjc.flotilla.test.redeem_stores",
-        };
+        let scratch = Scratch::new("au.lsjc.flotilla.test.redeem_stores");
+        let kc = &scratch.0;
         let fake = Fake {
             token: (200, r#"{"access_token":"at","refresh_token":"rt"}"#),
             about: (200, r#"{"user":{"emailAddress":"me@x"}}"#),
             seen: RefCell::default(),
         };
-        let got = redeem(&CLIENT, &fake, &kc, "C", "http://127.0.0.1:9", "ver");
-        let stored = kc.refresh_token("me@x");
-        kc.forget("me@x");
+        let got = redeem(&CLIENT, &fake, kc, "C", "http://127.0.0.1:9", "ver");
         assert_eq!(got, Ok("me@x".into()));
-        assert_eq!(stored.as_deref(), Some("rt"));
+        assert_eq!(kc.refresh_token("me@x").as_deref(), Some("rt"));
         assert_eq!(
             *fake.seen.borrow(),
             [
@@ -391,16 +449,15 @@ mod tests {
 
     #[test]
     fn redeem_fails_without_saving() {
-        let kc = Keychain {
-            service: "au.lsjc.flotilla.test.redeem_fails",
-        };
+        let scratch = Scratch::new("au.lsjc.flotilla.test.redeem_fails");
+        let kc = &scratch.0;
         let refused = Fake {
             token: (400, r#"{"error":"invalid_grant"}"#),
             about: (200, r#"{"user":{"emailAddress":"me@x"}}"#),
             seen: RefCell::default(),
         };
         assert_eq!(
-            redeem(&CLIENT, &refused, &kc, "C", "r", "v"),
+            redeem(&CLIENT, &refused, kc, "C", "r", "v"),
             Err("token exchange failed (400: invalid_grant)".into())
         );
         let no_refresh = Fake {
@@ -408,7 +465,7 @@ mod tests {
             about: (200, r#"{"user":{"emailAddress":"me@x"}}"#),
             seen: RefCell::default(),
         };
-        assert!(redeem(&CLIENT, &no_refresh, &kc, "C", "r", "v").is_err());
+        assert!(redeem(&CLIENT, &no_refresh, kc, "C", "r", "v").is_err());
         assert!(kc.list().is_empty());
     }
 }

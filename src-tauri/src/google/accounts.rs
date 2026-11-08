@@ -15,9 +15,10 @@ pub const APP: Keychain = Keychain {
 };
 
 impl Keychain {
-    /// Every connected account's email, sorted.
+    /// Every connected account's email, sorted. Empty when there are none (the search answers
+    /// `errSecItemNotFound`), and also on any other search error (a locked Keychain, refused
+    /// access), since no account is usable then either.
     pub fn list(&self) -> Vec<String> {
-        // No item at all is an error from the search, which reads as no accounts.
         let found = ItemSearchOptions::new()
             .class(ItemClass::generic_password())
             .service(self.service)
@@ -51,17 +52,41 @@ impl Keychain {
     }
 }
 
+/// A test's own Keychain service, emptied when the test starts and again when it ends, even on
+/// a failed assertion, so no test leaves items behind or sees another's.
+#[cfg(test)]
+pub struct Scratch(pub Keychain);
+
+#[cfg(test)]
+impl Scratch {
+    pub fn new(service: &'static str) -> Scratch {
+        let scratch = Scratch(Keychain { service });
+        scratch.empty();
+        scratch
+    }
+
+    fn empty(&self) {
+        for email in self.0.list() {
+            self.0.forget(&email);
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        self.empty();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn accounts_round_trip() {
-        let kc = Keychain {
-            service: "au.lsjc.flotilla.test.accounts_round_trip",
-        };
-        kc.forget("a@x");
-        kc.forget("b@x");
+        let scratch = Scratch::new("au.lsjc.flotilla.test.accounts_round_trip");
+        let kc = &scratch.0;
         kc.save("a@x", "r1").unwrap();
         kc.save("b@x", "r2").unwrap();
         assert_eq!(kc.list(), ["a@x", "b@x"]);
