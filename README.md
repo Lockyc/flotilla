@@ -51,7 +51,8 @@ as a group. Sign in to Google in that tab. Documents you open from it join the g
   re-home or remove it; drag a document onto another group to move it there. Collapse the
   sidebar (**⌃⌘S**) and rest the pointer on the window's left edge to slide it back in.
 - **Unload and reopen.** **⌘W** unloads the active tab and keeps its row; **Unload Group** unloads
-  a whole group and **Group ▸ Unload All** every tab in the window. **⌘⇧⌫** closes a group, and **Group ▸ Recent** reopens it with its documents.
+  a whole group and **Unload All** (the stacked dots above the
+  sidebar, or **Group ▸ Unload All**) every tab in the window. **⌘⇧⌫** closes a group, and **Group ▸ Recent** reopens it with its documents.
 - **Restored on relaunch** — every group comes back with its head, its documents and its
   popped-out windows, and the tabs that were loaded load again.
 - **Downloads** — **File ▸ Download** in a Doc, Sheet or Slides deck saves to `~/Downloads`, and

@@ -150,6 +150,14 @@ pub fn unload_group_of(app: &AppHandle, id: &TabId) {
     unload_all(app, &window, &ids);
 }
 
+/// The sidebar's unload-all button: Unload All in its own window.
+#[tauri::command]
+pub fn unload_all_tabs(webview: Webview) -> Result<(), String> {
+    let title = require_chrome(&webview)?;
+    unload_window(webview.app_handle(), webview.label(), &title);
+    Ok(())
+}
+
 /// Unload All: unloads every loaded tab of the workspace window titled `title`, whose OS window
 /// is labelled `label` ([`crate::menu::window_loaded`]), keeping them all.
 pub fn unload_window(app: &AppHandle, label: &str, title: &str) {

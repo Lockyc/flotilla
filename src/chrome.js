@@ -59,6 +59,10 @@ async function mountChrome() {
       onUnloadGroup(group) {
         invoke("unload_group", { head: group }).catch((err) => sb.setError(String(err)));
       },
+      // The title row's unload-all button: every loaded tab of this window.
+      onUnloadAll() {
+        invoke("unload_all_tabs").catch((err) => sb.setError(String(err)));
+      },
       // The bin: close the tab (a head closes its group into Recent).
       onRemove(id) {
         invoke("remove_tab", { id }).catch((err) => sb.setError(String(err)));
