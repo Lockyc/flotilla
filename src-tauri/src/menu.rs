@@ -66,6 +66,8 @@ pub enum Action {
     RemoveTab(Option<TabId>),
     /// Unload every loaded tab of the tab's group, its head included.
     UnloadGroup(Option<TabId>),
+    /// Unload every loaded tab of the focused window.
+    UnloadAll,
     CloseGroup(Option<TabId>),
     /// Reopen `recent[i]`.
     Reopen(usize),
@@ -104,6 +106,7 @@ pub fn id(a: &Action) -> String {
         Action::MoveTo(t, head) => (format!("move:{head}"), t.as_ref()),
         Action::RemoveTab(t) => ("remove_tab".into(), t.as_ref()),
         Action::UnloadGroup(t) => ("unload_group".into(), t.as_ref()),
+        Action::UnloadAll => ("unload_all".into(), None),
         Action::CloseGroup(t) => ("close_group".into(), t.as_ref()),
         Action::Reopen(i) => (format!("recent:{i}"), None),
         Action::ClearRecent => ("clear_recent".into(), None),
@@ -136,6 +139,7 @@ pub fn action(id: &str) -> Option<Action> {
         ("move", Some(head), t) => Action::MoveTo(t, head.to_string()),
         ("remove_tab", None, t) => Action::RemoveTab(t),
         ("unload_group", None, t) => Action::UnloadGroup(t),
+        ("unload_all", None, None) => Action::UnloadAll,
         ("close_group", None, t) => Action::CloseGroup(t),
         ("recent", Some(i), None) => Action::Reopen(i.parse().ok()?),
         ("clear_recent", None, None) => Action::ClearRecent,
@@ -170,6 +174,24 @@ pub fn group_loaded(ws: &Workspace, live: &HashSet<TabId>, id: &TabId) -> Vec<Ta
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// The tabs of the workspace window titled `title` that Unload All closes: those with a webview
+/// in `live`, popped-out tabs excepted, as in [`group_loaded`].
+pub fn window_loaded(ws: &Workspace, live: &HashSet<TabId>, title: &str) -> Vec<TabId> {
+    ws.windows
+        .iter()
+        .filter(|w| w.title == title)
+        .flat_map(|w| w.tabs())
+        .filter(|t| !t.detached && live.contains(&t.id))
+        .map(|t| t.id.clone())
+        .collect()
+}
+
+/// The menu bar's Unload All, for the workspace window titled `title` (`None`: none open).
+pub fn unload_all_item(ws: &Workspace, live: &HashSet<TabId>, title: Option<&str>) -> Item {
+    let empty = title.is_none_or(|t| window_loaded(ws, live, t).is_empty());
+    item("Unload All", empty.then_some(NOTHING_LOADED))
 }
 
 fn item(label: &str, blocked: Option<&str>) -> Item {
@@ -275,13 +297,14 @@ pub fn menu_state_for(
 }
 
 /// The Group menu's items for `ms`. `tab` is the row a context menu acts on; `None` builds the
-/// menu bar's, which act on the active tab, carry the shortcuts, and lead the tab items with the
-/// spine's ⌘W item, `unload`.
+/// menu bar's, which act on the active tab, carry the shortcuts, lead the tab items with the
+/// spine's ⌘W item, `unload`, and follow Unload Group with `unload_all`.
 fn group_items(
     app: &AppHandle,
     ms: &MenuState,
     tab: Option<&TabId>,
     unload: Option<&MenuItem<Wry>>,
+    unload_all: Option<&Item>,
 ) -> tauri::Result<Vec<MenuItemKind<Wry>>> {
     let t = tab.cloned();
     let entry = |a: Action, it: &Item, accel: Option<&str>| -> tauri::Result<MenuItemKind<Wry>> {
@@ -322,6 +345,9 @@ fn group_items(
         &ms.unload_group,
         None,
     )?);
+    if let Some(all) = unload_all {
+        tab_items.push(entry(Action::UnloadAll, all, None)?);
+    }
     tab_items.push(entry(
         Action::CloseGroup(t.clone()),
         &ms.close_group,
@@ -356,7 +382,7 @@ fn refs(items: &[MenuItemKind<Wry>]) -> Vec<&dyn IsMenuItem<Wry>> {
 
 /// The context menu for sidebar row `tab`.
 pub fn row_menu(app: &AppHandle, ms: &MenuState, tab: &TabId) -> tauri::Result<Menu<Wry>> {
-    let items = group_items(app, ms, Some(tab), None)?;
+    let items = group_items(app, ms, Some(tab), None, None)?;
     MenuBuilder::new(app).items(&refs(&items)).build()
 }
 
@@ -375,11 +401,12 @@ pub fn incoming_menu(
     menu.build()
 }
 
-/// What the menu bar is built from: the Group menu's state, the Window menu's rows (label,
-/// title, open) and the connected Google accounts.
+/// What the menu bar is built from: the Group menu's state and its Unload All, the Window menu's
+/// rows (label, title, open) and the connected Google accounts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MenuKey {
     pub group: MenuState,
+    pub unload_all: Item,
     pub windows: Vec<(String, String, bool)>,
     pub accounts: Vec<String>,
 }
@@ -415,6 +442,7 @@ fn google_items(app: &AppHandle, accounts: &[String]) -> tauri::Result<Vec<MenuI
 fn build_app_menu(
     app: &AppHandle,
     ms: &MenuState,
+    unload_all: &Item,
     windows: &[WindowEntry],
     accounts: &[String],
 ) -> tauri::Result<Menu<Wry>> {
@@ -441,7 +469,7 @@ fn build_app_menu(
         .build(app)?;
     let tabs_menu = shell_core::menu::build_tab_menu(app, &spine, cycle_digits, &[&[&reload]])?;
 
-    let mut group = group_items(app, ms, None, Some(&spine.close_tab))?;
+    let mut group = group_items(app, ms, None, Some(&spine.close_tab), Some(unload_all))?;
     group.extend(google_items(app, accounts)?);
     let group_menu: Submenu<Wry> = SubmenuBuilder::new(app, "Group")
         .items(&refs(&group))
@@ -517,18 +545,21 @@ fn focused_label(app: &AppHandle) -> Option<String> {
     app.get_focused_window().map(|w| w.label().to_string())
 }
 
-/// What the menu bar shows with `tab` the one it acts on ([`menu_tab`]): its Group menu, and the
-/// Window menu's rows, and the connected Google `accounts`. `current` is the page `tab` shows.
+/// What the menu bar shows with `tab` the one it acts on ([`menu_tab`]) and `title` the workspace
+/// window ([`focused`]): its Group menu, and the Window menu's rows, and the connected Google
+/// `accounts`. `current` is the page `tab` shows.
 pub fn key_for(
     ws: &Workspace,
     live: &HashSet<TabId>,
     tab: Option<&TabId>,
+    title: Option<&str>,
     current: Option<&Url>,
     windows: &[WindowEntry],
     accounts: Vec<String>,
 ) -> MenuKey {
     MenuKey {
         group: menu_state_for(ws, live, current, tab),
+        unload_all: unload_all_item(ws, live, title),
         windows: windows
             .iter()
             .map(|e| (e.id.clone(), e.title.clone(), e.open))
@@ -558,15 +589,20 @@ pub fn refresh(app: &AppHandle) {
         &state.ws.lock().unwrap(),
         &live,
         tab.as_ref(),
+        title.as_deref(),
         current.as_ref(),
         &windows,
         crate::locate::accounts(),
     );
-    let (group, accounts) = (key.group.clone(), key.accounts.clone());
+    let (group, unload_all, accounts) = (
+        key.group.clone(),
+        key.unload_all.clone(),
+        key.accounts.clone(),
+    );
     if !needs_rebuild(&mut state.menu.lock().unwrap(), key) {
         return;
     }
-    match build_app_menu(app, &group, &windows, &accounts) {
+    match build_app_menu(app, &group, &unload_all, &windows, &accounts) {
         Ok(menu) => {
             let _ = app.set_menu(menu);
         }
@@ -658,6 +694,11 @@ pub fn handle(app: &AppHandle, menu_id: &str) -> bool {
             let t = pick(t, &app.state::<AppState>().ws.lock().unwrap());
             if let Some(t) = t {
                 commands::unload_group_of(app, &t);
+            }
+        }
+        Action::UnloadAll => {
+            if let Some((label, title)) = &window {
+                commands::unload_window(app, label, title);
             }
         }
         Action::CloseGroup(t) => {
@@ -765,6 +806,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn unload_all_takes_every_loaded_tab_of_its_window_and_skips_pop_outs() {
+        let (mut ws, h, m) = one_group();
+        let w = add_group(&mut ws, "f2", "Website");
+        let live: HashSet<TabId> = [h.clone(), m.clone(), w.clone()].into();
+        assert_eq!(window_loaded(&ws, &live, "W"), [h.clone(), m.clone(), w]);
+        assert_eq!(unload_all_item(&ws, &live, Some("W")), on("Unload All"));
+        ws.set_detached(&m, true);
+        let popped: HashSet<TabId> = [m].into();
+        assert_eq!(
+            unload_all_item(&ws, &popped, Some("W")),
+            off("Unload All — Nothing loaded")
+        );
+        for title in [Some("Other"), None] {
+            assert_eq!(
+                unload_all_item(&ws, &live, title),
+                off("Unload All — Nothing loaded")
+            );
+        }
+    }
+
     fn on(label: &str) -> Item {
         Item {
             label: label.into(),
@@ -794,6 +856,7 @@ mod tests {
             Action::RemoveTab(t()),
             Action::UnloadGroup(None),
             Action::UnloadGroup(t()),
+            Action::UnloadAll,
             Action::CloseGroup(None),
             Action::CloseGroup(t()),
             Action::Reopen(2),
@@ -1023,13 +1086,29 @@ mod tests {
         // A in front, its member active: the member's items.
         let tab_a = menu_tab(&ws, Some("a"), Some("A"));
         assert_eq!(tab_a.as_ref(), Some(&m));
-        let in_a = key_for(&ws, &cold(), tab_a.as_ref(), None, &entries, vec![]);
+        let in_a = key_for(
+            &ws,
+            &cold(),
+            tab_a.as_ref(),
+            Some("A"),
+            None,
+            &entries,
+            vec![],
+        );
         assert_eq!(in_a.group, menu_state_for(&ws, &cold(), None, Some(&m)));
         assert_eq!(in_a.group.make_own_group, on("Make Own Group"));
         // B in front, nothing active there: no tab, so nothing acts on A's member.
         let tab_b = menu_tab(&ws, Some("b"), Some("B"));
         assert_eq!(tab_b, None);
-        let in_b = key_for(&ws, &cold(), tab_b.as_ref(), None, &entries, vec![]);
+        let in_b = key_for(
+            &ws,
+            &cold(),
+            tab_b.as_ref(),
+            Some("B"),
+            None,
+            &entries,
+            vec![],
+        );
         assert_eq!(in_b.group, menu_state_for(&ws, &cold(), None, None));
         assert_ne!(in_a, in_b, "a focus change rebuilds the menu bar");
         assert_eq!(in_b.windows.len(), 2);

@@ -150,6 +150,21 @@ pub fn unload_group_of(app: &AppHandle, id: &TabId) {
     unload_all(app, &window, &ids);
 }
 
+/// Unload All: unloads every loaded tab of the workspace window titled `title`, whose OS window
+/// is labelled `label` ([`crate::menu::window_loaded`]), keeping them all.
+pub fn unload_window(app: &AppHandle, label: &str, title: &str) {
+    let Some(window) = app.get_window(label) else {
+        return;
+    };
+    let ids = {
+        let state = app.state::<AppState>();
+        let ws = state.ws.lock().unwrap();
+        let live = tabs::live_in(&state.created.lock().unwrap());
+        crate::menu::window_loaded(&ws, &live, title)
+    };
+    unload_all(app, &window, &ids);
+}
+
 /// Closes tab `id`'s webview in `window` and keeps the tab.
 fn unload(app: &AppHandle, window: &tauri::Window, id: &TabId) {
     unload_all(app, window, std::slice::from_ref(id));
