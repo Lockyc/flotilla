@@ -829,6 +829,13 @@ impl Workspace {
         }
     }
 
+    /// Clears the user's name for `id`: its page's title replaces the title again.
+    pub fn unname(&mut self, id: &TabId) {
+        if let Some(t) = self.tab_mut(id) {
+            t.named = false;
+        }
+    }
+
     /// Detaching its window's active tab leaves that window with nothing active; the shell picks
     /// what it shows next before detaching.
     pub fn set_detached(&mut self, id: &TabId, detached: bool) {

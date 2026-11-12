@@ -120,7 +120,7 @@ same `store` are a config error.
 | `store` | `"default"` | The login store the group's documents open in; another store is another account. |
 | `collapsed` | `false` | Shows the head alone. |
 | `detached` | `false` | The head is popped out; reopens in its own window. |
-| `named` | `false` | `name` is yours and stays as written. Renaming the group in the sidebar sets it. |
+| `named` | `false` | `name` is yours and stays as written. Renaming the group in the sidebar sets it; renaming it to nothing clears it. |
 
 **`[[window.group.tab]]`**, and **`[[window.tab]]`** — a document in no group, listed under
 **Unsorted** and opened in the default store
@@ -130,7 +130,7 @@ same `store` are a config error.
 | `title` | required | The document's name in the sidebar. Follows the document's own title, unless `named`. |
 | `url` | required | The document, and its Home. |
 | `detached` | `false` | Popped out; reopens in its own window. |
-| `named` | `false` | `title` is yours and stays as written. Renaming the document in the sidebar sets it. |
+| `named` | `false` | `title` is yours and stays as written. Renaming the document in the sidebar sets it; renaming it to nothing clears it. |
 
 ## For link routers
 

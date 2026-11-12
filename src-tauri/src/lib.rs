@@ -228,6 +228,7 @@ fn load_state(
         persist,
         notice: std::sync::Mutex::new(notice),
         chrome_queue: Default::default(),
+        page_titles: Default::default(),
     }
 }
 

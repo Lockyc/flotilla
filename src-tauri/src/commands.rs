@@ -620,17 +620,29 @@ pub fn begin_rename(app: &AppHandle, id: &TabId) {
 
 /// The sidebar's rename field: names tab `id` (a group's `name` for a head, a document's `title`)
 /// in the config. A group name another group of its window holds is suffixed ("Newsletters 2").
-/// The name is then the user's (`named`): the page's title no longer replaces it.
+/// The name is then the user's (`named`): the page's title no longer replaces it. An empty name
+/// clears the user's: the tab takes its page's last reported title, and follows it again.
 #[tauri::command]
 pub fn rename_tab(id: TabId, name: String, webview: Webview) -> Result<(), String> {
     require_chrome(&webview)?;
+    let app = webview.app_handle();
     let name = name.trim();
-    if name.is_empty() {
-        return Err("A name can't be empty.".into());
-    }
-    let found = crate::write::through(webview.app_handle(), |ws| {
+    let page = name.is_empty().then(|| {
+        let state = app.state::<AppState>();
+        let titles = state.page_titles.lock().unwrap();
+        titles.get(&id).cloned()
+    });
+    let found = crate::write::through(app, |ws| {
         let found = ws.find(&id).is_some();
-        ws.rename(&id, name);
+        match &page {
+            None => ws.rename(&id, name),
+            Some(page) => {
+                ws.unname(&id);
+                if let Some((url, title)) = page {
+                    tabs::retitled(ws, &id, Some(url), title);
+                }
+            }
+        }
         found
     });
     if !found {

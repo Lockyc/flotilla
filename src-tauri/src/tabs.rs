@@ -514,6 +514,11 @@ fn retitle(app: &AppHandle, label: &str, title: &str) {
         return;
     };
     let page = current_url(app, &id);
+    if let Some(p) = &page {
+        let state = app.state::<AppState>();
+        let mut titles = state.page_titles.lock().unwrap();
+        titles.insert(id.clone(), (p.clone(), title.to_string()));
+    }
     if crate::write::through(app, |ws| retitled(ws, &id, page.as_ref(), title)) {
         push_dto(app);
     } else {
@@ -743,6 +748,10 @@ mod tests {
         ws.rename(&b, "Club budget");
         assert!(!retitled(&mut ws, &b, Some(&doc), "Budget 2027"));
         assert_eq!(title(&ws, &b), "Club budget");
+        // Clearing the user's name: the page's title names it again.
+        ws.unname(&b);
+        assert!(retitled(&mut ws, &b, Some(&doc), "Budget 2027"));
+        assert_eq!(title(&ws, &b), "Budget 2027");
         // A head follows its folder's title, never a subfolder's.
         assert!(retitled(&mut ws, &h, Some(&folder), "Auction 2026"));
         assert!(!retitled(&mut ws, &h, Some(&sub), "Subfolder"));

@@ -148,7 +148,7 @@ new ResizeObserver(() => reportRect()).observe(document.getElementById("content-
 // ── Rename… : the row's name becomes a field in place ──────────────────────
 // While a name is being edited, workspace pushes are held (a repaint would drop the field) and the
 // latest one applied when the edit ends. Enter or leaving the field saves the name, as in Finder;
-// Escape keeps the old one.
+// Escape keeps the old one. Saved empty, the tab goes back to its document's title.
 let renaming = null; // { id, name, input, title } while editing
 let heldDto = null;
 
@@ -186,6 +186,7 @@ function beginRename(id, name) {
   input.className = "row-rename";
   input.type = "text";
   input.value = name;
+  input.placeholder = "Document's title";
   input.spellcheck = false;
   // Keystrokes and clicks in the field stay in it, not the row's selection.
   for (const ev of ["mousedown", "click", "dblclick", "contextmenu"]) {

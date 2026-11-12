@@ -6,6 +6,7 @@ use flotilla_core::model::{TabId, Workspace};
 use shell_core::compositing::HoleRect;
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
+use tauri::Url;
 
 /// Lock discipline: `ws` is never held while calling a webview API (`add_child`, `navigate`,
 /// `close`, show/hide): lock, copy or decide, drop, then act. WebKit runs `intercept` on the main
@@ -15,7 +16,7 @@ use std::sync::Mutex;
 ///
 /// Lock order: `gate`, then `ws`, then `created`, then `unsorted_reason`, then `warm`, then `hole`,
 /// then `failed`; and `Persist`'s writer lock before `ws` (the session snapshot is taken inside
-/// it). `menu`, `notice`, `chrome_queue`, `shown` and `lookups` are each taken alone.
+/// it). `menu`, `notice`, `chrome_queue`, `shown`, `lookups` and `page_titles` are each taken alone.
 pub struct AppState {
     /// Serialises config writes and reloads (`crate::write::Gate`).
     pub gate: crate::write::Gate,
@@ -49,6 +50,9 @@ pub struct AppState {
     pub notice: Mutex<Notices>,
     /// Events for chromes still mounting (`ChromeQueue`).
     pub chrome_queue: Mutex<ChromeQueue>,
+    /// Each tab's page as it last reported its title, and that title: what clearing a name
+    /// (`commands::rename_tab`) names the tab by. In memory only.
+    pub page_titles: Mutex<HashMap<TabId, (Url, String)>>,
 }
 
 /// Events for a window whose chrome is not listening yet: a spine command sent from a pop-out to
