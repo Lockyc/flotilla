@@ -16,6 +16,7 @@ pub struct Doc {
     pub title: String,
     pub url: String,
     pub detached: bool,
+    pub named: bool,
 }
 
 impl Doc {
@@ -24,6 +25,7 @@ impl Doc {
             title: t.title.clone(),
             url: t.home_url.clone(),
             detached: t.detached,
+            named: t.named,
         }
     }
 }
@@ -40,6 +42,7 @@ pub enum Write {
         store: String,
         collapsed: bool,
         detached: bool,
+        named: bool,
         docs: Vec<Doc>,
     },
     AddDoc {
@@ -61,6 +64,12 @@ pub enum Write {
         group: Option<String>,
         url: Option<String>,
         detached: bool,
+    },
+    SetNamed {
+        window: String,
+        group: Option<String>,
+        url: Option<String>,
+        named: bool,
     },
     SetCollapsed {
         window: String,
@@ -272,6 +281,14 @@ pub fn plan(before: &Workspace, after: &Workspace) -> Vec<Write> {
                         detached: g.head.detached,
                     });
                 }
+                if o.tab.named != g.head.named {
+                    fields.push(Write::SetNamed {
+                        window: window.clone(),
+                        group: Some(group.clone()),
+                        url: None,
+                        named: g.head.named,
+                    });
+                }
                 if o.tab.home_url != g.head.home_url {
                     fields.push(Write::SetUrl {
                         window: window.clone(),
@@ -303,6 +320,7 @@ pub fn plan(before: &Workspace, after: &Workspace) -> Vec<Write> {
                 store: g.store.clone(),
                 collapsed: g.collapsed,
                 detached: g.head.detached,
+                named: g.head.named,
                 docs: g.members.iter().map(Doc::of).collect(),
             }),
         }
@@ -342,6 +360,14 @@ pub fn plan(before: &Workspace, after: &Workspace) -> Vec<Write> {
                         group: group.clone(),
                         url: Some(url.clone()),
                         detached: m.tab.detached,
+                    });
+                }
+                if o.tab.named != m.tab.named {
+                    fields.push(Write::SetNamed {
+                        window: window.clone(),
+                        group: group.clone(),
+                        url: Some(url.clone()),
+                        named: m.tab.named,
                     });
                 }
                 if o.tab.title != m.tab.title {
@@ -428,6 +454,7 @@ fn doc_fields(d: &Doc) -> Vec<(&'static str, Value)> {
         ("url", Value::from(d.url.as_str())),
     ];
     f.extend(flag(d.detached).map(|v| ("detached", v)));
+    f.extend(flag(d.named).map(|v| ("named", v)));
     f
 }
 
@@ -437,6 +464,7 @@ fn group_fields(
     store: &str,
     collapsed: bool,
     detached: bool,
+    named: bool,
 ) -> Vec<(&'static str, Value)> {
     let mut f = vec![("name", Value::from(name)), ("url", Value::from(url))];
     if store != DEFAULT_STORE {
@@ -444,6 +472,7 @@ fn group_fields(
     }
     f.extend(flag(collapsed).map(|v| ("collapsed", v)));
     f.extend(flag(detached).map(|v| ("detached", v)));
+    f.extend(flag(named).map(|v| ("named", v)));
     f
 }
 
@@ -540,10 +569,11 @@ pub(crate) fn steps(w: &Write) -> Vec<Step> {
             store,
             collapsed,
             detached,
+            named,
             docs,
         } => std::iter::once(Step::AddGroup {
             window: window.clone(),
-            fields: group_fields(&name, &url, &store, collapsed, detached),
+            fields: group_fields(&name, &url, &store, collapsed, detached, named),
         })
         .chain(docs.iter().map(|d| Step::AddTab {
             window: window.clone(),
@@ -577,6 +607,18 @@ pub(crate) fn steps(w: &Write) -> Vec<Step> {
             url.as_deref(),
             "detached",
             flag(detached),
+        )],
+        Write::SetNamed {
+            window,
+            group,
+            url,
+            named,
+        } => vec![set(
+            &window,
+            group.as_deref(),
+            url.as_deref(),
+            "named",
+            flag(named),
         )],
         Write::SetCollapsed {
             window,
@@ -617,7 +659,7 @@ pub(crate) fn steps(w: &Write) -> Vec<Step> {
             },
             Step::AddGroup {
                 window: to_window,
-                fields: group_fields(&name, &doc.url, &store, false, doc.detached),
+                fields: group_fields(&name, &doc.url, &store, false, doc.detached, doc.named),
             },
         ],
         Write::SetTitle {
@@ -927,25 +969,6 @@ mod tests {
     }
 
     #[test]
-    fn set_home_moves_a_url_name_with_it() {
-        let sub = "https://drive.google.com/drive/folders/sub";
-        let (ws, writes) = run_with(|ws| {
-            let two = id_of(ws, F2);
-            let mut w = change(ws, |ws| ws.set_title(&two, F2)).1;
-            w.extend(
-                change_rekey(ws, |ws| {
-                    ws.set_home(&two, &url(sub)).map(|n| (two.clone(), n))
-                })
-                .1,
-            );
-            w
-        });
-        assert!(matches!(&writes[1], Write::SetUrl { url: None, new_url, .. } if new_url == sub));
-        assert!(matches!(&writes[2], Write::SetName { name, .. } if name == sub));
-        assert_eq!(ws.windows[0].groups[1].head.title, sub);
-    }
-
-    #[test]
     fn set_home_on_a_doc_rewrites_its_url() {
         let (ws, writes) = run_with(|ws| {
             let budget = id_of(ws, D1);
@@ -968,23 +991,47 @@ mod tests {
     }
 
     #[test]
-    fn rename_writes_name_and_survives_navigation() {
+    fn rename_writes_name_and_named_and_survives_the_pages_title() {
         // A group named by its URL, then renamed by the user.
         let (mut ws, writes) = run_with(|ws| {
             let two = id_of(ws, F2);
             let mut w = change(ws, |ws| ws.set_title(&two, F2)).1;
-            w.extend(change(ws, |ws| ws.set_title(&two, "Website")).1);
+            w.extend(change(ws, |ws| ws.rename(&two, "Website")).1);
             w
         });
         assert!(matches!(writes.last(), Some(Write::SetName { name, .. }) if name == "Website"));
+        assert!(writes.iter().any(|w| matches!(
+            w,
+            Write::SetNamed {
+                url: None,
+                named: true,
+                ..
+            }
+        )));
         let two = id_of(&ws, F2);
         assert_eq!(ws.find(&two).unwrap().2.title, "Website");
-        // Navigating it reports other titles; the rename sticks.
-        assert!(!crate::tabs::retitled(&mut ws, &two, "Drive – Folder"));
+        // Its folder reports its own title; the rename sticks.
+        let f2 = Url::parse(F2).unwrap();
+        assert!(!crate::tabs::retitled(
+            &mut ws,
+            &two,
+            Some(&f2),
+            "Drive – Folder"
+        ));
         // A document renamed the same way.
         let budget = id_of(&ws, D1);
-        ws.set_title(&budget, "Club budget");
-        assert!(!crate::tabs::retitled(&mut ws, &budget, "Budget – Sheet 2"));
+        let (_, w) = change(&mut ws, |ws| ws.rename(&budget, "Club budget"));
+        assert!(w.iter().any(|w| matches!(
+            w,
+            Write::SetNamed { url: Some(u), named: true, .. } if u == D1
+        )));
+        let d1 = Url::parse(D1).unwrap();
+        assert!(!crate::tabs::retitled(
+            &mut ws,
+            &budget,
+            Some(&d1),
+            "Budget 2026"
+        ));
     }
 
     fn one<T: Clone>(v: Vec<T>) -> T {
@@ -1208,6 +1255,7 @@ mod tests {
                     url: D3.into(),
                     store: DEFAULT_STORE.into(),
                     collapsed: false,
+                    named: false,
                     detached: false,
                     docs: vec![],
                 };

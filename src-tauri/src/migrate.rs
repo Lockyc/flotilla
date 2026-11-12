@@ -124,6 +124,7 @@ fn add_group(config_path: &Path, window: &str, g: &Group) -> Result<(), String> 
             title: page_title(&m.title).to_string(),
             url: m.home_url.clone(),
             detached: m.detached,
+            named: m.named,
         })
         .collect();
     let Some(head) = key(&g.store, &g.head.home_url) else {
@@ -154,6 +155,7 @@ fn add_group(config_path: &Path, window: &str, g: &Group) -> Result<(), String> 
         store: g.store.clone(),
         collapsed: g.collapsed,
         detached: g.head.detached,
+        named: g.head.named,
         docs,
     })
 }
@@ -231,6 +233,7 @@ mod tests {
             title: title.into(),
             key: identity("default", &Url::parse(url).unwrap()),
             detached,
+            named: false,
         }
     }
 

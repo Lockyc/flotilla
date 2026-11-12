@@ -33,6 +33,9 @@ pub struct Tab {
     pub id: TabId,
     pub home_url: String,
     pub title: String,
+    /// The user named it ([`Workspace::rename`]): its page's title no longer replaces `title`.
+    #[serde(default)]
+    pub named: bool,
     /// What this tab is, scoped by its group's store: the document it shows, or for a head that
     /// is not a document, its `head_key`. Open-once compares these.
     pub key: DocKey,
@@ -131,6 +134,7 @@ pub struct ConfigGroup {
     pub store: String,
     pub collapsed: bool,
     pub detached: bool,
+    pub named: bool,
     pub tabs: Vec<ConfigTab>,
 }
 
@@ -140,6 +144,7 @@ pub struct ConfigTab {
     pub title: String,
     pub url: String,
     pub detached: bool,
+    pub named: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -186,6 +191,7 @@ fn tab(url: &Url, title: &str, store: &str, detached: bool) -> Tab {
         id: tab_id(&key),
         home_url: url.to_string(),
         title: title.to_string(),
+        named: false,
         key,
         detached,
     }
@@ -208,9 +214,10 @@ impl Workspace {
     /// members, and members before Unsorted documents, so a head is never dropped for a duplicate
     /// member, nor a member for a duplicate Unsorted document.
     pub fn from_config(windows: &[ConfigWindow]) -> Workspace {
-        let configured = |url: &str, title: &str, store: &str, detached: bool| {
+        let configured = |url: &str, title: &str, store: &str, detached: bool, named: bool| {
             let mut t = tab(&Url::parse(url).ok()?, title, store, detached);
             t.home_url = url.to_string();
+            t.named = named;
             Some(t)
         };
         let mut seen: Vec<DocKey> = vec![];
@@ -227,7 +234,10 @@ impl Workspace {
             .map(|w| {
                 w.groups
                     .iter()
-                    .filter_map(|g| Some((g, configured(&g.url, &g.name, &g.store, g.detached)?)))
+                    .filter_map(|g| {
+                        let head = configured(&g.url, &g.name, &g.store, g.detached, g.named)?;
+                        Some((g, head))
+                    })
                     .filter(|(_, head)| claim(head))
                     .collect()
             })
@@ -242,7 +252,9 @@ impl Workspace {
                         members: g
                             .tabs
                             .iter()
-                            .filter_map(|t| configured(&t.url, &t.title, &g.store, t.detached))
+                            .filter_map(|t| {
+                                configured(&t.url, &t.title, &g.store, t.detached, t.named)
+                            })
                             .filter(|t| claim(t))
                             .collect(),
                         collapsed: g.collapsed,
@@ -259,7 +271,9 @@ impl Workspace {
                 unsorted: w
                     .unsorted
                     .iter()
-                    .filter_map(|t| configured(&t.url, &t.title, DEFAULT_STORE, t.detached))
+                    .filter_map(|t| {
+                        configured(&t.url, &t.title, DEFAULT_STORE, t.detached, t.named)
+                    })
                     .filter(|t| claim(t))
                     .collect(),
                 groups,
@@ -807,6 +821,14 @@ impl Workspace {
         }
     }
 
+    /// The user's name for `id`: kept from then on, whatever its page reports.
+    pub fn rename(&mut self, id: &TabId, title: &str) {
+        if let Some(t) = self.tab_mut(id) {
+            t.title = title.to_string();
+            t.named = true;
+        }
+    }
+
     /// Detaching its window's active tab leaves that window with nothing active; the shell picks
     /// what it shows next before detaching.
     pub fn set_detached(&mut self, id: &TabId, detached: bool) {
@@ -1047,10 +1069,6 @@ impl Workspace {
         let store = self.store_of(id).ok_or(SetHomeBlock::AtHome)?.to_string();
         let fresh = tab(url, "", &store, false);
         let t = self.tab_mut(id).expect("located");
-        // A title that is still the URL moves with it, so the page's title can still replace it.
-        if t.title == t.home_url {
-            t.title = fresh.home_url.clone();
-        }
         t.key = fresh.key;
         t.id = fresh.id.clone();
         t.home_url = fresh.home_url;
@@ -1150,12 +1168,14 @@ mod tests {
             store: store.into(),
             collapsed: false,
             detached: false,
+            named: false,
             tabs: tabs
                 .iter()
                 .map(|(t, u)| ConfigTab {
                     title: (*t).into(),
                     url: u.to_string(),
                     detached: false,
+                    named: false,
                 })
                 .collect(),
         }
@@ -1190,6 +1210,7 @@ mod tests {
             title: "Dup".into(),
             url: doc(3).to_string(),
             detached: false,
+            named: false,
         });
         cfg[1].groups.push(cgroup("Three", &doc(4), "default", &[]));
         cfg[1].groups[1].url = doc(3).to_string();
@@ -1641,11 +1662,13 @@ mod tests {
                     title: "Loose".into(),
                     url: doc(1).to_string(),
                     detached: false,
+                    named: false,
                 },
                 ConfigTab {
                     title: "Twice".into(),
                     url: doc(2).to_string(),
                     detached: false,
+                    named: false,
                 },
             ],
             groups: vec![ConfigGroup {
@@ -1656,6 +1679,7 @@ mod tests {
                     title: "Member".into(),
                     url: doc(2).to_string(),
                     detached: false,
+                    named: false,
                 }],
                 ..Default::default()
             }],
@@ -2056,17 +2080,13 @@ mod tests {
     }
 
     #[test]
-    fn set_home_carries_a_title_that_is_still_the_url() {
+    fn set_home_keeps_the_title_and_named() {
         let mut w = ws();
         let h = head_of(&mut w, 1);
-        // Never named by its page: its title is its URL, and moves with it so a title can follow.
-        let sub = folder(8);
-        let new = w.set_home(&h, &sub).unwrap();
-        assert_eq!(w.find(&new).unwrap().2.title, sub.as_str());
-        // A real name stays.
-        w.set_title(&new, "Newsletters");
-        let newer = w.set_home(&new, &folder(9)).unwrap();
-        assert_eq!(w.find(&newer).unwrap().2.title, "Newsletters");
+        w.rename(&h, "Newsletters");
+        let new = w.set_home(&h, &folder(8)).unwrap();
+        let t = w.find(&new).unwrap().2;
+        assert_eq!((t.title.as_str(), t.named), ("Newsletters", true));
     }
 
     #[test]

@@ -46,6 +46,7 @@ title = "flotilla"
 # title = "Minutes"
 # url = "https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrSt03/edit"
 # detached = false
+# named = false
 #
 # [[window.group]]
 # name = "Club drive"         # the group's name in the sidebar
@@ -53,8 +54,10 @@ title = "flotilla"
 # store = "default"           # optional login store; another store is another account
 # collapsed = false           # optional; true shows the head alone
 # detached = false            # optional; true reopens the head in its own window
+# named = false               # optional; true keeps name, else it follows the folder's title
 #
 # [[window.group.tab]]
 # title = "Budget"            # the document's name in the sidebar
 # url = "https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOpQrSt04/edit"
 # detached = false            # optional; true reopens it in its own window
+# named = false               # optional; true keeps title, else it follows the document's title

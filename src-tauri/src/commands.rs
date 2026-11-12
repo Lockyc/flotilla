@@ -620,7 +620,7 @@ pub fn begin_rename(app: &AppHandle, id: &TabId) {
 
 /// The sidebar's rename field: names tab `id` (a group's `name` for a head, a document's `title`)
 /// in the config. A group name another group of its window holds is suffixed ("Newsletters 2").
-/// The name is then fixed: titles from the page replace only a name that is still the URL.
+/// The name is then the user's (`named`): the page's title no longer replaces it.
 #[tauri::command]
 pub fn rename_tab(id: TabId, name: String, webview: Webview) -> Result<(), String> {
     require_chrome(&webview)?;
@@ -630,7 +630,7 @@ pub fn rename_tab(id: TabId, name: String, webview: Webview) -> Result<(), Strin
     }
     let found = crate::write::through(webview.app_handle(), |ws| {
         let found = ws.find(&id).is_some();
-        ws.set_title(&id, name);
+        ws.rename(&id, name);
         found
     });
     if !found {

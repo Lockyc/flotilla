@@ -115,20 +115,22 @@ same `store` are a config error.
 
 | Key | Default | What it does |
 |---|---|---|
-| `name` | required | The group's name in the sidebar. Unique within its window. A new group is written named by its URL, then by its page's title once that loads; after that the name stays as written. |
+| `name` | required | The group's name in the sidebar. Unique within its window. Follows the head's page title whenever the head shows its own folder or document, unless `named`. |
 | `url` | required | The group's head and Home: a Drive folder or a document. |
 | `store` | `"default"` | The login store the group's documents open in; another store is another account. |
 | `collapsed` | `false` | Shows the head alone. |
 | `detached` | `false` | The head is popped out; reopens in its own window. |
+| `named` | `false` | `name` is yours and stays as written. Renaming the group in the sidebar sets it. |
 
 **`[[window.group.tab]]`**, and **`[[window.tab]]`** — a document in no group, listed under
 **Unsorted** and opened in the default store
 
 | Key | Default | What it does |
 |---|---|---|
-| `title` | required | The document's name in the sidebar, written like a group's `name`. |
+| `title` | required | The document's name in the sidebar. Follows the document's own title, unless `named`. |
 | `url` | required | The document, and its Home. |
 | `detached` | `false` | Popped out; reopens in its own window. |
+| `named` | `false` | `title` is yours and stays as written. Renaming the document in the sidebar sets it. |
 
 ## For link routers
 

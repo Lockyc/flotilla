@@ -97,19 +97,25 @@ pub struct FlotillaGroup {
     /// The head is popped out; reopens in its own window.
     #[serde(default)]
     pub detached: bool,
+    /// `name` is the user's: the folder's title no longer replaces it.
+    #[serde(default)]
+    pub named: bool,
 }
 
 /// A `[[window.group.tab]]`: a document opened from its group.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DocTab {
-    /// The sidebar name, written once and never following navigation.
+    /// The sidebar name: the document's own title, unless `named`.
     pub title: String,
     /// The document, and its Home.
     pub url: String,
     /// Popped out; reopens in its own window.
     #[serde(default)]
     pub detached: bool,
+    /// `title` is the user's: the document's title no longer replaces it.
+    #[serde(default)]
+    pub named: bool,
 }
 
 impl Default for Config {
@@ -171,6 +177,7 @@ impl Config {
                         store: g.extra.store.clone(),
                         collapsed: g.extra.collapsed,
                         detached: g.extra.detached,
+                        named: g.extra.named,
                         tabs: g.tabs.iter().map(config_tab).collect(),
                     })
                     .collect(),
@@ -184,6 +191,7 @@ fn config_tab(t: &DocTab) -> ConfigTab {
         title: t.title.clone(),
         url: t.url.clone(),
         detached: t.detached,
+        named: t.named,
     }
 }
 
@@ -286,8 +294,16 @@ mod tests {
         "tab",
         "group",
     ];
-    const GROUP_KEYS: [&str; 6] = ["name", "url", "store", "collapsed", "detached", "tab"];
-    const TAB_KEYS: [&str; 3] = ["title", "url", "detached"];
+    const GROUP_KEYS: [&str; 7] = [
+        "name",
+        "url",
+        "store",
+        "collapsed",
+        "detached",
+        "named",
+        "tab",
+    ];
+    const TAB_KEYS: [&str; 4] = ["title", "url", "detached", "named"];
 
     const FOLDER: &str = "https://drive.google.com/drive/folders/0AbCdEfGhIjKlMnOpQ";
     const SHEET: &str = "https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOpQrSt04/edit";
@@ -348,8 +364,9 @@ mod tests {
              [[window]]\ntitle = \"Club\"\ncolour = \"#2A6F4E\"\nwidth = 1200\nheight = 800\n\
              open_on_start = false\nopen_tabs_section = false\n\
              [[window.group]]\nname = \"Newsletters\"\nurl = \"{FOLDER}\"\nstore = \"club\"\n\
-             collapsed = true\ndetached = true\n\
-             [[window.group.tab]]\ntitle = \"Budget\"\nurl = \"{SHEET}\"\ndetached = true\n"
+             collapsed = true\ndetached = true\nnamed = true\n\
+             [[window.group.tab]]\ntitle = \"Budget\"\nurl = \"{SHEET}\"\ndetached = true\n\
+             named = true\n"
         ))
         .unwrap();
         assert_eq!(cfg.density, Density::Compact);
@@ -371,6 +388,7 @@ mod tests {
                 store: "club".into(),
                 collapsed: true,
                 detached: true,
+                named: true,
             }
         );
         assert_eq!(
@@ -379,6 +397,7 @@ mod tests {
                 title: "Budget".into(),
                 url: SHEET.into(),
                 detached: true,
+                named: true,
             }]
         );
     }
@@ -425,10 +444,12 @@ mod tests {
                     store: DEFAULT_STORE.into(),
                     collapsed: true,
                     detached: false,
+                    named: false,
                     tabs: vec![ConfigTab {
                         title: "Budget".into(),
                         url: SHEET.into(),
                         detached: true,
+                        named: false,
                     }],
                 }],
             }]

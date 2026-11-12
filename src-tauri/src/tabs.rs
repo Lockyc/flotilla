@@ -4,7 +4,7 @@
 //! config window (and so the workspace window) by title.
 
 use crate::state::AppState;
-use flotilla_core::identity::{is_tab_id, page_title};
+use flotilla_core::identity::{identity, is_tab_id, page_title};
 use flotilla_core::model::{Opened, TabId, WindowWs, Workspace};
 use flotilla_core::nav::{self, Decision};
 use shell_core::compositing::HoleRect;
@@ -153,25 +153,22 @@ pub fn plan(
     }
 }
 
-/// Whether a page's reported title replaces the tab's stored one: only while the stored title is
-/// still the tab's URL (what a new group or document is written with), alone or suffixed unique in
-/// its window ("<url> 2"), so a name is written once and never follows navigation. A page
+/// Whether a page's reported title replaces the tab's stored one: the tab's name follows its own
+/// document's title until the user names it, and never another page it navigated to. A page
 /// reports an empty title while it loads.
-pub fn adopt_title(stored: &str, home_url: &str, reported: &str) -> bool {
-    let named_by_url = stored == home_url
-        || stored
-            .strip_prefix(home_url)
-            .and_then(|rest| rest.strip_prefix(' '))
-            .is_some_and(|n| n.parse::<u32>().is_ok());
-    named_by_url && !reported.trim().is_empty() && reported != stored
+pub fn adopt_title(named: bool, at_home: bool, stored: &str, reported: &str) -> bool {
+    !named && at_home && !reported.trim().is_empty() && reported != stored
 }
 
-/// Gives tab `id` the page's reported title when [`adopt_title`] says so; whether it did.
-pub fn retitled(ws: &mut Workspace, id: &TabId, reported: &str) -> bool {
+/// Gives tab `id` the title `page` reports when [`adopt_title`] says so; whether it did. `page` is
+/// the URL it shows (`None`: unknown), at home when it is the tab's own document or folder.
+pub fn retitled(ws: &mut Workspace, id: &TabId, page: Option<&Url>, reported: &str) -> bool {
     let name = page_title(reported.trim());
-    let adopt = ws
-        .find(id)
-        .is_some_and(|(_, _, t)| adopt_title(&t.title, &t.home_url, name));
+    let adopt = ws.find(id).is_some_and(|(_, g, t)| {
+        let store = g.map_or(crate::config::DEFAULT_STORE, |g| g.store.as_str());
+        let at_home = page.is_some_and(|p| identity(store, p) == t.key);
+        adopt_title(t.named, at_home, &t.title, name)
+    });
     if adopt {
         ws.set_title(id, name);
     }
@@ -516,7 +513,8 @@ fn retitle(app: &AppHandle, label: &str, title: &str) {
     let Some((_, id)) = tab_of(label) else {
         return;
     };
-    if crate::write::through(app, |ws| retitled(ws, &id, title)) {
+    let page = current_url(app, &id);
+    if crate::write::through(app, |ws| retitled(ws, &id, page.as_ref(), title)) {
         push_dto(app);
     } else {
         // A new page title is a new page: Set Home to Current Page may have changed.
@@ -710,34 +708,45 @@ mod tests {
     }
 
     #[test]
-    fn title_is_adopted_only_while_it_is_the_url() {
-        // A new tab's stored title is its URL: the page's first real title replaces it.
-        assert!(adopt_title(DOC_A, DOC_A, "Budget"));
+    fn title_is_adopted_at_home_until_the_user_names_it() {
+        // The tab's own page: its title replaces the stored one, the URL or an older title.
+        assert!(adopt_title(false, true, DOC_A, "Budget"));
+        assert!(adopt_title(false, true, "Budget", "Budget 2026"));
         // A loading page reports nothing worth keeping.
-        assert!(!adopt_title(DOC_A, DOC_A, ""));
-        assert!(!adopt_title(DOC_A, DOC_A, "  "));
-        // Once named, the page never renames it.
-        assert!(!adopt_title("Budget", DOC_A, "Budget 2026"));
-        // A URL name suffixed unique in its window is still the URL.
-        assert!(adopt_title(&format!("{DOC_A} 2"), DOC_A, "Budget"));
-        assert!(!adopt_title(&format!("{DOC_A} two"), DOC_A, "Budget"));
+        assert!(!adopt_title(false, true, DOC_A, ""));
+        assert!(!adopt_title(false, true, DOC_A, "  "));
+        // Another page the tab navigated to never names it.
+        assert!(!adopt_title(false, false, "Budget", "Subfolder"));
+        // Once the user names it, the page never renames it.
+        assert!(!adopt_title(true, true, "Club budget", "Budget 2026"));
     }
 
     #[test]
-    fn a_renamed_tab_keeps_its_name_after_navigation() {
+    fn a_tab_follows_its_documents_title_until_renamed() {
         let (mut ws, h, _, b) = ws();
         let title = |ws: &Workspace, id: &TabId| ws.find(id).unwrap().2.title.clone();
+        let (doc, folder) = (url(DOC_B), url("https://drive.google.com/drive/folders/f1"));
+        let sub = url("https://drive.google.com/drive/folders/sub");
         assert_eq!(title(&ws, &b), DOC_B);
         // The page loads: the URL title gives way to the page's, without Google's app name.
-        assert!(retitled(&mut ws, &b, "Budget - Google Docs"));
+        assert!(retitled(&mut ws, &b, Some(&doc), "Budget - Google Docs"));
         assert_eq!(title(&ws, &b), "Budget");
-        // The user renames it; navigating inside it reports other titles, which are ignored.
-        ws.set_title(&b, "Club budget");
-        assert!(!retitled(&mut ws, &b, "Budget – Sheet 2"));
+        // The document is renamed: the tab follows.
+        assert!(retitled(
+            &mut ws,
+            &b,
+            Some(&doc),
+            "Budget 2026 - Google Docs"
+        ));
+        assert_eq!(title(&ws, &b), "Budget 2026");
+        // The user renames it; the page's titles are ignored from then on.
+        ws.rename(&b, "Club budget");
+        assert!(!retitled(&mut ws, &b, Some(&doc), "Budget 2027"));
         assert_eq!(title(&ws, &b), "Club budget");
-        // A head named by its page keeps that name while it browses subfolders.
-        assert!(retitled(&mut ws, &h, "Auction 2026"));
-        assert!(!retitled(&mut ws, &h, "Subfolder"));
+        // A head follows its folder's title, never a subfolder's.
+        assert!(retitled(&mut ws, &h, Some(&folder), "Auction 2026"));
+        assert!(!retitled(&mut ws, &h, Some(&sub), "Subfolder"));
+        assert!(!retitled(&mut ws, &h, None, "Subfolder"));
         assert_eq!(title(&ws, &h), "Auction 2026");
     }
 
