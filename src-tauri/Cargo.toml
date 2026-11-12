@@ -36,7 +36,7 @@ flotilla-core = { path = "../crates/flotilla-core" }
 dirs = "5"
 toml = "0.8"
 # House-style formatter, starter-config seeding and path resolution, shared with curator, warden and lector. Pinned by rev, same as curator.
-config-core = { git = "https://github.com/Lockyc/config-core", rev = "4742a5c766ed0f1a6a6fef5e8830a18964463c23" }
+config-core = { git = "https://github.com/Lockyc/config-core", rev = "fe0602ab719210538d3210b10f44be5cfb4579e0" }
 url = "2"
 # Google Drive access (OAuth + REST). reqwest keeps the rustls backend the updater already resolves.
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls-no-provider"] }
