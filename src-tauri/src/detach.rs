@@ -142,8 +142,7 @@ fn open(app: &AppHandle, t: &Target) -> Result<(), String> {
         colour,
         width: FIRST_SIZE.0,
         height: FIRST_SIZE.1,
-        panes: vec![],
-        pane_band: None,
+        page: None,
     };
     let label = open_detached(app, &t.id, &spec, "flotilla", |win, size| {
         tabs::create(
