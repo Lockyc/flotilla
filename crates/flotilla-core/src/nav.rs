@@ -58,6 +58,7 @@ mod tests {
 
     fn one_window() -> Workspace {
         Workspace::from_config(&[ConfigWindow {
+            store: "default".into(),
             unsorted: vec![],
             title: "W".into(),
             groups: vec![],
@@ -65,7 +66,7 @@ mod tests {
     }
 
     fn new_group(w: &mut Workspace, u: &Url) -> Opened {
-        w.new_group("W", u, "default").unwrap()
+        w.new_group("W", u).unwrap()
     }
 
     fn head(w: &mut Workspace) -> TabId {

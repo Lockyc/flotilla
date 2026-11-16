@@ -10,7 +10,15 @@
 //! every window, detached tabs included; opening it again raises the existing tab in its own
 //! window. The registry is not a separate index: it is derived by scanning the tabs, so it cannot
 //! drift from them.
+//!
+//! Every tab opens in a login store, resolved through config-core's session cascade: the tab's
+//! own `session`, else its group's, else its window's (which already folds in the app-wide one,
+//! [`WindowWs::store`]), else `default`. Each level keeps only its own setting ([`Tab::session`],
+//! [`Group::session`]); the resolved store of a tab is its key's, and a group's is
+//! [`Group::store`]. A tab or group moved to another level re-resolves, and so takes its new
+//! place's store unless it sets its own.
 
+use config_core::session::resolve;
 use crate::identity::{doc_key, fnv1a, head_key, identity, tab_id, DocKey};
 use crate::nav::parse_group_url;
 use serde::{Deserialize, Serialize};
@@ -21,8 +29,8 @@ use url::Url;
 /// Closed groups kept in `Workspace::recent`; the oldest is dropped past this.
 pub const RECENT_CAP: usize = 20;
 
-/// The login store a group without `store` opens in, and every Unsorted document.
-pub const DEFAULT_STORE: &str = "default";
+/// The login store a tab opens in when no level of its config sets a `session`.
+pub use config_core::DEFAULT_SESSION as DEFAULT_STORE;
 
 /// `"t-<16 hex>"`, the [`tab_id`] of the tab's key: open-once makes it unique app-wide, and it is
 /// the same across reloads, reorders and moves between windows.
@@ -36,11 +44,15 @@ pub struct Tab {
     /// The user named it ([`Workspace::rename`]): its page's title no longer replaces `title`.
     #[serde(default)]
     pub named: bool,
-    /// What this tab is, scoped by its group's store: the document it shows, or for a head that
-    /// is not a document, its `head_key`. Open-once compares these.
+    /// What this tab is, scoped by the login store it opens in: the document it shows, or for a
+    /// head that is not a document, its `head_key`. Open-once compares these.
     pub key: DocKey,
     /// Popped out into its own window. Still open for the one-copy rule.
     pub detached: bool,
+    /// The tab's own `session`: set only when it opens in another store than its place would
+    /// give it. Always `None` on a head, whose level is its group's.
+    #[serde(default)]
+    pub session: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,8 +60,11 @@ pub struct Group {
     pub head: Tab,
     pub members: Vec<Tab>,
     pub collapsed: bool,
-    /// The login store (profile) every tab in the group is open in.
+    /// The store the group resolves to: its head's, and every member's that sets none of its own.
     pub store: String,
+    /// The group's own `session`: set only when it differs from its window's store.
+    #[serde(default)]
+    pub session: Option<String>,
 }
 
 /// One window's groups, and the tab it shows.
@@ -57,8 +72,12 @@ pub struct Group {
 pub struct WindowWs {
     /// The config window's title, which names it in the session.
     pub title: String,
-    /// Documents in no group, listed before the groups, in [`DEFAULT_STORE`]: where a handed
-    /// document lands when it names no group of the window.
+    /// The store the window resolves to (its `session`, else the app's, else
+    /// [`DEFAULT_STORE`]): what its groups and Unsorted documents open in unless they set their
+    /// own.
+    pub store: String,
+    /// Documents in no group, listed before the groups: where a handed document lands when it
+    /// names no group of the window.
     pub unsorted: Vec<Tab>,
     pub groups: Vec<Group>,
     /// The tab the window shows. Never a detached tab: activating one leaves this as it is and
@@ -113,6 +132,8 @@ pub enum Handed {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ConfigWindow {
     pub title: String,
+    /// The window's resolved store: its `session`, else the app's, else [`DEFAULT_STORE`].
+    pub store: String,
     /// The window's `[[window.tab]]`s: its Unsorted documents.
     pub unsorted: Vec<ConfigTab>,
     pub groups: Vec<ConfigGroup>,
@@ -126,12 +147,13 @@ pub enum Dest<'a> {
     Unsorted(&'a str),
 }
 
-/// A config `[[window.group]]`: its name, head `url`, store and members. `detached` is the head's.
+/// A config `[[window.group]]`: its name, head `url`, own `session` and members. `detached` is
+/// the head's.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ConfigGroup {
     pub name: String,
     pub url: String,
-    pub store: String,
+    pub session: Option<String>,
     pub collapsed: bool,
     pub detached: bool,
     pub named: bool,
@@ -145,6 +167,7 @@ pub struct ConfigTab {
     pub url: String,
     pub detached: bool,
     pub named: bool,
+    pub session: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -194,6 +217,7 @@ fn tab(url: &Url, title: &str, store: &str, detached: bool) -> Tab {
         named: false,
         key,
         detached,
+        session: None,
     }
 }
 
@@ -203,6 +227,39 @@ fn rekey(t: &mut Tab, store: &str) {
     if let Ok(url) = Url::parse(&t.home_url) {
         t.key = identity(store, &url);
         t.id = tab_id(&t.key);
+    }
+}
+
+/// The store a tab or group whose own `session` is `own` opens in, under a place resolving to
+/// `inherited`.
+fn store_under(own: Option<&str>, inherited: &str) -> String {
+    resolve([own, Some(inherited)])
+}
+
+/// The own `session` a level keeps to open in `store` under a place resolving to `inherited`:
+/// none when the place already gives it.
+fn own_session(store: &str, inherited: &str) -> Option<String> {
+    (store != inherited).then(|| store.to_string())
+}
+
+/// Seats `t` under a place resolving to `inherited`: re-keyed into the store its own session
+/// names, else `inherited`.
+fn reseat(t: &mut Tab, inherited: &str) {
+    let store = store_under(t.session.as_deref(), inherited);
+    if t.key.store != store {
+        rekey(t, &store);
+    }
+    t.session = own_session(&store, inherited);
+}
+
+/// Seats group `g` in a window resolving to `window_store`: its store re-resolved, its head and
+/// members re-keyed to match.
+fn reseat_group(g: &mut Group, window_store: &str) {
+    g.store = store_under(g.session.as_deref(), window_store);
+    g.session = own_session(&g.store, window_store);
+    reseat(&mut g.head, &g.store);
+    for m in &mut g.members {
+        reseat(m, &g.store);
     }
 }
 
@@ -220,6 +277,14 @@ impl Workspace {
             t.named = named;
             Some(t)
         };
+        // A tab under a place resolving to `inherited`, keeping its own session only when it
+        // differs, as a write would leave it.
+        let leaf = |t: &ConfigTab, inherited: &str| {
+            let store = store_under(t.session.as_deref(), inherited);
+            let mut out = configured(&t.url, &t.title, &store, t.detached, t.named)?;
+            out.session = own_session(&store, inherited);
+            Some(out)
+        };
         let mut seen: Vec<DocKey> = vec![];
         let mut claim = |t: &Tab| {
             let fresh = !seen.contains(&t.key);
@@ -229,36 +294,37 @@ impl Workspace {
             fresh
         };
         // Heads first, each with the config group it came from.
-        let heads: Vec<Vec<(&ConfigGroup, Tab)>> = windows
+        let heads: Vec<Vec<(&ConfigGroup, String, Tab)>> = windows
             .iter()
             .map(|w| {
                 w.groups
                     .iter()
                     .filter_map(|g| {
-                        let head = configured(&g.url, &g.name, &g.store, g.detached, g.named)?;
-                        Some((g, head))
+                        let store = store_under(g.session.as_deref(), &w.store);
+                        let head = configured(&g.url, &g.name, &store, g.detached, g.named)?;
+                        Some((g, store, head))
                     })
-                    .filter(|(_, head)| claim(head))
+                    .filter(|(_, _, head)| claim(head))
                     .collect()
             })
             .collect();
         let groups: Vec<Vec<Group>> = heads
             .into_iter()
-            .map(|heads| {
+            .zip(windows)
+            .map(|(heads, w)| {
                 heads
                     .into_iter()
-                    .map(|(g, head)| Group {
+                    .map(|(g, store, head)| Group {
                         head,
                         members: g
                             .tabs
                             .iter()
-                            .filter_map(|t| {
-                                configured(&t.url, &t.title, &g.store, t.detached, t.named)
-                            })
+                            .filter_map(|t| leaf(t, &store))
                             .filter(|t| claim(t))
                             .collect(),
                         collapsed: g.collapsed,
-                        store: g.store.clone(),
+                        session: own_session(&store, &w.store),
+                        store,
                     })
                     .collect()
             })
@@ -268,12 +334,11 @@ impl Workspace {
             .zip(groups)
             .map(|(w, groups)| WindowWs {
                 title: w.title.trim().to_string(),
+                store: w.store.clone(),
                 unsorted: w
                     .unsorted
                     .iter()
-                    .filter_map(|t| {
-                        configured(&t.url, &t.title, DEFAULT_STORE, t.detached, t.named)
-                    })
+                    .filter_map(|t| leaf(t, &w.store))
                     .filter(|t| claim(t))
                     .collect(),
                 groups,
@@ -398,7 +463,7 @@ impl Workspace {
             rekey(&mut g.head, &store);
             let mut seen = vec![g.head.key.clone()];
             for m in &mut g.members {
-                rekey(m, &store);
+                rekey(m, &store_under(m.session.as_deref(), &store));
             }
             g.members.retain(|m| {
                 let fresh = !seen.contains(&m.key);
@@ -435,10 +500,15 @@ impl Workspace {
         })
     }
 
-    /// The login store tab `id` is open in: its group's, else (in Unsorted) [`DEFAULT_STORE`].
+    /// The login store tab `id` is open in.
     pub fn store_of(&self, id: &TabId) -> Option<&str> {
-        let (wi, gi) = self.locate(id)?;
-        Some(gi.map_or(DEFAULT_STORE, |gi| &self.windows[wi].groups[gi].store))
+        self.find(id).map(|(_, _, t)| t.key.store.as_str())
+    }
+
+    /// The store a tab placed in window `wi`, in its group `gi` (`None`: Unsorted), inherits.
+    fn place_store(&self, wi: usize, gi: Option<usize>) -> &str {
+        let w = &self.windows[wi];
+        gi.map_or(&w.store, |gi| &w.groups[gi].store)
     }
 
     /// The index of the window titled `title` (compared trimmed).
@@ -493,21 +563,29 @@ impl Workspace {
         Opened::Raised(id)
     }
 
-    /// Opens `url` as a new group head in `store` at the end of window `window`. Raises instead
-    /// when a tab with the same identity (`identity`) is open in any window. `None` when there is
-    /// no such window.
-    pub fn new_group(&mut self, window: &str, url: &Url, store: &str) -> Option<Opened> {
+    /// Opens `url` as a new group head in the window's store at the end of window `window`.
+    /// Raises instead when a tab with the same identity (`identity`) is open in any window.
+    /// `None` when there is no such window.
+    pub fn new_group(&mut self, window: &str, url: &Url) -> Option<Opened> {
+        let store = self.windows[self.window_index(window)?].store.clone();
+        self.new_group_in(window, url, &store)
+    }
+
+    /// [`Self::new_group`], the group setting its own `store` where it differs from the window's.
+    pub(crate) fn new_group_in(&mut self, window: &str, url: &Url, store: &str) -> Option<Opened> {
+        let wi = self.window_index(window)?;
         if let Some(id) = self.open_doc(&identity(store, url)) {
             return Some(self.raise(id));
         }
-        let wi = self.window_index(window)?;
         let head = tab(url, url.as_str(), store, false);
         let id = head.id.clone();
+        let session = own_session(store, &self.windows[wi].store);
         self.windows[wi].groups.push(Group {
             head,
             members: vec![],
             collapsed: false,
             store: store.to_string(),
+            session,
         });
         self.activate(&id);
         Some(Opened::Added(id))
@@ -515,7 +593,8 @@ impl Workspace {
 
     /// Opens document `url` from tab `from`, joining `from`'s group (or, from Unsorted, its
     /// window's Unsorted) at the end. `None` when `url` is not a document or `from` is not open.
-    /// An already-open document is raised wherever it is, in whichever window.
+    /// An already-open document is raised wherever it is, in whichever window. It opens in
+    /// `from`'s store, the login its link was followed in.
     pub fn open_from(&mut self, from: &TabId, url: &Url) -> Option<Opened> {
         let (wi, gi) = self.locate(from)?;
         let store = self.store_of(from)?.to_string();
@@ -523,7 +602,8 @@ impl Workspace {
         if let Some(id) = self.open_doc(&key) {
             return Some(self.raise(id));
         }
-        let t = tab(url, url.as_str(), &store, false);
+        let mut t = tab(url, url.as_str(), &store, false);
+        t.session = own_session(&store, self.place_store(wi, gi));
         let id = t.id.clone();
         let w = &mut self.windows[wi];
         match gi {
@@ -537,11 +617,12 @@ impl Workspace {
     /// Opens document `url` at the end of window `wi`'s Unsorted, or raises it where it is open.
     /// `None` when `url` is not a document.
     fn open_unsorted(&mut self, wi: usize, url: &Url) -> Option<Opened> {
-        let key = doc_key(DEFAULT_STORE, url)?;
+        let store = self.windows[wi].store.clone();
+        let key = doc_key(&store, url)?;
         if let Some(id) = self.open_doc(&key) {
             return Some(self.raise(id));
         }
-        let t = tab(url, url.as_str(), DEFAULT_STORE, false);
+        let t = tab(url, url.as_str(), &store, false);
         let id = t.id.clone();
         self.windows[wi].unsorted.push(t);
         self.activate(&id);
@@ -627,14 +708,18 @@ impl Workspace {
     }
 
     /// Restores `recent[index]` as a group at the end of window `window` and activates its head.
-    /// Members whose document is now open elsewhere are left where they are. `None` (the entry
-    /// kept) when there is no such entry or window.
+    /// The entry first takes `window`'s store, unless it or a member sets its own. Members whose
+    /// document is now open elsewhere are left where they are. `None` (the entry kept) when there
+    /// is no such entry or window.
     ///
     /// If the head's identity is now open elsewhere, nothing is duplicated and that tab is raised
     /// and returned: when it is a head, the entry's other members join its group and the entry
-    /// leaves Recent; when it is a member, the entry stays in Recent untouched.
+    /// leaves Recent; when it is a member, the entry stays in Recent.
     pub fn reopen_recent(&mut self, window: &str, index: usize) -> Option<TabId> {
-        let entry = self.recent.get(index)?;
+        let wi = self.window_index(window)?;
+        let store = self.windows[wi].store.clone();
+        reseat_group(self.recent.get_mut(index)?, &store);
+        let entry = &self.recent[index];
         if let Some(occupant) = self.open_doc(&entry.head.key) {
             let (wi, gi) = self.locate(&occupant)?;
             let Some(gi) = gi.filter(|&gi| self.windows[wi].groups[gi].head.id == occupant) else {
@@ -647,7 +732,6 @@ impl Workspace {
             self.raise(occupant.clone());
             return Some(occupant);
         }
-        let wi = self.window_index(window)?;
         let mut group = self.recent.remove(index);
         group.members = self.restorable(group.members, &[group.head.key.clone()]);
         group.head.detached = false;
@@ -703,12 +787,15 @@ impl Workspace {
         let Some((list, at)) = self.doc_list_mut(member) else {
             return;
         };
-        let head = list.remove(at);
+        let mut head = list.remove(at);
+        head.session = None;
+        let session = own_session(&store, &self.windows[wi].store);
         self.windows[wi].groups.push(Group {
             head,
             members: vec![],
             collapsed: false,
             store,
+            session,
         });
         self.activate(member);
     }
@@ -761,17 +848,14 @@ impl Workspace {
         if (fw, fg) == (tw, tg) {
             return;
         }
-        let store = tg.map_or(DEFAULT_STORE, |tg| &self.windows[tw].groups[tg].store);
-        let store = store.to_string();
+        let inherited = self.place_store(tw, tg).to_string();
         let Some((list, at)) = self.doc_list_mut(member) else {
             return;
         };
         let mut moved = list[at].clone();
-        if self.store_of(member) != Some(&store) {
-            rekey(&mut moved, &store);
-            if self.open_doc(&moved.key).is_some() {
-                return;
-            }
+        reseat(&mut moved, &inherited);
+        if &moved.id != member && self.open_doc(&moved.key).is_some() {
+            return;
         }
         let was_active = self.windows[fw].active.as_ref() == Some(member);
         let neighbour = (was_active && fw != tw)
@@ -904,10 +988,10 @@ impl Workspace {
         Handed::Queued(id)
     }
 
-    /// Takes a link handed to window `window` in `store`. A link that is not a web link is queued
-    /// with its reason; one open already, in any window, is raised; a document joins the group
-    /// of that window whose head is titled `group`, else opens under the window's Unsorted;
-    /// anything else heads a new group in the window. A link opened leaves the queue, wherever it
+    /// Takes a link handed to window `window`, in the store of the place it lands. A link that is
+    /// not a web link is queued with its reason; one open already, in any window, is raised; a
+    /// document joins the group of that window whose head is titled `group`, else opens under the
+    /// window's Unsorted; anything else heads a new group in the window. A link opened leaves the queue, wherever it
     /// waited. With no window at all, the link is queued in `stray`, with its reason if it is not
     /// a web link. `None`, and nothing done, when the link is blank, or there is no such window
     /// but others.
@@ -916,7 +1000,6 @@ impl Workspace {
         window: &str,
         group: Option<&str>,
         link: &str,
-        store: &str,
     ) -> Option<Handed> {
         if link.trim().is_empty() {
             return None;
@@ -929,13 +1012,14 @@ impl Workspace {
             Ok(url) => url,
             Err(problem) => return Some(self.enqueue(Some(wi), link, Some(problem))),
         };
-        if let Some(id) = self.open_doc(&identity(store, &url)) {
+        let store = self.windows[wi].store.clone();
+        if let Some(id) = self.open_doc(&identity(&store, &url)) {
             self.activate(&id);
             self.dismiss_incoming(&incoming_id(link));
             return Some(Handed::Raised(id));
         }
-        if doc_key(store, &url).is_none() {
-            let opened = self.new_group(window, &url, store)?;
+        if doc_key(&store, &url).is_none() {
+            let opened = self.new_group(window, &url)?;
             self.dismiss_incoming(&incoming_id(link));
             return Some(Handed::Grouped(opened_id(opened)));
         }
@@ -991,14 +1075,14 @@ impl Workspace {
         Some(opened)
     }
 
-    /// Opens Incoming item `id` as a new group in `store` in its own window ([`Self::new_group`])
-    /// and takes it off the queue. `None`, the item kept, when there is no such item or it is not
-    /// a web link.
-    pub fn incoming_as_group(&mut self, id: &str, store: &str) -> Option<Opened> {
+    /// Opens Incoming item `id` as a new group in its own window ([`Self::new_group`]) and takes
+    /// it off the queue. `None`, the item kept, when there is no such item or it is not a web
+    /// link.
+    pub fn incoming_as_group(&mut self, id: &str) -> Option<Opened> {
         let (wi, ii) = self.incoming_at(id)?;
         let url = parse_group_url(&self.windows[wi].incoming[ii].link).ok()?;
         let window = self.windows[wi].title.clone();
-        let opened = self.new_group(&window, &url, store)?;
+        let opened = self.new_group(&window, &url)?;
         self.windows[wi].incoming.remove(ii);
         Some(opened)
     }
@@ -1137,6 +1221,7 @@ mod tests {
     fn window(title: &str) -> ConfigWindow {
         ConfigWindow {
             unsorted: vec![],
+            store: DEFAULT_STORE.into(),
             title: title.into(),
             groups: vec![],
         }
@@ -1148,7 +1233,7 @@ mod tests {
     }
 
     fn head_of(w: &mut Workspace, n: u32) -> TabId {
-        id(w.new_group(W, &folder(n), "default").unwrap())
+        id(w.new_group(W, &folder(n)).unwrap())
     }
 
     fn member_ids(w: &Workspace, head: &TabId) -> Vec<TabId> {
@@ -1172,7 +1257,7 @@ mod tests {
         ConfigGroup {
             name: name.into(),
             url: url.to_string(),
-            store: store.into(),
+            session: (store != DEFAULT_STORE).then(|| store.into()),
             collapsed: false,
             detached: false,
             named: false,
@@ -1183,6 +1268,7 @@ mod tests {
                     url: u.to_string(),
                     detached: false,
                     named: false,
+                    session: None,
                 })
                 .collect(),
         }
@@ -1193,6 +1279,7 @@ mod tests {
         vec![
             ConfigWindow {
                 unsorted: vec![],
+                store: DEFAULT_STORE.into(),
                 title: "A".into(),
                 groups: vec![cgroup(
                     "One",
@@ -1203,6 +1290,7 @@ mod tests {
             },
             ConfigWindow {
                 unsorted: vec![],
+                store: DEFAULT_STORE.into(),
                 title: "B".into(),
                 groups: vec![cgroup("Two", &folder(2), "default", &[("Roster", &doc(3))])],
             },
@@ -1218,6 +1306,7 @@ mod tests {
             url: doc(3).to_string(),
             detached: false,
             named: false,
+            session: None,
         });
         cfg[1].groups.push(cgroup("Three", &doc(4), "default", &[]));
         cfg[1].groups[1].url = doc(3).to_string();
@@ -1317,7 +1406,7 @@ mod tests {
         // A new group on a document open in another window raises it there too.
         let budget = w.windows[0].groups[0].members[0].id.clone();
         assert_eq!(
-            w.new_group("B", &doc(1), "default"),
+            w.new_group("B", &doc(1)),
             Some(Opened::Raised(budget.clone()))
         );
         assert_eq!(w.windows[0].active, Some(budget));
@@ -1362,6 +1451,7 @@ mod tests {
         let budget = w.windows[0].groups[0].members[0].id.clone();
         let mut recent = Workspace::from_config(&[ConfigWindow {
             unsorted: vec![],
+            store: DEFAULT_STORE.into(),
             title: "X".into(),
             groups: vec![cgroup("Old", &folder(9), "default", &[("D", &doc(9))])],
         }])
@@ -1438,23 +1528,23 @@ mod tests {
         let h1 = head_of(&mut w, 1);
         let _h2 = head_of(&mut w, 2);
         assert_eq!(
-            w.new_group(W, &folder(1), "default"),
+            w.new_group(W, &folder(1)),
             Some(Opened::Raised(h1.clone()))
         );
         assert_eq!(groups(&w).len(), 2);
         assert_eq!(active(&w), Some(h1.clone()));
         // an open member's doc raises the member
         let d = id(w.open_from(&h1, &doc(1)).unwrap());
-        assert_eq!(w.new_group(W, &doc(1), "default"), Some(Opened::Raised(d)));
+        assert_eq!(w.new_group(W, &doc(1)), Some(Opened::Raised(d)));
         assert_eq!(groups(&w).len(), 2);
         // a window that does not exist takes nothing
-        assert_eq!(w.new_group("nowhere", &folder(5), "default"), None);
+        assert_eq!(w.new_group("nowhere", &folder(5)), None);
     }
 
     #[test]
     fn a_document_head_occupies_its_doc_key() {
         let mut w = ws();
-        let h1 = id(w.new_group(W, &doc(1), "default").unwrap());
+        let h1 = id(w.new_group(W, &doc(1)).unwrap());
         let h2 = head_of(&mut w, 2);
         assert_eq!(w.open_from(&h2, &doc(1)), Some(Opened::Raised(h1)));
     }
@@ -1519,7 +1609,7 @@ mod tests {
     #[test]
     fn reopen_recent_into_another_window() {
         let mut w = Workspace::from_config(&[window("A"), window("B")]);
-        let h = id(w.new_group("A", &folder(1), "default").unwrap());
+        let h = id(w.new_group("A", &folder(1)).unwrap());
         w.close_group(&h, &Default::default());
         assert_eq!(w.reopen_recent("nowhere", 0), None);
         assert_eq!(w.recent.len(), 1);
@@ -1541,7 +1631,7 @@ mod tests {
     #[test]
     fn make_own_group_lifts_a_member_to_a_head() {
         let mut w = ws();
-        let h = id(w.new_group(W, &folder(1), "work").unwrap());
+        let h = id(w.new_group_in(W, &folder(1), "work").unwrap());
         let d = id(w.open_from(&h, &doc(1)).unwrap());
         head_of(&mut w, 2);
         w.make_own_group(&d);
@@ -1587,7 +1677,7 @@ mod tests {
     fn with_unsorted() -> (Workspace, TabId, TabId) {
         let mut w = ws();
         let h = head_of(&mut w, 1);
-        let Some(Handed::Unsorted(d)) = w.receive(W, None, doc(1).as_str(), "default") else {
+        let Some(Handed::Unsorted(d)) = w.receive(W, None, doc(1).as_str()) else {
             panic!()
         };
         (w, h, d)
@@ -1617,7 +1707,7 @@ mod tests {
     #[test]
     fn moving_into_unsorted_rekeys_to_the_default_store() {
         let mut w = ws();
-        let work = id(w.new_group(W, &folder(2), "work").unwrap());
+        let work = id(w.new_group_in(W, &folder(2), "work").unwrap());
         let d = id(w.open_from(&work, &doc(1)).unwrap());
         w.move_tab(&d, Dest::Unsorted(W), &Default::default());
         let moved = &w.windows[0].unsorted[0];
@@ -1625,7 +1715,7 @@ mod tests {
         assert_ne!(moved.id, d);
         // Refused while the document is open in the default store already.
         let e = id(w.open_from(&work, &doc(2)).unwrap());
-        let Some(Handed::Unsorted(_)) = w.receive(W, None, doc(2).as_str(), "default") else {
+        let Some(Handed::Unsorted(_)) = w.receive(W, None, doc(2).as_str()) else {
             panic!()
         };
         w.move_tab(&e, Dest::Unsorted(W), &Default::default());
@@ -1664,29 +1754,33 @@ mod tests {
     fn from_config_reads_unsorted_and_never_drops_a_member_for_it() {
         let w = Workspace::from_config(&[ConfigWindow {
             title: W.into(),
+            store: DEFAULT_STORE.into(),
             unsorted: vec![
                 ConfigTab {
                     title: "Loose".into(),
                     url: doc(1).to_string(),
                     detached: false,
                     named: false,
+                    session: None,
                 },
                 ConfigTab {
                     title: "Twice".into(),
                     url: doc(2).to_string(),
                     detached: false,
                     named: false,
+                    session: None,
                 },
             ],
             groups: vec![ConfigGroup {
                 name: "G".into(),
                 url: folder(1).to_string(),
-                store: DEFAULT_STORE.into(),
+                session: None,
                 tabs: vec![ConfigTab {
                     title: "Member".into(),
                     url: doc(2).to_string(),
                     detached: false,
                     named: false,
+                    session: None,
                 }],
                 ..Default::default()
             }],
@@ -1780,26 +1874,26 @@ mod tests {
     #[test]
     fn identity_is_scoped_by_store_not_by_role() {
         let mut w = ws();
-        let h1 = id(w.new_group(W, &doc(1), "default").unwrap());
-        let work = id(w.new_group(W, &folder(2), "work").unwrap());
+        let h1 = id(w.new_group(W, &doc(1)).unwrap());
+        let work = id(w.new_group_in(W, &folder(2), "work").unwrap());
         // same doc, other store: a second tab is allowed
         let m = id(w.open_from(&work, &doc(1)).unwrap());
         assert_ne!(m, h1);
         w.make_own_group(&m);
         assert_eq!(groups(&w).len(), 3);
         // same doc, same store: raised, whether the tab is a head or a member
-        assert_eq!(w.new_group(W, &doc(1), "work"), Some(Opened::Raised(m)));
+        assert_eq!(w.new_group_in(W, &doc(1), "work"), Some(Opened::Raised(m)));
         assert_eq!(
-            w.new_group(W, &doc(1), "default"),
+            w.new_group(W, &doc(1)),
             Some(Opened::Raised(h1.clone()))
         );
         assert_eq!(
-            w.new_group(W, &folder(2), "work"),
+            w.new_group_in(W, &folder(2), "work"),
             Some(Opened::Raised(work))
         );
         // the same folder in another store is its own head
         assert!(matches!(
-            w.new_group(W, &folder(2), "default"),
+            w.new_group(W, &folder(2)),
             Some(Opened::Added(_))
         ));
     }
@@ -1824,7 +1918,7 @@ mod tests {
     #[test]
     fn reopen_recent_with_head_open_as_a_member_leaves_the_entry() {
         let mut w = ws();
-        let h1 = id(w.new_group(W, &doc(5), "default").unwrap());
+        let h1 = id(w.new_group(W, &doc(5)).unwrap());
         let kept = id(w.open_from(&h1, &doc(1)).unwrap());
         w.close_group(&h1, &Default::default());
         let h2 = head_of(&mut w, 2);
@@ -1885,7 +1979,7 @@ mod tests {
     fn moving_across_stores_rekeys_or_refuses_on_collision() {
         let mut w = ws();
         let h1 = head_of(&mut w, 1);
-        let work = id(w.new_group(W, &folder(2), "work").unwrap());
+        let work = id(w.new_group_in(W, &folder(2), "work").unwrap());
         let d = id(w.open_from(&h1, &doc(1)).unwrap());
         w.move_tab(&d, Dest::Group(&work), &Default::default());
         // Re-keyed into the work store, the tab's id is that key's.
@@ -2204,7 +2298,7 @@ mod tests {
     #[test]
     fn receive_opens_a_document_under_unsorted() {
         let (mut w, h1) = fleet();
-        let Some(Handed::Unsorted(d)) = w.receive(W, None, doc(1).as_str(), "default") else {
+        let Some(Handed::Unsorted(d)) = w.receive(W, None, doc(1).as_str()) else {
             panic!()
         };
         assert_eq!(unsorted_ids(&w, W), vec![d.clone()]);
@@ -2215,11 +2309,11 @@ mod tests {
         // Handed again, it is raised where it is.
         let again = format!("{}?usp=x", doc(1));
         assert_eq!(
-            w.receive("V", None, &again, "default"),
+            w.receive("V", None, &again),
             Some(Handed::Raised(d))
         );
         assert!(unsorted_ids(&w, "V").is_empty());
-        assert_eq!(w.receive("nowhere", None, doc(2).as_str(), "default"), None);
+        assert_eq!(w.receive("nowhere", None, doc(2).as_str()), None);
     }
 
     fn homes(w: &Workspace, head: &TabId) -> Vec<String> {
@@ -2234,7 +2328,7 @@ mod tests {
     #[test]
     fn sort_into_moves_an_unsorted_document() {
         let (mut w, h1) = fleet();
-        let Some(Handed::Unsorted(d)) = w.receive(W, None, doc(1).as_str(), "default") else {
+        let Some(Handed::Unsorted(d)) = w.receive(W, None, doc(1).as_str()) else {
             panic!()
         };
         assert_eq!(w.sort_into(&d, &h1, &HashSet::new()), Some(d.clone()));
@@ -2246,8 +2340,8 @@ mod tests {
     #[test]
     fn sort_into_another_store_answers_the_new_id() {
         let (mut w, _) = fleet();
-        let h = id(w.new_group("V", &folder(2), "work").unwrap());
-        let Some(Handed::Unsorted(d)) = w.receive(W, None, doc(1).as_str(), "default") else {
+        let h = id(w.new_group_in("V", &folder(2), "work").unwrap());
+        let Some(Handed::Unsorted(d)) = w.receive(W, None, doc(1).as_str()) else {
             panic!()
         };
         let moved = w.sort_into(&d, &h, &HashSet::new()).unwrap();
@@ -2260,7 +2354,7 @@ mod tests {
     fn sort_into_leaves_a_dragged_document() {
         let (mut w, h1) = fleet();
         let h2 = head_of(&mut w, 2);
-        let Some(Handed::Unsorted(d)) = w.receive(W, None, doc(1).as_str(), "default") else {
+        let Some(Handed::Unsorted(d)) = w.receive(W, None, doc(1).as_str()) else {
             panic!()
         };
         w.move_tab(&d, Dest::Group(&h2), &HashSet::new());
@@ -2275,7 +2369,7 @@ mod tests {
     fn sort_into_onto_a_member_does_nothing() {
         let (mut w, h1) = fleet();
         let m = id(w.open_from(&h1, &doc(2)).unwrap());
-        let Some(Handed::Unsorted(d)) = w.receive(W, None, doc(1).as_str(), "default") else {
+        let Some(Handed::Unsorted(d)) = w.receive(W, None, doc(1).as_str()) else {
             panic!()
         };
         assert_eq!(w.sort_into(&d, &m, &HashSet::new()), None);
@@ -2286,7 +2380,7 @@ mod tests {
     #[test]
     fn sort_into_with_a_closed_head_does_nothing() {
         let (mut w, h1) = fleet();
-        let Some(Handed::Unsorted(d)) = w.receive(W, None, doc(1).as_str(), "default") else {
+        let Some(Handed::Unsorted(d)) = w.receive(W, None, doc(1).as_str()) else {
             panic!()
         };
         w.close_group(&h1, &HashSet::new());
@@ -2318,10 +2412,10 @@ mod tests {
     fn receive_clears_a_share_link_waiting_for_its_document() {
         let mut w = Workspace::from_config(&[]);
         let share = "https://drive.google.com/open?id=1AbCdEfGhIjKlMnOpQrSt01";
-        queued(w.receive(W, None, share, "default"));
+        queued(w.receive(W, None, share));
         w.rebase(Workspace::from_config(&[window(W), window("V")]));
         assert_eq!(queue(&w, W), [share]);
-        let Some(Handed::Unsorted(_)) = w.receive("V", None, doc(1).as_str(), "default") else {
+        let Some(Handed::Unsorted(_)) = w.receive("V", None, doc(1).as_str()) else {
             panic!()
         };
         assert!(queue(&w, W).is_empty());
@@ -2331,10 +2425,10 @@ mod tests {
     #[test]
     fn receive_dismisses_a_queued_link_it_opens_as_a_group() {
         let mut w = Workspace::from_config(&[]);
-        queued(w.receive(W, None, "https://example.com/a", "default"));
+        queued(w.receive(W, None, "https://example.com/a"));
         w.rebase(Workspace::from_config(&[window(W)]));
         assert_eq!(queue(&w, W), ["https://example.com/a"]);
-        let Some(Handed::Grouped(_)) = w.receive(W, None, "https://example.com/a/", "default")
+        let Some(Handed::Grouped(_)) = w.receive(W, None, "https://example.com/a/")
         else {
             panic!()
         };
@@ -2345,11 +2439,11 @@ mod tests {
     #[test]
     fn receive_into_a_group_holding_it_in_its_store_raises_it() {
         let (mut w, _) = fleet();
-        let work = id(w.new_group(W, &folder(2), "work").unwrap());
+        let work = id(w.new_group_in(W, &folder(2), "work").unwrap());
         w.set_title(&work, "Work");
         let m = id(w.open_from(&work, &doc(1)).unwrap());
         assert_eq!(
-            w.receive(W, Some("Work"), doc(1).as_str(), "default"),
+            w.receive(W, Some("Work"), doc(1).as_str()),
             Some(Handed::Raised(m))
         );
     }
@@ -2357,7 +2451,7 @@ mod tests {
     #[test]
     fn receive_opens_a_folder_as_a_group_in_that_window() {
         let (mut w, _) = fleet();
-        let Some(Handed::Grouped(g)) = w.receive("V", None, folder(2).as_str(), "default") else {
+        let Some(Handed::Grouped(g)) = w.receive("V", None, folder(2).as_str()) else {
             panic!()
         };
         assert_eq!(w.windows[1].groups[0].head.id, g);
@@ -2372,7 +2466,7 @@ mod tests {
         let m = id(w.open_from(&h1, &doc(1)).unwrap());
         w.activate(&h1);
         assert_eq!(
-            w.receive("V", None, doc(1).as_str(), "default"),
+            w.receive("V", None, doc(1).as_str()),
             Some(Handed::Raised(m.clone()))
         );
         assert_eq!(active(&w), Some(m));
@@ -2380,7 +2474,7 @@ mod tests {
         assert!(queue(&w, W).is_empty(), "its row went with the raise");
         // An open folder is raised too.
         assert_eq!(
-            w.receive("V", None, folder(1).as_str(), "default"),
+            w.receive("V", None, folder(1).as_str()),
             Some(Handed::Raised(h1))
         );
         assert!(w.windows[1].groups.is_empty());
@@ -2391,7 +2485,7 @@ mod tests {
         let (mut w, h1) = fleet();
         queued(w.queue("V", doc(1).as_str(), None));
         let again = format!("{}?usp=x", doc(1));
-        let Some(Handed::Joined(m)) = w.receive(W, Some("Fleet"), &again, "default") else {
+        let Some(Handed::Joined(m)) = w.receive(W, Some("Fleet"), &again) else {
             panic!()
         };
         assert_eq!(member_ids(&w, &h1), vec![m.clone()]);
@@ -2404,7 +2498,7 @@ mod tests {
     fn receive_matches_a_group_name_trimmed_on_both_sides() {
         let (mut w, h1) = fleet();
         w.set_title(&h1, " Fleet ");
-        let Some(Handed::Joined(m)) = w.receive(W, Some("Fleet "), doc(1).as_str(), "default")
+        let Some(Handed::Joined(m)) = w.receive(W, Some("Fleet "), doc(1).as_str())
         else {
             panic!()
         };
@@ -2414,20 +2508,20 @@ mod tests {
     #[test]
     fn receive_ignores_a_blank_link() {
         let (mut w, _) = fleet();
-        assert_eq!(w.receive(W, None, "", "default"), None);
-        assert_eq!(w.receive(W, Some("Fleet"), "  \n", "default"), None);
+        assert_eq!(w.receive(W, None, ""), None);
+        assert_eq!(w.receive(W, Some("Fleet"), "  \n"), None);
         assert!(queue(&w, W).is_empty());
     }
 
     #[test]
     fn receive_into_a_missing_group_opens_under_unsorted() {
         let (mut w, h1) = fleet();
-        let Some(Handed::Unsorted(a)) = w.receive(W, Some("Gone"), doc(1).as_str(), "default")
+        let Some(Handed::Unsorted(a)) = w.receive(W, Some("Gone"), doc(1).as_str())
         else {
             panic!()
         };
         // A group of that name in another window is not this window's.
-        let Some(Handed::Unsorted(b)) = w.receive("V", Some("Fleet"), doc(2).as_str(), "default")
+        let Some(Handed::Unsorted(b)) = w.receive("V", Some("Fleet"), doc(2).as_str())
         else {
             panic!()
         };
@@ -2439,13 +2533,13 @@ mod tests {
     #[test]
     fn receive_queues_a_rejected_link_with_its_reason() {
         let (mut w, _) = fleet();
-        let id = queued(w.receive(W, None, "mailto:x", "default"));
+        let id = queued(w.receive(W, None, "mailto:x"));
         let item = &w.windows[0].incoming[0];
         assert_eq!(item.id, id);
         assert_eq!(item.link, "mailto:x");
         assert_eq!(item.problem.as_deref(), Some("Not a web link: mailto:x"));
         assert_eq!(
-            w.receive("V", None, " mailto:x ", "default"),
+            w.receive("V", None, " mailto:x "),
             Some(Handed::AlreadyQueued(id))
         );
     }
@@ -2493,7 +2587,7 @@ mod tests {
         assert_eq!(queue(&w, W), [doc(1).as_str()]);
         // A rejected link joins nothing either.
         let (mut w, h1) = fleet();
-        let r = queued(w.receive(W, None, "mailto:x", "default"));
+        let r = queued(w.receive(W, None, "mailto:x"));
         assert_eq!(w.add_incoming(&r, &h1), None);
         assert_eq!(queue(&w, W), ["mailto:x"]);
     }
@@ -2501,17 +2595,20 @@ mod tests {
     #[test]
     fn incoming_as_group_heads_a_group_in_its_window() {
         let (mut w, _) = fleet();
+        // It opens in its window's store, and the group sets none of its own.
+        w.windows[1].store = "work".into();
         let a = queued(w.queue("V", doc(1).as_str(), None));
-        let Some(Opened::Added(h)) = w.incoming_as_group(&a, "work") else {
+        let Some(Opened::Added(h)) = w.incoming_as_group(&a) else {
             panic!()
         };
         let g = &w.windows[1].groups[0];
         assert_eq!((g.head.id.clone(), g.store.as_str()), (h.clone(), "work"));
+        assert_eq!(g.session, None);
         assert_eq!(w.windows[1].active, Some(h));
         assert!(queue(&w, "V").is_empty());
         // A rejected item heads nothing and stays.
-        let r = queued(w.receive("V", None, "mailto:x", "work"));
-        assert_eq!(w.incoming_as_group(&r, "work"), None);
+        let r = queued(w.receive("V", None, "mailto:x"));
+        assert_eq!(w.incoming_as_group(&r), None);
         assert_eq!(queue(&w, "V"), ["mailto:x"]);
     }
 
@@ -2555,13 +2652,13 @@ mod tests {
     fn a_link_handed_with_no_window_waits_for_the_first() {
         let mut w = Workspace::from_config(&[]);
         let a = queued(w.queue("anything", doc(1).as_str(), None));
-        queued(w.receive("", None, folder(2).as_str(), "default"));
+        queued(w.receive("", None, folder(2).as_str()));
         let r = queued(w.reject("", "flotilla://open", "No link in flotilla://open".into()));
         assert_eq!(
-            w.receive("", None, doc(1).as_str(), "default"),
+            w.receive("", None, doc(1).as_str()),
             Some(Handed::AlreadyQueued(a))
         );
-        assert_eq!(w.receive("", None, " ", "default"), None);
+        assert_eq!(w.receive("", None, " "), None);
         assert_eq!(w.stray[""].len(), 3);
         w.rebase(Workspace::from_config(&[window(W)]));
         assert!(w.stray.is_empty());
@@ -2648,5 +2745,144 @@ mod tests {
         assert_eq!(w.windows[0].active, Some(a));
         assert_eq!(w.windows[1].active, Some(b));
         assert!(w.stray_active.is_empty());
+    }
+
+    fn ctab(title: &str, url: &Url, session: Option<&str>) -> ConfigTab {
+        ConfigTab {
+            title: title.into(),
+            url: url.to_string(),
+            session: session.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    /// Window "Admin" in store `admin`: group "Club" (folder 1) setting none, with doc 1 setting
+    /// none and doc 2 setting `me`; group "Mine" (folder 2) setting `me`, with doc 3; loose doc 4.
+    /// Window "Me" in the default store: group "Club" (folder 1 again) with doc 1 again.
+    fn cascade() -> Workspace {
+        let mut mine = cgroup("Mine", &folder(2), "me", &[("C", &doc(3))]);
+        mine.session = Some("me".into());
+        Workspace::from_config(&[
+            ConfigWindow {
+                title: "Admin".into(),
+                store: "admin".into(),
+                unsorted: vec![ctab("D", &doc(4), None)],
+                groups: vec![
+                    ConfigGroup {
+                        tabs: vec![ctab("A", &doc(1), None), ctab("B", &doc(2), Some("me"))],
+                        ..cgroup("Club", &folder(1), DEFAULT_STORE, &[])
+                    },
+                    mine,
+                ],
+            },
+            ConfigWindow {
+                title: "Me".into(),
+                store: DEFAULT_STORE.into(),
+                unsorted: vec![],
+                groups: vec![cgroup("Club", &folder(1), DEFAULT_STORE, &[("A", &doc(1))])],
+            },
+        ])
+    }
+
+    fn store_of_url(w: &Workspace, window: usize, url: &Url) -> Vec<String> {
+        w.windows[window]
+            .tabs()
+            .filter(|t| t.home_url == url.as_str())
+            .map(|t| t.key.store.clone())
+            .collect()
+    }
+
+    #[test]
+    fn each_level_sets_the_store_and_the_most_specific_wins() {
+        let w = cascade();
+        assert_eq!(store_of_url(&w, 0, &folder(1)), ["admin"]);
+        assert_eq!(store_of_url(&w, 0, &doc(1)), ["admin"]);
+        assert_eq!(store_of_url(&w, 0, &doc(2)), ["me"]);
+        assert_eq!(store_of_url(&w, 0, &folder(2)), ["me"]);
+        assert_eq!(store_of_url(&w, 0, &doc(3)), ["me"]);
+        assert_eq!(store_of_url(&w, 0, &doc(4)), ["admin"]);
+        // The same folder and document open once per store: both windows hold them.
+        assert_eq!(store_of_url(&w, 1, &folder(1)), ["default"]);
+        assert_eq!(store_of_url(&w, 1, &doc(1)), ["default"]);
+        // Each level keeps only what differs from the level above it.
+        let club = &w.windows[0].groups[0];
+        assert_eq!((club.session.as_deref(), club.store.as_str()), (None, "admin"));
+        assert_eq!(club.members[1].session.as_deref(), Some("me"));
+        assert_eq!(club.members[0].session, None);
+        assert_eq!(w.windows[0].groups[1].members[0].session, None);
+    }
+
+    #[test]
+    fn a_new_group_or_handed_document_opens_in_its_window_store() {
+        let mut w = cascade();
+        let h = id(w.new_group("Admin", &folder(9)).unwrap());
+        assert_eq!(w.store_of(&h), Some("admin"));
+        assert_eq!(w.group_of(&h).unwrap().session, None);
+        let Some(Handed::Unsorted(d)) = w.receive("Admin", None, doc(9).as_str()) else {
+            panic!()
+        };
+        assert_eq!(w.store_of(&d), Some("admin"));
+        let Some(Handed::Joined(j)) = w.receive("Admin", Some("Mine"), doc(8).as_str()) else {
+            panic!()
+        };
+        assert_eq!(w.store_of(&j), Some("me"));
+    }
+
+    #[test]
+    fn a_document_opened_from_a_tab_takes_its_login() {
+        let mut w = cascade();
+        let b = w.windows[0].groups[0].members[1].id.clone();
+        let o = id(w.open_from(&b, &doc(7)).unwrap());
+        let (_, _, t) = w.find(&o).unwrap();
+        assert_eq!((t.key.store.as_str(), t.session.as_deref()), ("me", Some("me")));
+    }
+
+    #[test]
+    fn a_move_takes_its_new_place_store_unless_the_tab_sets_its_own() {
+        let mut w = cascade();
+        let me_club = w.windows[1].groups[0].head.id.clone();
+        let mine = w.windows[0].groups[1].head.id.clone();
+        // Doc 4 sets nothing: into the default-store window it becomes that store's.
+        let d4 = w.windows[0].unsorted[0].id.clone();
+        w.move_tab(&d4, Dest::Group(&me_club), &HashSet::new());
+        assert_eq!(store_of_url(&w, 1, &doc(4)), ["default"]);
+        // Doc 2 sets `me`: it keeps it wherever it goes, and drops the setting once its place
+        // gives it.
+        let d2 = w.windows[0].groups[0].members[1].id.clone();
+        w.move_tab(&d2, Dest::Group(&me_club), &HashSet::new());
+        assert_eq!(store_of_url(&w, 1, &doc(2)), ["me"]);
+        let d2 = w.windows[1].groups[0].members.last().unwrap().id.clone();
+        w.move_tab(&d2, Dest::Group(&mine), &HashSet::new());
+        let t = w.windows[0].groups[1].members.last().unwrap();
+        assert_eq!((t.key.store.as_str(), t.session.as_deref()), ("me", None));
+        // Doc 1 is open in both stores already: moving the admin copy into "Me" is refused.
+        let d1 = w.windows[0].groups[0].members[0].id.clone();
+        w.move_tab(&d1, Dest::Group(&me_club), &HashSet::new());
+        assert_eq!(store_of_url(&w, 0, &doc(1)), ["admin"]);
+    }
+
+    #[test]
+    fn a_reopened_group_takes_its_new_window_store_unless_it_sets_its_own() {
+        let mut w = cascade();
+        let club = w.windows[0].groups[0].head.id.clone();
+        let mine = w.windows[0].groups[1].head.id.clone();
+        w.close_group(&club, &HashSet::new());
+        w.close_group(&mine, &HashSet::new());
+        // Recent: Mine, then Club. Club into "Me" would be folder 1 in default, open there.
+        let raised = w.reopen_recent("Me", 1).unwrap();
+        assert_eq!(raised, w.windows[1].groups[0].head.id);
+        let h = w.reopen_recent("Me", 0).unwrap();
+        let g = w.group_of(&h).unwrap();
+        assert_eq!((g.store.as_str(), g.session.as_deref()), ("me", Some("me")));
+    }
+
+    #[test]
+    fn a_member_made_its_own_group_keeps_its_login() {
+        let mut w = cascade();
+        let b = w.windows[0].groups[0].members[1].id.clone();
+        w.make_own_group(&b);
+        let g = w.group_of(&b).unwrap();
+        assert_eq!((g.store.as_str(), g.session.as_deref()), ("me", Some("me")));
+        assert_eq!(g.head.session, None);
     }
 }

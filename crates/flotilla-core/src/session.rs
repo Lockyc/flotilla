@@ -223,6 +223,7 @@ mod tests {
     /// Windows A and B; A shows a docked member, B its head, and one group is in Recent.
     fn sample() -> Workspace {
         let window = |t: &str| ConfigWindow {
+            store: "default".into(),
             unsorted: vec![],
             title: t.into(),
             groups: vec![],
@@ -230,7 +231,7 @@ mod tests {
         let mut w = Workspace::from_config(&[window("A"), window("B")]);
         let f = url("https://drive.google.com/drive/folders/f1");
         let d = url("https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrSt01/edit");
-        let Some(Opened::Added(h)) = w.new_group("A", &f, "work") else {
+        let Some(Opened::Added(h)) = w.new_group_in("A", &f, "work") else {
             panic!()
         };
         let Some(Opened::Added(m)) = w.open_from(&h, &d) else {
@@ -238,12 +239,12 @@ mod tests {
         };
         w.set_title(&m, "Budget");
         let g2 = url("https://drive.google.com/drive/folders/f2");
-        let Some(Opened::Added(h2)) = w.new_group("B", &g2, "default") else {
+        let Some(Opened::Added(h2)) = w.new_group("B", &g2) else {
             panic!()
         };
         w.close_group(&h2, &Default::default());
         let g3 = url("https://drive.google.com/drive/folders/f3");
-        w.new_group("B", &g3, "default").unwrap();
+        w.new_group("B", &g3).unwrap();
         w.activate(&m);
         w
     }
@@ -330,7 +331,7 @@ mod tests {
         let mut w = sample();
         let doc = "https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrSt02/edit";
         w.queue("B", doc, None).unwrap();
-        w.receive("B", None, "mailto:x", "default").unwrap();
+        w.receive("B", None, "mailto:x").unwrap();
         save(&p, &w, []).unwrap();
         let Loaded::Restored(s) = load(&p) else {
             panic!()
@@ -349,7 +350,7 @@ mod tests {
     fn windows_manifest_lists_windows_and_groups_in_order() {
         let mut w = sample();
         let f4 = url("https://drive.google.com/drive/folders/f4");
-        let Some(Opened::Added(h4)) = w.new_group("A", &f4, "default") else {
+        let Some(Opened::Added(h4)) = w.new_group("A", &f4) else {
             panic!()
         };
         w.set_title(&w.windows[0].groups[0].head.id.clone(), "Club (interim)");

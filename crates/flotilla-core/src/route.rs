@@ -35,13 +35,13 @@ mod tests {
     fn window(title: &str, folders: &[&str]) -> ConfigWindow {
         ConfigWindow {
             title: title.into(),
+            store: "default".into(),
             unsorted: vec![],
             groups: folders
                 .iter()
                 .map(|f| ConfigGroup {
                     name: (*f).into(),
                     url: format!("https://drive.google.com/drive/{f}"),
-                    store: "default".into(),
                     ..Default::default()
                 })
                 .collect(),
