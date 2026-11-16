@@ -1,6 +1,7 @@
 //! flotilla's config: one TOML file of app-wide settings and the windows, groups and documents
 //! (`[[window]]` / `[[window.group]]` / `[[window.group.tab]]`), hot-reloaded.
 
+use config_core::session::resolve;
 use config_core::{Colour, Density, TabDigitKeys};
 use flotilla_core::identity::{identity, DocKey};
 use flotilla_core::model::{ConfigGroup, ConfigTab, ConfigWindow};
@@ -39,6 +40,9 @@ pub struct Config {
     pub open_tabs_section: bool,
     /// What a collapsed sidebar shows down the window's left edge. Hot-reloads.
     pub rail: Rail,
+    /// The app-wide login session: the bottom of the cascade a tab's own, its group's and its
+    /// window's `session` override (`config_core::session`).
+    pub session: Option<String>,
     /// The windows, in file order; `parse` normalises each `colour` to `#rrggbb`. A file with no
     /// `[[window]]` has none; the default (a missing file, or the starter) has [`STARTER_WINDOW`].
     #[serde(rename = "window", default)]
@@ -70,15 +74,11 @@ pub type FlotillaWindow = config_core::Window<DocTab, WindowExtras, FlotillaGrou
 pub struct WindowExtras {
     /// Overrides the global `open_tabs_section` for this window.
     pub open_tabs_section: Option<bool>,
-    /// The `[[window.tab]]`s: documents in no group (the window's Unsorted), in the default store.
+    /// The login session the window's groups and documents open in, unless they set their own.
+    pub session: Option<String>,
+    /// The `[[window.tab]]`s: documents in no group (the window's Unsorted).
     #[serde(rename = "tab")]
     pub unsorted: Vec<DocTab>,
-}
-
-pub use flotilla_core::model::DEFAULT_STORE;
-
-fn default_store() -> String {
-    DEFAULT_STORE.to_string()
 }
 
 /// A `[[window.group]]`'s own keys, beside config-core's `name` and `tab`.
@@ -87,10 +87,10 @@ fn default_store() -> String {
 pub struct FlotillaGroup {
     /// The group's head: a Drive folder or a document. Its Home.
     pub url: String,
-    /// The login store (profile) the group and its documents open in; another store is another
-    /// account.
-    #[serde(default = "default_store")]
-    pub store: String,
+    /// The login session the group's head and documents open in, unless a document sets its
+    /// own; unset, the window's.
+    #[serde(default)]
+    pub session: Option<String>,
     /// The sidebar shows the head alone.
     #[serde(default)]
     pub collapsed: bool,
@@ -116,6 +116,10 @@ pub struct DocTab {
     /// `title` is the user's: the document's title no longer replaces it.
     #[serde(default)]
     pub named: bool,
+    /// The login session the document opens in; unset, its group's (or, in Unsorted, its
+    /// window's).
+    #[serde(default)]
+    pub session: Option<String>,
 }
 
 impl Default for Config {
@@ -138,6 +142,7 @@ impl Default for Config {
             format_on_save: false,
             open_tabs_section: false,
             rail: Rail::Handle,
+            session: None,
         }
     }
 }
@@ -167,6 +172,7 @@ impl Config {
             .iter()
             .map(|w| ConfigWindow {
                 title: w.title.clone(),
+                store: self.window_store(w),
                 unsorted: w.extra.unsorted.iter().map(config_tab).collect(),
                 groups: w
                     .groups
@@ -174,7 +180,7 @@ impl Config {
                     .map(|g| ConfigGroup {
                         name: g.name.clone(),
                         url: g.extra.url.clone(),
-                        store: g.extra.store.clone(),
+                        session: g.extra.session.clone(),
                         collapsed: g.extra.collapsed,
                         detached: g.extra.detached,
                         named: g.extra.named,
@@ -184,6 +190,11 @@ impl Config {
             })
             .collect()
     }
+
+    /// The store window `w` resolves to: its `session`, else the app's, else the default.
+    fn window_store(&self, w: &FlotillaWindow) -> String {
+        resolve([w.extra.session.as_deref(), self.session.as_deref()])
+    }
 }
 
 fn config_tab(t: &DocTab) -> ConfigTab {
@@ -192,6 +203,7 @@ fn config_tab(t: &DocTab) -> ConfigTab {
         url: t.url.clone(),
         detached: t.detached,
         named: t.named,
+        session: t.session.clone(),
     }
 }
 
@@ -221,16 +233,19 @@ pub fn parse(src: &str) -> Result<Config, String> {
     };
     for w in &cfg.windows {
         let window = w.title.trim();
+        let window_store = cfg.window_store(w);
+        let under = |own: &Option<String>, place: &str| resolve([own.as_deref(), Some(place)]);
         for t in &w.extra.unsorted {
             let at = format!("`{}` (window `{window}`)", t.title.trim());
-            claim(at, DEFAULT_STORE, &t.url)?;
+            claim(at, &under(&t.session, &window_store), &t.url)?;
         }
         for g in &w.groups {
             let group = g.name.trim();
             let at = |name: &str| format!("`{name}` (window `{window}`, group `{group}`)");
-            claim(at(group), &g.extra.store, &g.extra.url)?;
+            let group_store = under(&g.extra.session, &window_store);
+            claim(at(group), &group_store, &g.extra.url)?;
             for t in &g.tabs {
-                claim(at(t.title.trim()), &g.extra.store, &t.url)?;
+                claim(at(t.title.trim()), &under(&t.session, &group_store), &t.url)?;
             }
         }
     }
@@ -284,26 +299,27 @@ mod tests {
     ];
     /// Every `[[window]]`, `[[window.group]]` and `[[window.group.tab]]` key; the starter
     /// config's commented example documents each one.
-    const WINDOW_KEYS: [&str; 8] = [
+    const WINDOW_KEYS: [&str; 9] = [
         "title",
         "colour",
         "width",
         "height",
         "open_on_start",
         "open_tabs_section",
+        "session",
         "tab",
         "group",
     ];
     const GROUP_KEYS: [&str; 7] = [
         "name",
         "url",
-        "store",
+        "session",
         "collapsed",
         "detached",
         "named",
         "tab",
     ];
-    const TAB_KEYS: [&str; 4] = ["title", "url", "detached", "named"];
+    const TAB_KEYS: [&str; 5] = ["title", "url", "detached", "named", "session"];
 
     const FOLDER: &str = "https://drive.google.com/drive/folders/0AbCdEfGhIjKlMnOpQ";
     const SHEET: &str = "https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOpQrSt04/edit";
@@ -360,15 +376,17 @@ mod tests {
         let cfg = parse(&format!(
             "density = \"compact\"\ndark_mode = true\ntab_digit_keys = \"cycle\"\n\
              auto_update = false\nallow_insecure = [\"10.0.0.1\"]\nformat_on_save = true\n\
-             open_tabs_section = true\nrail = \"map\"\n\
+             open_tabs_section = true\nrail = \"map\"\nsession = \"app\"\n\
              [[window]]\ntitle = \"Club\"\ncolour = \"#2A6F4E\"\nwidth = 1200\nheight = 800\n\
-             open_on_start = false\nopen_tabs_section = false\n\
-             [[window.group]]\nname = \"Newsletters\"\nurl = \"{FOLDER}\"\nstore = \"club\"\n\
+             open_on_start = false\nopen_tabs_section = false\nsession = \"window\"\n\
+             [[window.group]]\nname = \"Newsletters\"\nurl = \"{FOLDER}\"\nsession = \"club\"\n\
              collapsed = true\ndetached = true\nnamed = true\n\
              [[window.group.tab]]\ntitle = \"Budget\"\nurl = \"{SHEET}\"\ndetached = true\n\
-             named = true\n"
+             named = true\nsession = \"tab\"\n"
         ))
         .unwrap();
+        assert_eq!(cfg.session.as_deref(), Some("app"));
+        assert_eq!(cfg.windows[0].extra.session.as_deref(), Some("window"));
         assert_eq!(cfg.density, Density::Compact);
         assert_eq!(cfg.rail, Rail::Map);
         assert!(cfg.tab_digit_keys.is_cycle());
@@ -385,7 +403,7 @@ mod tests {
             g.extra,
             FlotillaGroup {
                 url: FOLDER.into(),
-                store: "club".into(),
+                session: Some("club".into()),
                 collapsed: true,
                 detached: true,
                 named: true,
@@ -398,6 +416,7 @@ mod tests {
                 url: SHEET.into(),
                 detached: true,
                 named: true,
+                session: Some("tab".into()),
             }]
         );
     }
@@ -436,12 +455,13 @@ mod tests {
         assert_eq!(
             cfg.workspace_windows(),
             vec![ConfigWindow {
+                store: "default".into(),
                 unsorted: vec![],
                 title: " Club ".into(),
                 groups: vec![ConfigGroup {
                     name: "A".into(),
                     url: FOLDER.into(),
-                    store: DEFAULT_STORE.into(),
+                    session: None,
                     collapsed: true,
                     detached: false,
                     named: false,
@@ -450,6 +470,7 @@ mod tests {
                         url: SHEET.into(),
                         detached: true,
                         named: false,
+                        session: None,
                     }],
                 }],
             }]
@@ -463,13 +484,13 @@ mod tests {
              [[window.group]]\nname = \"Club drive\"\nurl = \"{FOLDER}\"\n\
              [[window.group.tab]]\ntitle = \"Budget\"\nurl = \"{SHEET}\"\n\
              [[window.group.tab]]\ntitle = \"Newsletter\"\nurl = \"{SLIDES}\"\n\
-             [[window]]\ntitle = \"Home\"\n\
-             [[window.group]]\nname = \"Budget\"\nurl = \"{SHEET}\"\nstore = \"home\"\n"
+             [[window]]\ntitle = \"Home\"\nsession = \"home\"\n\
+             [[window.group]]\nname = \"Budget\"\nurl = \"{SHEET}\"\n"
         ))
         .unwrap();
         assert_eq!(cfg.windows.len(), 2);
         let club = &cfg.windows[0].groups[0];
-        assert_eq!(club.extra.store, DEFAULT_STORE);
+        assert_eq!(club.extra.session, None);
         assert!(!club.extra.collapsed);
         let titles: Vec<_> = club.tabs.iter().map(|t| t.title.as_str()).collect();
         assert_eq!(titles, ["Budget", "Newsletter"]);
@@ -505,6 +526,33 @@ mod tests {
             err.contains("`A`") && err.contains("`B`") && err.contains("`Home`"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn a_document_opens_once_per_resolved_session() {
+        // Two windows in two sessions hold the same folder and document.
+        let two = |second: &str| {
+            parse(&format!(
+                "session = \"app\"\n\
+                 [[window]]\ntitle = \"Admin\"\nsession = \"admin\"\n\
+                 [[window.group]]\nname = \"A\"\nurl = \"{FOLDER}\"\n\
+                 [[window.group.tab]]\ntitle = \"Budget\"\nurl = \"{SHEET}\"\n\
+                 [[window]]\ntitle = \"Me\"\n{second}\
+                 [[window.group]]\nname = \"B\"\nurl = \"{FOLDER}\"\n\
+                 [[window.group.tab]]\ntitle = \"Budget\"\nurl = \"{SHEET}\"\n"
+            ))
+        };
+        let cfg = two("").unwrap();
+        let stores: Vec<_> = cfg
+            .workspace_windows()
+            .into_iter()
+            .map(|w| w.store)
+            .collect();
+        assert_eq!(stores, ["admin", "app"]);
+        // Naming the same session again makes them one copy, an error.
+        assert!(two("session = \"admin\"\n").is_err());
+        // A blank session falls through to the app's.
+        assert!(two("session = \" \"\n").is_ok());
     }
 
     #[test]

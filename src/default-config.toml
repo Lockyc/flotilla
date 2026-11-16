@@ -27,6 +27,10 @@ open_tabs_section = false
 # an expand chevron; "edge" — a bare strip; "map" — a mark per document (active, loaded, attention).
 rail = "handle"
 
+# The login session documents open in; another session is another account, signed in apart.
+# Set it here for every window, or on a window, group or document; the most specific wins.
+# session = "default"
+
 # Windows, each holding groups of documents. flotilla writes these as you work; a hand edit
 # sticks. A document is open once across every window.
 [[window]]
@@ -41,17 +45,19 @@ title = "flotilla"
 # height = 1000
 # open_on_start = true        # optional; false leaves it closed until opened from the Window menu
 # open_tabs_section = true    # optional; overrides the global open_tabs_section for this window
+# session = "club"            # optional; the login session for everything in this window
 #
-# [[window.tab]]              # a document in no group: listed under Unsorted, default store
+# [[window.tab]]              # a document in no group: listed under Unsorted
 # title = "Minutes"
 # url = "https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrSt03/edit"
 # detached = false
 # named = false
+# session = "club"            # optional; this document's own login session
 #
 # [[window.group]]
 # name = "Club drive"         # the group's name in the sidebar
 # url = "https://drive.google.com/drive/folders/0AbCdEfGhIjKlMnOpQ"  # its head and Home
-# store = "default"           # optional login store; another store is another account
+# session = "club"            # optional; the login session for the group and its documents
 # collapsed = false           # optional; true shows the head alone
 # detached = false            # optional; true reopens the head in its own window
 # named = false               # optional; true keeps name, else it follows the folder's title
@@ -61,3 +67,4 @@ title = "flotilla"
 # url = "https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOpQrSt04/edit"
 # detached = false            # optional; true reopens it in its own window
 # named = false               # optional; true keeps title, else it follows the document's title
+# session = "club"            # optional; this document's own login session

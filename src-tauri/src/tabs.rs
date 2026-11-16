@@ -164,9 +164,8 @@ pub fn adopt_title(named: bool, at_home: bool, stored: &str, reported: &str) -> 
 /// the URL it shows (`None`: unknown), at home when it is the tab's own document or folder.
 pub fn retitled(ws: &mut Workspace, id: &TabId, page: Option<&Url>, reported: &str) -> bool {
     let name = page_title(reported.trim());
-    let adopt = ws.find(id).is_some_and(|(_, g, t)| {
-        let store = g.map_or(crate::config::DEFAULT_STORE, |g| g.store.as_str());
-        let at_home = page.is_some_and(|p| identity(store, p) == t.key);
+    let adopt = ws.find(id).is_some_and(|(_, _, t)| {
+        let at_home = page.is_some_and(|p| identity(&t.key.store, p) == t.key);
         adopt_title(t.named, at_home, &t.title, name)
     });
     if adopt {
@@ -535,6 +534,7 @@ pub(crate) mod testing {
 
     pub fn one_window() -> Workspace {
         Workspace::from_config(&[ConfigWindow {
+            store: "default".into(),
             unsorted: vec![],
             title: "W".into(),
             groups: vec![],
@@ -542,8 +542,7 @@ pub(crate) mod testing {
     }
 
     pub fn new_group(ws: &mut Workspace, url: &str) -> Opened {
-        ws.new_group("W", &url::Url::parse(url).unwrap(), "default")
-            .unwrap()
+        ws.new_group("W", &url::Url::parse(url).unwrap()).unwrap()
     }
 }
 
@@ -589,13 +588,14 @@ mod tests {
     /// Windows A and B, each with a folder group and a document; each window's document active.
     fn two_windows() -> (Workspace, TabId, TabId) {
         let window = |t: &str| ConfigWindow {
+            store: "default".into(),
             unsorted: vec![],
             title: t.into(),
             groups: vec![],
         };
         let mut ws = Workspace::from_config(&[window("A"), window("B")]);
         let mut add = |w: &str, folder: &str, doc: &str| {
-            let Some(Opened::Added(h)) = ws.new_group(w, &url(folder), "default") else {
+            let Some(Opened::Added(h)) = ws.new_group(w, &url(folder)) else {
                 panic!()
             };
             let Some(Opened::Added(d)) = ws.open_from(&h, &url(doc)) else {
@@ -638,7 +638,7 @@ mod tests {
     fn open_once_in_another_window_brings_that_window_forward() {
         let (mut ws, a, b) = two_windows();
         // New Group in A on B's document: B's tab is raised there, and B comes forward.
-        let shown = match ws.new_group("A", &url(DOC_B), "default").unwrap() {
+        let shown = match ws.new_group("A", &url(DOC_B)).unwrap() {
             Opened::Raised(id) => id,
             other => panic!("{other:?}"),
         };
@@ -651,7 +651,7 @@ mod tests {
         let folder_a = url("https://drive.google.com/drive/folders/f1");
         let head_a = ws.windows[0].groups[0].head.id.clone();
         ws.close_group(&head_a, &Default::default());
-        let Some(Opened::Added(in_b)) = ws.new_group("B", &folder_a, "default") else {
+        let Some(Opened::Added(in_b)) = ws.new_group("B", &folder_a) else {
             panic!()
         };
         let reopened = ws.reopen_recent("A", 0);

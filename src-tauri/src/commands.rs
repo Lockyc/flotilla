@@ -2,7 +2,6 @@
 //! touch webviews directly; each locks `ws` only to change or read it. A chrome acts on the
 //! workspace window its own window shows.
 
-use crate::config::DEFAULT_STORE;
 use crate::state::AppState;
 use crate::tabs;
 use flotilla_core::model::{opened_id, Dest, Handed, TabId};
@@ -248,7 +247,7 @@ pub fn new_group(url: String, webview: Webview) -> Result<(), String> {
     let window = require_chrome(&webview)?;
     let url = parse_group_url(&url)?;
     show_from(webview.app_handle(), &window, true, |ws| {
-        ws.new_group(&window, &url, DEFAULT_STORE).map(opened_id)
+        ws.new_group(&window, &url).map(opened_id)
     });
     Ok(())
 }
@@ -387,7 +386,7 @@ pub fn place(ws: &mut flotilla_core::model::Workspace, h: &Handoff, last: Option
     let raised = crate::detach::apply(ws, |ws| {
         handed = match &h.problem {
             Some(problem) => ws.reject(&window, &h.link, problem.clone()),
-            None => ws.receive(&window, h.group.as_deref(), &h.link, DEFAULT_STORE),
+            None => ws.receive(&window, h.group.as_deref(), &h.link),
         }
     });
     let front = handed_front(ws, &window, handed.as_ref(), raised);
@@ -469,7 +468,7 @@ pub fn incoming_action(
                 .map_err(|e| e.to_string())?;
         }
         NEW => show_from(app, &window, true, |ws| {
-            ws.incoming_as_group(&id, DEFAULT_STORE).map(opened_id)
+            ws.incoming_as_group(&id).map(opened_id)
         }),
         DISMISS => mutate(app, |ws| ws.dismiss_incoming(&id)),
         _ => return Err(format!("unknown action {action}")),
@@ -849,6 +848,7 @@ mod tests {
 
     fn two_windows() -> Workspace {
         let window = |t: &str| ConfigWindow {
+            store: "default".into(),
             unsorted: vec![],
             title: t.into(),
             groups: vec![],
@@ -919,8 +919,7 @@ mod tests {
     fn the_window_showing_a_handed_link_comes_forward() {
         let mut ws = two_windows();
         let folder = Url::parse("https://drive.google.com/drive/folders/f1").unwrap();
-        let Some(flotilla_core::model::Opened::Added(h)) = ws.new_group("Work", &folder, "default")
-        else {
+        let Some(flotilla_core::model::Opened::Added(h)) = ws.new_group("Work", &folder) else {
             panic!()
         };
         let window = |t: &str| Some(Forward::Window(t.into()));
@@ -989,6 +988,7 @@ mod tests {
         let mut ws = two_windows();
         let mut placed = place(&mut ws, &h, None);
         ws.rebase(Workspace::from_config(&[ConfigWindow {
+            store: "default".into(),
             unsorted: vec![],
             title: "Club".into(),
             groups: vec![],

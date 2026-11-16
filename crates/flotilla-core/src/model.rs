@@ -18,9 +18,9 @@
 //! [`Group::store`]. A tab or group moved to another level re-resolves, and so takes its new
 //! place's store unless it sets its own.
 
-use config_core::session::resolve;
 use crate::identity::{doc_key, fnv1a, head_key, identity, tab_id, DocKey};
 use crate::nav::parse_group_url;
+use config_core::session::resolve;
 use serde::{Deserialize, Serialize};
 use shell_core::tabs::pick_live_neighbour;
 use std::collections::{BTreeMap, HashSet};
@@ -995,12 +995,7 @@ impl Workspace {
     /// waited. With no window at all, the link is queued in `stray`, with its reason if it is not
     /// a web link. `None`, and nothing done, when the link is blank, or there is no such window
     /// but others.
-    pub fn receive(
-        &mut self,
-        window: &str,
-        group: Option<&str>,
-        link: &str,
-    ) -> Option<Handed> {
+    pub fn receive(&mut self, window: &str, group: Option<&str>, link: &str) -> Option<Handed> {
         if link.trim().is_empty() {
             return None;
         }
@@ -1527,10 +1522,7 @@ mod tests {
         let mut w = ws();
         let h1 = head_of(&mut w, 1);
         let _h2 = head_of(&mut w, 2);
-        assert_eq!(
-            w.new_group(W, &folder(1)),
-            Some(Opened::Raised(h1.clone()))
-        );
+        assert_eq!(w.new_group(W, &folder(1)), Some(Opened::Raised(h1.clone())));
         assert_eq!(groups(&w).len(), 2);
         assert_eq!(active(&w), Some(h1.clone()));
         // an open member's doc raises the member
@@ -1883,19 +1875,13 @@ mod tests {
         assert_eq!(groups(&w).len(), 3);
         // same doc, same store: raised, whether the tab is a head or a member
         assert_eq!(w.new_group_in(W, &doc(1), "work"), Some(Opened::Raised(m)));
-        assert_eq!(
-            w.new_group(W, &doc(1)),
-            Some(Opened::Raised(h1.clone()))
-        );
+        assert_eq!(w.new_group(W, &doc(1)), Some(Opened::Raised(h1.clone())));
         assert_eq!(
             w.new_group_in(W, &folder(2), "work"),
             Some(Opened::Raised(work))
         );
         // the same folder in another store is its own head
-        assert!(matches!(
-            w.new_group(W, &folder(2)),
-            Some(Opened::Added(_))
-        ));
+        assert!(matches!(w.new_group(W, &folder(2)), Some(Opened::Added(_))));
     }
 
     #[test]
@@ -2308,10 +2294,7 @@ mod tests {
         assert!(queue(&w, W).is_empty());
         // Handed again, it is raised where it is.
         let again = format!("{}?usp=x", doc(1));
-        assert_eq!(
-            w.receive("V", None, &again),
-            Some(Handed::Raised(d))
-        );
+        assert_eq!(w.receive("V", None, &again), Some(Handed::Raised(d)));
         assert!(unsorted_ids(&w, "V").is_empty());
         assert_eq!(w.receive("nowhere", None, doc(2).as_str()), None);
     }
@@ -2428,8 +2411,7 @@ mod tests {
         queued(w.receive(W, None, "https://example.com/a"));
         w.rebase(Workspace::from_config(&[window(W)]));
         assert_eq!(queue(&w, W), ["https://example.com/a"]);
-        let Some(Handed::Grouped(_)) = w.receive(W, None, "https://example.com/a/")
-        else {
+        let Some(Handed::Grouped(_)) = w.receive(W, None, "https://example.com/a/") else {
             panic!()
         };
         assert!(queue(&w, W).is_empty());
@@ -2498,8 +2480,7 @@ mod tests {
     fn receive_matches_a_group_name_trimmed_on_both_sides() {
         let (mut w, h1) = fleet();
         w.set_title(&h1, " Fleet ");
-        let Some(Handed::Joined(m)) = w.receive(W, Some("Fleet "), doc(1).as_str())
-        else {
+        let Some(Handed::Joined(m)) = w.receive(W, Some("Fleet "), doc(1).as_str()) else {
             panic!()
         };
         assert_eq!(member_ids(&w, &h1), vec![m]);
@@ -2516,13 +2497,11 @@ mod tests {
     #[test]
     fn receive_into_a_missing_group_opens_under_unsorted() {
         let (mut w, h1) = fleet();
-        let Some(Handed::Unsorted(a)) = w.receive(W, Some("Gone"), doc(1).as_str())
-        else {
+        let Some(Handed::Unsorted(a)) = w.receive(W, Some("Gone"), doc(1).as_str()) else {
             panic!()
         };
         // A group of that name in another window is not this window's.
-        let Some(Handed::Unsorted(b)) = w.receive("V", Some("Fleet"), doc(2).as_str())
-        else {
+        let Some(Handed::Unsorted(b)) = w.receive("V", Some("Fleet"), doc(2).as_str()) else {
             panic!()
         };
         assert!(member_ids(&w, &h1).is_empty());
@@ -2806,7 +2785,10 @@ mod tests {
         assert_eq!(store_of_url(&w, 1, &doc(1)), ["default"]);
         // Each level keeps only what differs from the level above it.
         let club = &w.windows[0].groups[0];
-        assert_eq!((club.session.as_deref(), club.store.as_str()), (None, "admin"));
+        assert_eq!(
+            (club.session.as_deref(), club.store.as_str()),
+            (None, "admin")
+        );
         assert_eq!(club.members[1].session.as_deref(), Some("me"));
         assert_eq!(club.members[0].session, None);
         assert_eq!(w.windows[0].groups[1].members[0].session, None);
@@ -2834,7 +2816,10 @@ mod tests {
         let b = w.windows[0].groups[0].members[1].id.clone();
         let o = id(w.open_from(&b, &doc(7)).unwrap());
         let (_, _, t) = w.find(&o).unwrap();
-        assert_eq!((t.key.store.as_str(), t.session.as_deref()), ("me", Some("me")));
+        assert_eq!(
+            (t.key.store.as_str(), t.session.as_deref()),
+            ("me", Some("me"))
+        );
     }
 
     #[test]

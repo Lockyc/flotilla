@@ -222,7 +222,6 @@ mod tests {
             .new_group(
                 "B",
                 &url::Url::parse("https://drive.google.com/drive/folders/f1").unwrap(),
-                "default",
             )
             .unwrap()
         {

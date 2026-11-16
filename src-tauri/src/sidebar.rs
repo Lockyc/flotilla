@@ -186,8 +186,7 @@ mod tests {
             .unwrap()
             .iter()
             .all(|t| t["group"] != json!(UNSORTED)));
-        let Some(flotilla_core::model::Handed::Unsorted(d)) = ws.receive("W", None, DOC, "default")
-        else {
+        let Some(flotilla_core::model::Handed::Unsorted(d)) = ws.receive("W", None, DOC) else {
             panic!()
         };
         let dto = sidebar_dto(ws.windows.first(), &HashSet::new(), &HashMap::new());
@@ -349,7 +348,7 @@ mod tests {
         };
         ws.set_title(&h, "Fleet");
         ws.queue("W", DOC, None).unwrap();
-        ws.receive("W", None, "mailto:x", "default").unwrap();
+        ws.receive("W", None, "mailto:x").unwrap();
 
         let dto = incoming_dto(&ws, "W");
         let rows = dto.as_array().unwrap();
@@ -410,6 +409,7 @@ mod tests {
     #[test]
     fn the_window_dto_carries_its_own_queue() {
         let window = |t: &str| flotilla_core::model::ConfigWindow {
+            store: "default".into(),
             unsorted: vec![],
             title: t.into(),
             groups: vec![],
@@ -427,7 +427,7 @@ mod tests {
         let mut ws = one_window();
         let doc =
             |n: u8| format!("https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrSt0{n}/edit");
-        let mut unsorted = |n| match ws.receive("W", None, &doc(n), "default") {
+        let mut unsorted = |n| match ws.receive("W", None, &doc(n)) {
             Some(flotilla_core::model::Handed::Unsorted(d)) => d,
             _ => panic!(),
         };

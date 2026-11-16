@@ -85,8 +85,16 @@ parse keeps the last good config and shows the error in the sidebar.
       url   = "https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOpQrSt04/edit"
 ```
 
-A document is open once across every window: two heads or tabs naming the same document in the
-same `store` are a config error.
+**Sessions.** `session` names the login a document opens in; another session is another account,
+signed in apart. It can be set app-wide, on a window, a group or a document, and the most specific
+one set wins (a blank one falls through); with none set it is `"default"`. A new group, a link
+handed in and an Unsorted document take their window's session, a document opened from a tab
+takes that tab's, and a document or group moved elsewhere takes its new place's unless it sets
+its own.
+
+A document is open once per session across every window: two heads or tabs naming the same
+document in the same session are a config error, and the same document can be open in two
+sessions at once.
 
 **Global**
 
@@ -100,6 +108,7 @@ same `store` are a config error.
 | `open_tabs_section` | `false` | Pin an **Open** section above the groups, listing every loaded or popped-out document under its group. Each keeps its row in its group too; ⌘1–⌘9 and tab cycling ignore the section. A window's own `open_tabs_section` overrides it. Hot-reloads. |
 | `rail` | `"handle"` | What a collapsed sidebar shows down the window's left edge: `handle` — the window colour and an expand chevron; `edge` — a bare strip; `map` — a mark per document (active, loaded, attention). Hot-reloads. |
 | `format_on_save` | `false` | Reformat the config in house style on each clean reload. A file that fails to parse is left untouched. |
+| `session` | `"default"` | The login session for every window that sets none. **Cascades.** |
 
 **`[[window]]`**
 
@@ -110,6 +119,7 @@ same `store` are a config error.
 | `width`, `height` | `1500`, `1000` | The window's size on its first open. |
 | `open_on_start` | `true` | `false` leaves the window closed at launch until opened from the **Window** menu. |
 | `open_tabs_section` | inherited from global | Whether this window's sidebar pins the **Open** section. |
+| `session` | inherited from global | The login session for this window's groups and documents. **Cascades.** |
 
 **`[[window.group]]`**
 
@@ -117,13 +127,13 @@ same `store` are a config error.
 |---|---|---|
 | `name` | required | The group's name in the sidebar. Unique within its window. Follows the head's page title whenever the head shows its own folder or document, unless `named`. |
 | `url` | required | The group's head and Home: a Drive folder or a document. |
-| `store` | `"default"` | The login store the group's documents open in; another store is another account. |
+| `session` | inherited from window | The login session for the group's head and documents. **Cascades.** |
 | `collapsed` | `false` | Shows the head alone. |
 | `detached` | `false` | The head is popped out; reopens in its own window. |
 | `named` | `false` | `name` is yours and stays as written. Renaming the group in the sidebar sets it; renaming it to nothing clears it. |
 
 **`[[window.group.tab]]`**, and **`[[window.tab]]`** — a document in no group, listed under
-**Unsorted** and opened in the default store
+**Unsorted**
 
 | Key | Default | What it does |
 |---|---|---|
@@ -131,6 +141,7 @@ same `store` are a config error.
 | `url` | required | The document, and its Home. |
 | `detached` | `false` | Popped out; reopens in its own window. |
 | `named` | `false` | `title` is yours and stays as written. Renaming the document in the sidebar sets it; renaming it to nothing clears it. |
+| `session` | inherited from group, else window | The document's own login session. flotilla writes it when a document opened from a tab in another session differs from its place's. **Cascades.** |
 
 ## For link routers
 

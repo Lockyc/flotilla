@@ -894,8 +894,7 @@ mod tests {
     fn an_unsorted_document_moves_to_any_group_and_has_no_group_to_close() {
         let (mut ws, h, m) = one_group();
         let doc = "https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrSt02/edit";
-        let Some(flotilla_core::model::Handed::Unsorted(d)) = ws.receive("W", None, doc, "default")
-        else {
+        let Some(flotilla_core::model::Handed::Unsorted(d)) = ws.receive("W", None, doc) else {
             panic!()
         };
         let s = menu_state_for(&ws, &cold(), None, Some(&d));
@@ -954,13 +953,14 @@ mod tests {
     #[test]
     fn a_member_moves_to_another_windows_group_named_with_its_window() {
         let window = |t: &str| flotilla_core::model::ConfigWindow {
+            store: "default".into(),
             unsorted: vec![],
             title: t.into(),
             groups: vec![],
         };
         let mut ws = Workspace::from_config(&[window("A"), window("B")]);
         let folder = |n| url(&format!("https://drive.google.com/drive/folders/f{n}"));
-        let Some(Opened::Added(h)) = ws.new_group("A", &folder(1), "default") else {
+        let Some(Opened::Added(h)) = ws.new_group("A", &folder(1)) else {
             panic!()
         };
         ws.set_title(&h, "Auction");
@@ -970,7 +970,7 @@ mod tests {
         ) else {
             panic!()
         };
-        let Some(Opened::Added(b)) = ws.new_group("B", &folder(2), "default") else {
+        let Some(Opened::Added(b)) = ws.new_group("B", &folder(2)) else {
             panic!()
         };
         ws.set_title(&b, "Newsletters");
@@ -1054,13 +1054,14 @@ mod tests {
     #[test]
     fn the_group_menu_follows_the_focused_window() {
         let window = |t: &str| flotilla_core::model::ConfigWindow {
+            store: "default".into(),
             unsorted: vec![],
             title: t.into(),
             groups: vec![],
         };
         let mut ws = Workspace::from_config(&[window("A"), window("B")]);
         let folder = |n| url(&format!("https://drive.google.com/drive/folders/f{n}"));
-        let Some(Opened::Added(a)) = ws.new_group("A", &folder(1), "default") else {
+        let Some(Opened::Added(a)) = ws.new_group("A", &folder(1)) else {
             panic!()
         };
         let Some(Opened::Added(m)) = ws.open_from(

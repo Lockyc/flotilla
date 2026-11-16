@@ -3,7 +3,6 @@
 //! before and after) and applies them through config-core's `edit`, all under the [`Gate`]. The
 //! file's reload then echoes the change back, and `Workspace::rebase` finds nothing to change.
 
-use crate::config::DEFAULT_STORE;
 use config_core::toml_edit::Value;
 use config_core::{add_group, add_tab, move_tab, remove, set_field, At, EditError};
 use flotilla_core::model::{Group, Tab, TabId, Workspace};
@@ -17,6 +16,7 @@ pub struct Doc {
     pub url: String,
     pub detached: bool,
     pub named: bool,
+    pub session: Option<String>,
 }
 
 impl Doc {
@@ -26,6 +26,7 @@ impl Doc {
             url: t.home_url.clone(),
             detached: t.detached,
             named: t.named,
+            session: t.session.clone(),
         }
     }
 }
@@ -39,7 +40,7 @@ pub enum Write {
         window: String,
         name: String,
         url: String,
-        store: String,
+        session: Option<String>,
         collapsed: bool,
         detached: bool,
         named: bool,
@@ -83,7 +84,7 @@ pub enum Write {
         to_window: String,
         to_group: Option<String>,
     },
-    /// The document at `doc.url` leaves `group` to head a new group `name` (in the same store) at
+    /// The document at `doc.url` leaves `group` to head a new group `name`, setting `session`, at
     /// the end of `to_window`.
     MakeOwnGroup {
         window: String,
@@ -91,7 +92,14 @@ pub enum Write {
         doc: Doc,
         to_window: String,
         name: String,
-        store: String,
+        session: Option<String>,
+    },
+    /// The document at `url` sets `session`, or (`None`) inherits its place's.
+    SetSession {
+        window: String,
+        group: Option<String>,
+        url: String,
+        session: Option<String>,
     },
     SetTitle {
         window: String,
@@ -311,13 +319,13 @@ pub fn plan(before: &Workspace, after: &Workspace) -> Vec<Write> {
                 doc: Doc::of(o.tab),
                 to_window: l.window.to_string(),
                 name: g.head.title.clone(),
-                store: g.store.clone(),
+                session: g.session.clone(),
             }),
             _ => groups.push(Write::NewGroup {
                 window: l.window.to_string(),
                 name: g.head.title.clone(),
                 url: g.head.home_url.clone(),
-                store: g.store.clone(),
+                session: g.session.clone(),
                 collapsed: g.collapsed,
                 detached: g.head.detached,
                 named: g.head.named,
@@ -348,10 +356,19 @@ pub fn plan(before: &Workspace, after: &Workspace) -> Vec<Write> {
         let Some((window, group)) = home else {
             continue;
         };
-        match in_b(&m.tab.id)
+        let was = in_b(&m.tab.id)
             .filter(|o| !o.head)
-            .or_else(|| moved_by_url(m))
-        {
+            .or_else(|| moved_by_url(m));
+        if let Some(o) = was.filter(|o| o.tab.session != m.tab.session) {
+            fields.push(Write::SetSession {
+                window: window.clone(),
+                group: group.clone(),
+                // Fields run before renames and URL changes: the document still has its old url.
+                url: o.tab.home_url.clone(),
+                session: m.tab.session.clone(),
+            });
+        }
+        match was {
             Some(o) if o.same_list(m) => {
                 let url = o.tab.home_url.clone();
                 if o.tab.detached != m.tab.detached {
@@ -455,21 +472,20 @@ fn doc_fields(d: &Doc) -> Vec<(&'static str, Value)> {
     ];
     f.extend(flag(d.detached).map(|v| ("detached", v)));
     f.extend(flag(d.named).map(|v| ("named", v)));
+    f.extend(d.session.as_deref().map(|s| ("session", Value::from(s))));
     f
 }
 
 fn group_fields(
     name: &str,
     url: &str,
-    store: &str,
+    session: Option<&str>,
     collapsed: bool,
     detached: bool,
     named: bool,
 ) -> Vec<(&'static str, Value)> {
     let mut f = vec![("name", Value::from(name)), ("url", Value::from(url))];
-    if store != DEFAULT_STORE {
-        f.push(("store", Value::from(store)));
-    }
+    f.extend(session.map(|s| ("session", Value::from(s))));
     f.extend(flag(collapsed).map(|v| ("collapsed", v)));
     f.extend(flag(detached).map(|v| ("detached", v)));
     f.extend(flag(named).map(|v| ("named", v)));
@@ -566,14 +582,14 @@ pub(crate) fn steps(w: &Write) -> Vec<Step> {
             window,
             name,
             url,
-            store,
+            session,
             collapsed,
             detached,
             named,
             docs,
         } => std::iter::once(Step::AddGroup {
             window: window.clone(),
-            fields: group_fields(&name, &url, &store, collapsed, detached, named),
+            fields: group_fields(&name, &url, session.as_deref(), collapsed, detached, named),
         })
         .chain(docs.iter().map(|d| Step::AddTab {
             window: window.clone(),
@@ -650,7 +666,7 @@ pub(crate) fn steps(w: &Write) -> Vec<Step> {
             doc,
             to_window,
             name,
-            store,
+            session,
         } => vec![
             Step::Remove {
                 window,
@@ -659,9 +675,28 @@ pub(crate) fn steps(w: &Write) -> Vec<Step> {
             },
             Step::AddGroup {
                 window: to_window,
-                fields: group_fields(&name, &doc.url, &store, false, doc.detached, doc.named),
+                fields: group_fields(
+                    &name,
+                    &doc.url,
+                    session.as_deref(),
+                    false,
+                    doc.detached,
+                    doc.named,
+                ),
             },
         ],
+        Write::SetSession {
+            window,
+            group,
+            url,
+            session,
+        } => vec![set(
+            &window,
+            group.as_deref(),
+            Some(&url),
+            "session",
+            session.map(Value::from),
+        )],
         Write::SetTitle {
             window,
             group,
@@ -877,7 +912,7 @@ mod tests {
     const D5: &str = "https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrSt05/edit";
 
     /// Window A: Unsorted (Loose D4), "One" (F1; Budget D1, Minutes D2) and "Two" (F2). Window B:
-    /// "Three" (F3, store work).
+    /// "Three" (F3, session work).
     fn source() -> String {
         format!(
             "# kept\n[[window]]\ntitle = \"A\"\n\
@@ -887,7 +922,7 @@ mod tests {
              [[window.group.tab]]\ntitle = \"Minutes\"\nurl = \"{D2}\"\n\
              [[window.group]]\nname = \"Two\"\nurl = \"{F2}\"\n\
              [[window]]\ntitle = \"B\"\n\
-             [[window.group]]\nname = \"Three\"\nurl = \"{F3}\"\nstore = \"work\"\n"
+             [[window.group]]\nname = \"Three\"\nurl = \"{F3}\"\nsession = \"work\"\n"
         )
     }
 
@@ -917,9 +952,14 @@ mod tests {
     /// [`run`] for any way of changing the workspace that reports its writes; also returns the
     /// workspace after the reload.
     fn run_with(op: impl FnOnce(&mut Workspace) -> Vec<Write>) -> (Workspace, Vec<Write>) {
+        run_on(&source(), op)
+    }
+
+    /// [`run_with`] from config `src`, which starts with the `# kept` comment.
+    fn run_on(src: &str, op: impl FnOnce(&mut Workspace) -> Vec<Write>) -> (Workspace, Vec<Write>) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        std::fs::write(&path, source()).unwrap();
+        std::fs::write(&path, src).unwrap();
         let mut ws = load(&path);
         let writes = op(&mut ws);
         for w in &writes {
@@ -939,6 +979,52 @@ mod tests {
         let src = std::fs::read_to_string(&path).unwrap();
         assert!(src.starts_with("# kept"), "{src}");
         (echoed, writes)
+    }
+
+    #[test]
+    fn a_session_is_written_only_where_it_differs_from_its_place() {
+        // Window A in session admin: "One" (F1; D1, and D2 setting me). Window B: "Mine" (F2,
+        // session me) and "Other" (F3).
+        let src = format!(
+            "# kept\n[[window]]\ntitle = \"A\"\nsession = \"admin\"\n\
+             [[window.group]]\nname = \"One\"\nurl = \"{F1}\"\n\
+             [[window.group.tab]]\ntitle = \"Budget\"\nurl = \"{D1}\"\n\
+             [[window.group.tab]]\ntitle = \"Minutes\"\nurl = \"{D2}\"\nsession = \"me\"\n\
+             [[window]]\ntitle = \"B\"\n\
+             [[window.group]]\nname = \"Mine\"\nurl = \"{F2}\"\nsession = \"me\"\n\
+             [[window.group]]\nname = \"Other\"\nurl = \"{F3}\"\n"
+        );
+        // D2 into "Mine": its place now gives it `me`, so its own session goes.
+        let (ws, w) = run_on(&src, |ws| {
+            let (d, h) = (id_of(ws, D2), id_of(ws, F2));
+            change(ws, |ws| {
+                ws.move_tab(&d, Dest::Group(&h), &Default::default())
+            })
+            .1
+        });
+        assert!(w
+            .iter()
+            .any(|w| matches!(w, Write::SetSession { session: None, url, .. } if url == D2)));
+        assert_eq!(ws.find(&id_of(&ws, D2)).unwrap().2.key.store, "me");
+        // D1 into "Other": it sets nothing, so it takes B's default session.
+        let (ws, w) = run_on(&src, |ws| {
+            let (d, h) = (id_of(ws, D1), id_of(ws, F3));
+            change(ws, |ws| {
+                ws.move_tab(&d, Dest::Group(&h), &Default::default())
+            })
+            .1
+        });
+        assert!(!w.iter().any(|w| matches!(w, Write::SetSession { .. })));
+        assert_eq!(ws.find(&id_of(&ws, D1)).unwrap().2.key.store, "default");
+        // A document opened from D2 in A takes D2's login and writes it.
+        let (ws, w) = run_on(&src, |ws| {
+            let d = id_of(ws, D2);
+            change(ws, |ws| ws.open_from(&d, &url(D3)).map(|_| ())).1
+        });
+        assert!(
+            matches!(&w[..], [Write::AddDoc { doc, .. }] if doc.session.as_deref() == Some("me"))
+        );
+        assert_eq!(ws.find(&id_of(&ws, D3)).unwrap().2.key.store, "me");
     }
 
     #[test]
@@ -1042,7 +1128,7 @@ mod tests {
     #[test]
     fn every_op_maps_to_one_write() {
         let w = one(run(|ws| {
-            ws.new_group("B", &url(D3), "default").unwrap();
+            ws.new_group("B", &url(D3)).unwrap();
         }));
         assert!(matches!(&w, Write::NewGroup { window, name, .. } if window == "B" && name == D3));
 
@@ -1146,7 +1232,7 @@ mod tests {
         };
         // A handed document that names no group.
         let w = one(run(|ws| {
-            ws.receive("A", None, D5, "default").unwrap();
+            ws.receive("A", None, D5).unwrap();
         }));
         assert!(matches!(&w, Write::AddDoc { doc, .. } if doc.url == D5) && unsorted(&w));
 
@@ -1253,7 +1339,7 @@ mod tests {
                     window: "A".into(),
                     name: D3.into(),
                     url: D3.into(),
-                    store: DEFAULT_STORE.into(),
+                    session: None,
                     collapsed: false,
                     named: false,
                     detached: false,

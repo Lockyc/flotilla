@@ -5,7 +5,6 @@
 //! (`AppState::unsorted_reason`). Also the Group menu's Connect and Disconnect Google Account.
 
 use crate::commands::handed_front;
-use crate::config::DEFAULT_STORE;
 use crate::google::drive::{Located, Locator};
 use crate::google::http::Http;
 use crate::google::{accounts, oauth, Client};
@@ -51,7 +50,7 @@ fn lookup(ws: &Workspace, doc: &TabId) -> Option<Lookup> {
         .iter()
         .flat_map(|w| &w.unsorted)
         .find(|t| &t.id == doc)?;
-    let key = doc_key(DEFAULT_STORE, &Url::parse(&tab.home_url).ok()?)?;
+    let key = doc_key(&tab.key.store, &Url::parse(&tab.home_url).ok()?)?;
     let containers = ws
         .windows
         .iter()
@@ -403,7 +402,7 @@ mod tests {
             "https://drive.google.com/drive/folders/1FoLdErFoLdErFoLdEr01",
         );
         new_group(&mut ws, "https://example.com/");
-        let Some(Handed::Unsorted(d)) = ws.receive("W", None, DOC, "default") else {
+        let Some(Handed::Unsorted(d)) = ws.receive("W", None, DOC) else {
             panic!()
         };
         assert_eq!(
@@ -433,7 +432,7 @@ mod tests {
     #[test]
     fn reasons_go_with_their_documents_leaving_unsorted() {
         let mut ws = one_window();
-        let Some(Handed::Unsorted(d)) = ws.receive("W", None, DOC, "default") else {
+        let Some(Handed::Unsorted(d)) = ws.receive("W", None, DOC) else {
             panic!()
         };
         let gone = TabId::from("t-gone");
@@ -475,19 +474,20 @@ mod tests {
     fn a_sort_into_another_window_brings_it_forward() {
         use flotilla_core::model::{opened_id, ConfigWindow};
         let window = |t: &str| ConfigWindow {
+            store: "default".into(),
             unsorted: vec![],
             title: t.into(),
             groups: vec![],
         };
         let mut ws = Workspace::from_config(&[window("W"), window("V")]);
         let folder = |n: u32| Url::parse(&format!("https://drive.google.com/drive/folders/f{n}"));
-        let here = opened_id(ws.new_group("W", &folder(1).unwrap(), "default").unwrap());
-        let there = opened_id(ws.new_group("V", &folder(2).unwrap(), "default").unwrap());
+        let here = opened_id(ws.new_group("W", &folder(1).unwrap()).unwrap());
+        let there = opened_id(ws.new_group("V", &folder(2).unwrap()).unwrap());
         let doc2 = DOC.replace("01/", "02/");
-        let Some(Handed::Unsorted(a)) = ws.receive("W", None, DOC, "default") else {
+        let Some(Handed::Unsorted(a)) = ws.receive("W", None, DOC) else {
             panic!()
         };
-        let Some(Handed::Unsorted(b)) = ws.receive("W", None, &doc2, "default") else {
+        let Some(Handed::Unsorted(b)) = ws.receive("W", None, &doc2) else {
             panic!()
         };
         let live = HashSet::new();
@@ -511,10 +511,10 @@ mod tests {
     fn a_retry_takes_only_documents_left_with_a_reason() {
         let mut ws = one_window();
         let doc2 = DOC.replace("01/", "02/");
-        let Some(Handed::Unsorted(left)) = ws.receive("W", None, DOC, "default") else {
+        let Some(Handed::Unsorted(left)) = ws.receive("W", None, DOC) else {
             panic!()
         };
-        let Some(Handed::Unsorted(by_hand)) = ws.receive("W", None, &doc2, "default") else {
+        let Some(Handed::Unsorted(by_hand)) = ws.receive("W", None, &doc2) else {
             panic!()
         };
         let gone = TabId::from("t-gone");

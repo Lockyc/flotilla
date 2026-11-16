@@ -7,7 +7,7 @@ use crate::config::{self, STARTER_WINDOW};
 use crate::write::{self, Doc, Write};
 use config_core::toml_edit::DocumentMut;
 use flotilla_core::identity::{identity, page_title, tab_id, DocKey};
-use flotilla_core::model::{Group, Workspace};
+use flotilla_core::model::{Group, Workspace, DEFAULT_STORE};
 use flotilla_core::session::{self, Session, V1Session};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -125,6 +125,7 @@ fn add_group(config_path: &Path, window: &str, g: &Group) -> Result<(), String> 
             url: m.home_url.clone(),
             detached: m.detached,
             named: m.named,
+            session: None,
         })
         .collect();
     let Some(head) = key(&g.store, &g.head.home_url) else {
@@ -152,7 +153,7 @@ fn add_group(config_path: &Path, window: &str, g: &Group) -> Result<(), String> 
         window: window.to_string(),
         name: write::unique_group_name(&names, page_title(&g.head.title)),
         url: g.head.home_url.clone(),
-        store: g.store.clone(),
+        session: (g.store != DEFAULT_STORE).then(|| g.store.clone()),
         collapsed: g.collapsed,
         detached: g.head.detached,
         named: g.head.named,
@@ -234,6 +235,7 @@ mod tests {
             key: identity("default", &Url::parse(url).unwrap()),
             detached,
             named: false,
+            session: None,
         }
     }
 
@@ -243,6 +245,7 @@ mod tests {
             members,
             collapsed,
             store: "default".into(),
+            session: None,
         }
     }
 
