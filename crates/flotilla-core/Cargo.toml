@@ -9,6 +9,7 @@ serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 url = "2"
 shell-core = { git = "https://github.com/Lockyc/shell-core", rev = "81cb70f4ee805f28998b9c309237d338fadf9e6c", default-features = false }
+config-core = { git = "https://github.com/Lockyc/config-core", rev = "20865a472871ef938b69aa5c7da86e28a24c39e9" }
 
 [dev-dependencies]
 tempfile = "3"
