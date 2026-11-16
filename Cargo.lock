@@ -357,7 +357,7 @@ checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
 [[package]]
 name = "chrome-core"
 version = "0.1.0"
-source = "git+https://github.com/Lockyc/chrome-core?rev=23d7a1cc6c1e1c3b7aa909413a2b94b74cb9fb13#23d7a1cc6c1e1c3b7aa909413a2b94b74cb9fb13"
+source = "git+https://github.com/Lockyc/chrome-core?rev=d526d54d507e16bf8082efcf0a49b8d4d1463b2b#d526d54d507e16bf8082efcf0a49b8d4d1463b2b"
 
 [[package]]
 name = "chrono"
@@ -847,7 +847,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3007,7 +3007,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3063,7 +3063,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3389,7 +3389,7 @@ dependencies = [
 [[package]]
 name = "shell-core"
 version = "0.6.0"
-source = "git+https://github.com/Lockyc/shell-core?rev=81cb70f4ee805f28998b9c309237d338fadf9e6c#81cb70f4ee805f28998b9c309237d338fadf9e6c"
+source = "git+https://github.com/Lockyc/shell-core?rev=bbe1fc76201f0c7ccc6637f98739fca4a9b4ec70#bbe1fc76201f0c7ccc6637f98739fca4a9b4ec70"
 dependencies = [
  "block2",
  "getrandom 0.2.17",
@@ -4030,7 +4030,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4736,7 +4736,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
