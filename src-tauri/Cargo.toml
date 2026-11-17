@@ -16,11 +16,11 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 # The shared sidebar chrome, embedded as string consts; build.rs writes them into ../src (the
 # frontendDist Tauri embeds). Pinned by rev — bump in lockstep with the toolchain.
-chrome-core = { git = "https://github.com/Lockyc/chrome-core", rev = "d526d54d507e16bf8082efcf0a49b8d4d1463b2b" }
+chrome-core = { git = "https://github.com/Lockyc/chrome-core", rev = "d33c3f75e61f16593f38c1729065ee9bde071fdd" }
 # Shared release tooling + build_stamp. build.rs materializes scripts/*.sh (git-ignored) and stamps
 # BUILD_GIT_SHA/BUILD_DATE. default-features=false keeps the build-dep zero-tauri (resolver 2 keeps
 # it separate from the runtime-featured [dependencies] entry below). Pinned by rev.
-shell-core = { git = "https://github.com/Lockyc/shell-core", rev = "bbe1fc76201f0c7ccc6637f98739fca4a9b4ec70", default-features = false }
+shell-core = { git = "https://github.com/Lockyc/shell-core", rev = "b32aa2fa150949795fa63e4fe338887e1921b905", default-features = false }
 
 [dependencies]
 tauri = { version = "2", features = ["unstable", "devtools"] }
@@ -31,12 +31,12 @@ serde_json = "1"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 # Same rev as the build-dep above — bump both in lockstep.
-shell-core = { git = "https://github.com/Lockyc/shell-core", rev = "bbe1fc76201f0c7ccc6637f98739fca4a9b4ec70", features = ["runtime"] }
+shell-core = { git = "https://github.com/Lockyc/shell-core", rev = "b32aa2fa150949795fa63e4fe338887e1921b905", features = ["runtime"] }
 flotilla-core = { path = "../crates/flotilla-core" }
 dirs = "5"
 toml = "0.8"
 # House-style formatter, starter-config seeding and path resolution, shared with curator, warden and lector. Pinned by rev, same as curator.
-config-core = { git = "https://github.com/Lockyc/config-core", rev = "20865a472871ef938b69aa5c7da86e28a24c39e9" }
+config-core = { git = "https://github.com/Lockyc/config-core", rev = "551c3187cd30fa585c5e1f879bc864edb2578306" }
 url = "2"
 # Google Drive access (OAuth + REST). reqwest keeps the rustls backend the updater already resolves.
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls-no-provider"] }
