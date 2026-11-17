@@ -1,13 +1,13 @@
-name    = "flotilla"
+name = "flotilla"
 summary = "A macOS workspace where any tab can head a group of documents (usually a Google Drive folder), each document open once, the session restored on relaunch."
-kind    = "app"
-status  = "active"
-tags    = ["workspace", "tabs", "documents", "google-drive", "macos"]
-stack   = ["rust", "tauri", "javascript"]
+status = "active"
+tags = ["workspace", "tabs", "documents", "google-drive", "macos"]
 
 [github]
 topics_extra = ["desktop-app", "tab-management", "tauri-app", "webview", "wkwebview", "google-drive", "productivity"]
+description = "A macOS workspace where any tab can head a group of documents (usually a Google Drive folder), each document open once, the session restored on relaunch."
+topics = ["desktop-app", "google-drive", "macos", "productivity", "rust", "tab-management", "tauri-app", "webview", "wkwebview", "documents", "javascript", "tabs", "tauri", "workspace"]
 
 [[provides]]
-name    = "document-workspace"
+name = "document-workspace"
 summary = "A macOS tab workspace where a tab heads a group of documents opened from it, each open once, restored on relaunch"
