@@ -8,5 +8,5 @@
 # toolchain. Bump config-core first, then match it here (the natural moment is when
 # you bump a core's pinned rev).
 [toolchain]
-channel = "1.96.0"
+channel = "1.99.1"
 components = ["rustfmt", "clippy"]
