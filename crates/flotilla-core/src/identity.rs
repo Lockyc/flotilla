@@ -623,4 +623,169 @@ mod tests {
         assert_eq!(c("https://drive.google.com/drive/recent"), None);
         assert_eq!(c("https://example.com/folders/F1"), None);
     }
+
+    /// Every form one Drive file or folder is reached by: any id, any editor, any of the
+    /// decorations a share link or a loaded page adds.
+    mod forms {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn file_id() -> impl Strategy<Value = String> {
+            "[A-Za-z0-9_-]{20,44}"
+        }
+
+        /// What a link or a loaded page adds to a file's address: an account segment, a trailing
+        /// slash, `usp=`, the document tab and a heading.
+        #[derive(Clone, Debug)]
+        struct Decor {
+            account: Option<(u8, bool)>,
+            slash: bool,
+            usp: bool,
+            tab: Option<u8>,
+            heading: bool,
+        }
+
+        const PLAIN: Decor = Decor {
+            account: None,
+            slash: false,
+            usp: false,
+            tab: None,
+            heading: false,
+        };
+
+        fn decor() -> impl Strategy<Value = Decor> {
+            (
+                proptest::option::of((0..4u8, any::<bool>())),
+                any::<bool>(),
+                any::<bool>(),
+                proptest::option::of(0..9u8),
+                any::<bool>(),
+            )
+                .prop_map(|(account, slash, usp, tab, heading)| Decor {
+                    account,
+                    slash,
+                    usp,
+                    tab,
+                    heading,
+                })
+        }
+
+        fn editor() -> impl Strategy<Value = &'static str> {
+            prop_oneof![Just("document"), Just("spreadsheets"), Just("presentation")]
+        }
+
+        impl Decor {
+            fn tail(&self) -> String {
+                let mut q = vec![];
+                if self.usp {
+                    q.push("usp=sharing".to_string());
+                }
+                if let Some(n) = self.tab {
+                    q.push(format!("tab=t.{n}"));
+                }
+                let q = if q.is_empty() {
+                    String::new()
+                } else {
+                    format!("?{}", q.join("&"))
+                };
+                let slash = if self.slash { "/" } else { "" };
+                let frag = if self.heading { "#heading=h.x1" } else { "" };
+                format!("{slash}{q}{frag}")
+            }
+
+            /// `/<editor>[/u/N]/d/<id>/<view>`, or `/u/N/<editor>/d/<id>/<view>`.
+            fn doc(&self, editor: &str, id: &str, view: &str) -> Url {
+                let path = match self.account {
+                    Some((n, true)) => format!("/{editor}/u/{n}/d/{id}/{view}"),
+                    Some((n, false)) => format!("/u/{n}/{editor}/d/{id}/{view}"),
+                    None => format!("/{editor}/d/{id}/{view}"),
+                };
+                Url::parse(&format!("https://docs.google.com{path}{}", self.tail())).unwrap()
+            }
+
+            fn folder(&self, id: &str) -> Url {
+                let account = self.account.map(|(n, _)| format!("/u/{n}"));
+                let path = format!("/drive{}/folders/{id}", account.unwrap_or_default());
+                Url::parse(&format!("https://drive.google.com{path}{}", self.tail())).unwrap()
+            }
+        }
+
+        fn open_link(host: &str, id: &str, usp: bool) -> Url {
+            let usp = if usp { "usp=sharing&" } else { "" };
+            Url::parse(&format!("https://{host}/open?{usp}id={id}")).unwrap()
+        }
+
+        proptest! {
+            /// A share link and the editor's address, however decorated, are one document: the
+            /// same link handed twice queues and opens once.
+            #[test]
+            fn an_open_id_link_is_the_document_it_names(
+                id in file_id(),
+                e in editor(),
+                d in decor(),
+                host in prop_oneof![Just("drive.google.com"), Just("docs.google.com")],
+                usp in any::<bool>(),
+            ) {
+                prop_assert_eq!(
+                    identity("", &open_link(host, &id, usp)),
+                    identity("", &d.doc(e, &id, "edit"))
+                );
+            }
+
+            /// Every decorated form of one document keys and heads as its bare `/edit` address
+            /// does; `/view` is the same document but another page.
+            #[test]
+            fn decorations_change_neither_the_key_nor_the_head(
+                id in file_id(),
+                e in editor(),
+                d in decor(),
+                store in "[a-z]{1,8}",
+            ) {
+                let bare = PLAIN.doc(e, &id, "edit");
+                let decorated = d.doc(e, &id, "edit");
+                prop_assert_eq!(identity(&store, &decorated), identity(&store, &bare));
+                prop_assert_eq!(doc_key(&store, &decorated).map(|k| k.id), Some(id.clone()));
+                prop_assert_eq!(head_key(&decorated), head_key(&bare));
+                let view = d.doc(e, &id, "view");
+                prop_assert_eq!(identity(&store, &view), identity(&store, &bare));
+                prop_assert_ne!(head_key(&view), head_key(&bare));
+            }
+
+            /// A folder view in any form, and a share link, head the folder they name.
+            #[test]
+            fn a_folder_heads_its_own_container(
+                id in file_id(),
+                d in decor(),
+                usp in any::<bool>(),
+            ) {
+                let want = Some(("google", id.clone()));
+                prop_assert_eq!(head_container(&d.folder(&id)), want.clone());
+                prop_assert_eq!(head_container(&open_link("drive.google.com", &id, usp)), want);
+            }
+
+            /// A home is a fixed point, and the same page as the address it was kept from.
+            #[test]
+            fn a_home_is_its_own_home(id in file_id(), e in editor(), d in decor()) {
+                for u in [d.doc(e, &id, "edit"), d.folder(&id)] {
+                    let home = home_url(&u);
+                    prop_assert_eq!(home_url(&home), home.clone());
+                    prop_assert_eq!(head_key(&home), head_key(&u));
+                }
+            }
+
+            /// A page's name is its reported title less the one Google app name it ends with.
+            #[test]
+            fn a_title_loses_exactly_its_app_name(
+                t in "[ -~]{0,30}",
+                app in proptest::sample::select(GOOGLE_APP_TITLES),
+            ) {
+                let reported = format!("{t}{app}");
+                let want = if t.trim().is_empty() { reported.as_str() } else { t.as_str() };
+                prop_assert_eq!(page_title(&reported), want);
+                if !GOOGLE_APP_TITLES.iter().any(|s| t.ends_with(s)) {
+                    prop_assert_eq!(page_title(&t), t.as_str());
+                }
+            }
+        }
+    }
 }
