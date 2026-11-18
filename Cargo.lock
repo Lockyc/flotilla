@@ -981,6 +981,7 @@ dependencies = [
  "dirs 5.0.1",
  "flotilla-core",
  "getrandom 0.4.3",
+ "proptest",
  "reqwest",
  "rustls",
  "security-framework",

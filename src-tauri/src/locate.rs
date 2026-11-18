@@ -441,6 +441,38 @@ mod tests {
         assert_eq!(reasons.into_keys().collect::<Vec<_>>(), [d]);
     }
 
+    proptest::proptest! {
+        /// Lookups begun and answered in any order: an answer settles its document only when it
+        /// is the latest begun for it and nothing settled it since.
+        #[test]
+        fn any_order_of_answers_settles_only_the_newest(
+            ops in proptest::collection::vec((0..3u8, proptest::option::of(0..16usize)), 1..40)
+        ) {
+            let mut l = Lookups::default();
+            let mut begun: Vec<(TabId, u64)> = vec![];
+            let mut open: HashMap<TabId, u64> = HashMap::new();
+            for (doc, answer) in ops {
+                let doc = TabId::from(format!("t-{doc}"));
+                match answer {
+                    None => {
+                        let seq = l.begin(&doc);
+                        begun.push((doc.clone(), seq));
+                        open.insert(doc, seq);
+                    }
+                    Some(k) if !begun.is_empty() => {
+                        let (doc, seq) = begun[k % begun.len()].clone();
+                        let newest = open.get(&doc) == Some(&seq);
+                        proptest::prop_assert_eq!(l.settled(&doc, seq), newest, "{} #{}", doc, seq);
+                        if newest {
+                            open.remove(&doc);
+                        }
+                    }
+                    Some(_) => {}
+                }
+            }
+        }
+    }
+
     /// An answer counts only while no later lookup of its document has begun, and once.
     #[test]
     fn only_the_latest_lookup_of_a_document_settles() {

@@ -1455,4 +1455,280 @@ mod tests {
             "Newsletters"
         );
     }
+
+    /// Random sequences of changes through [`through_with`], some with the config's folder made
+    /// unwritable so the write fails.
+    mod sequences {
+        use super::*;
+        use crate::commands::{place, requeue, Handoff};
+        use flotilla_core::model::Handed;
+        use proptest::prelude::*;
+        use std::collections::HashSet;
+        use std::os::unix::fs::PermissionsExt;
+
+        const LINKS: &[&str] = &[D1, D2, D3, D4, D5, F1, F2, F3, "https://example.com/x"];
+        const WINDOWS: &[&str] = &["A", "B"];
+
+        #[derive(Clone, Debug)]
+        enum Op {
+            /// A link handed to a window, aimed at a group or not (`commands::open_handed`).
+            Hand(usize, Option<usize>, usize),
+            NewGroup(usize, usize),
+            OpenFrom(usize, usize),
+            CloseTab(usize),
+            CloseGroup(usize),
+            MoveTab(usize, usize),
+            MakeOwnGroup(usize),
+            SetDetached(usize, bool),
+            SetCollapsed(usize, bool),
+            Rename(usize),
+            ReopenRecent(usize, usize),
+            AddIncoming(usize, usize),
+            IncomingAsGroup(usize),
+        }
+
+        fn op() -> impl Strategy<Value = Op> {
+            let i = || 0..8usize;
+            let l = || 0..LINKS.len();
+            prop_oneof![
+                4 => (i(), proptest::option::of(i()), l()).prop_map(|(w, g, k)| Op::Hand(w, g, k)),
+                2 => (i(), l()).prop_map(|(w, k)| Op::NewGroup(w, k)),
+                2 => (i(), l()).prop_map(|(t, k)| Op::OpenFrom(t, k)),
+                2 => i().prop_map(Op::CloseTab),
+                2 => i().prop_map(Op::CloseGroup),
+                2 => (i(), i()).prop_map(|(t, g)| Op::MoveTab(t, g)),
+                1 => i().prop_map(Op::MakeOwnGroup),
+                1 => (i(), any::<bool>()).prop_map(|(t, d)| Op::SetDetached(t, d)),
+                1 => (i(), any::<bool>()).prop_map(|(g, c)| Op::SetCollapsed(g, c)),
+                1 => i().prop_map(Op::Rename),
+                2 => (i(), i()).prop_map(|(w, r)| Op::ReopenRecent(w, r)),
+                3 => (i(), i()).prop_map(|(q, g)| Op::AddIncoming(q, g)),
+                2 => i().prop_map(Op::IncomingAsGroup),
+            ]
+        }
+
+        fn nth<T: Clone>(items: Vec<T>, i: usize) -> Option<T> {
+            (!items.is_empty()).then(|| items[i % items.len()].clone())
+        }
+
+        fn tab(ws: &Workspace, i: usize) -> Option<TabId> {
+            nth(ws.tabs().map(|t| t.id.clone()).collect(), i)
+        }
+
+        fn head(ws: &Workspace, i: usize) -> Option<TabId> {
+            let heads = ws.windows.iter().flat_map(|w| &w.groups);
+            nth(heads.map(|g| g.head.id.clone()).collect(), i)
+        }
+
+        fn queued(ws: &Workspace) -> Vec<String> {
+            let items = ws.windows.iter().flat_map(|w| &w.incoming);
+            items
+                .chain(ws.stray.values().flatten())
+                .map(|q| q.id.clone())
+                .collect()
+        }
+
+        /// Runs `op` on `ws` as its command does; a handed link the failed write took away is
+        /// queued instead (`commands::requeue`). Also whether the write failed.
+        fn step(
+            gate: &Gate,
+            ws: &std::sync::Mutex<Workspace>,
+            path: &Path,
+            op: &Op,
+        ) -> (Option<Handed>, bool) {
+            let failed = std::cell::Cell::new(false);
+            let reload = |_: String| {
+                failed.set(true);
+                let fresh = load(path);
+                ws.lock().unwrap().rebase(fresh);
+            };
+            if let Op::Hand(w, g, k) = *op {
+                let group = g.and_then(|g| {
+                    let ws = ws.lock().unwrap();
+                    let h = head(&ws, g)?;
+                    Some(ws.find(&h)?.2.title.clone())
+                });
+                let h = Handoff {
+                    window: Some(WINDOWS[w % WINDOWS.len()].into()),
+                    group,
+                    link: LINKS[k].into(),
+                    problem: None,
+                };
+                let placed = through_with(
+                    gate,
+                    ws,
+                    path,
+                    |ws| change(ws, |ws| place(ws, &h, None)),
+                    reload,
+                    |ws, placed| requeue(ws, &h, None, placed),
+                    || {},
+                );
+                return (placed.handed, failed.get());
+            }
+            let live: HashSet<TabId> = ws.lock().unwrap().tabs().map(|t| t.id.clone()).collect();
+            let op = op.clone();
+            through_with(
+                gate,
+                ws,
+                path,
+                |ws| {
+                    change(ws, |ws| match op {
+                        Op::Hand(..) => unreachable!(),
+                        Op::NewGroup(w, k) => {
+                            ws.new_group(WINDOWS[w % WINDOWS.len()], &url(LINKS[k]));
+                        }
+                        Op::OpenFrom(t, k) => {
+                            if let Some(t) = tab(ws, t) {
+                                ws.open_from(&t, &url(LINKS[k]));
+                            }
+                        }
+                        Op::CloseTab(t) => {
+                            if let Some(t) = tab(ws, t) {
+                                ws.close_tab(&t, &live);
+                            }
+                        }
+                        Op::CloseGroup(g) => {
+                            if let Some(h) = head(ws, g) {
+                                ws.close_group(&h, &live);
+                            }
+                        }
+                        Op::MoveTab(t, g) => {
+                            if let (Some(t), Some(h)) = (tab(ws, t), head(ws, g)) {
+                                ws.move_tab(&t, Dest::Group(&h), &live);
+                            }
+                        }
+                        Op::MakeOwnGroup(t) => {
+                            if let Some(t) = tab(ws, t) {
+                                ws.make_own_group(&t);
+                            }
+                        }
+                        Op::SetDetached(t, d) => {
+                            if let Some(t) = tab(ws, t) {
+                                ws.set_detached(&t, d);
+                            }
+                        }
+                        Op::SetCollapsed(g, c) => {
+                            if let Some(h) = head(ws, g) {
+                                ws.set_collapsed(&h, c);
+                            }
+                        }
+                        Op::Rename(t) => {
+                            if let Some(t) = tab(ws, t) {
+                                ws.rename(&t, "Renamed");
+                            }
+                        }
+                        Op::ReopenRecent(w, r) => {
+                            if !ws.recent.is_empty() {
+                                let r = r % ws.recent.len();
+                                ws.reopen_recent(WINDOWS[w % WINDOWS.len()], r);
+                            }
+                        }
+                        Op::AddIncoming(q, g) => {
+                            if let (Some(q), Some(h)) = (nth(queued(ws), q), head(ws, g)) {
+                                ws.add_incoming(&q, &h);
+                            }
+                        }
+                        Op::IncomingAsGroup(q) => {
+                            if let Some(q) = nth(queued(ws), q) {
+                                ws.incoming_as_group(&q);
+                            }
+                        }
+                    })
+                },
+                reload,
+                |_, _| {},
+                || {},
+            );
+            (None, failed.get())
+        }
+
+        /// Makes the config's folder unwritable while held, so config-core's atomic write can't
+        /// create its temp file.
+        struct ReadOnly<'a>(&'a Path);
+
+        impl<'a> ReadOnly<'a> {
+            fn new(dir: &'a Path) -> Self {
+                std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+                ReadOnly(dir)
+            }
+        }
+
+        impl Drop for ReadOnly<'_> {
+            fn drop(&mut self) {
+                let _ = std::fs::set_permissions(self.0, std::fs::Permissions::from_mode(0o700));
+            }
+        }
+
+        proptest! {
+            // Each step writes and reloads a real file: 24 cases keep `just test` quick, and
+            // PROPTEST_CASES runs more.
+            #![proptest_config(ProptestConfig {
+                cases: std::env::var("PROPTEST_CASES")
+                    .ok()
+                    .and_then(|n| n.parse().ok())
+                    .unwrap_or(24),
+                failure_persistence: None,
+                ..ProptestConfig::default()
+            })]
+
+            /// After a write that lands, the reload echoes the workspace unchanged. After one that
+            /// fails, the workspace is what it was before the change, with every Incoming item
+            /// and Recent entry it had, and a handed link the change would have opened waits
+            /// under Incoming.
+            #[test]
+            fn a_failed_write_loses_nothing_and_a_landed_one_echoes(
+                ops in proptest::collection::vec((op(), proptest::bool::weighted(0.3)), 1..16)
+            ) {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("config.toml");
+                std::fs::write(&path, source()).unwrap();
+                let gate = Gate::default();
+                let ws = std::sync::Mutex::new(load(&path));
+                for (op, fail) in &ops {
+                    let before = ws.lock().unwrap().clone();
+                    let file = std::fs::read_to_string(&path).unwrap();
+                    let (handed, failed) = {
+                        let _ro = fail.then(|| ReadOnly::new(dir.path()));
+                        step(&gate, &ws, &path, op)
+                    };
+                    let after = ws.lock().unwrap().clone();
+                    if failed {
+                        prop_assert_eq!(std::fs::read_to_string(&path).unwrap(), file);
+                        // Every item queued before is queued still, and Recent is as it was.
+                        let now = queued(&after);
+                        for id in queued(&before) {
+                            prop_assert!(now.contains(&id), "{:?} failed and lost {}", op, id);
+                        }
+                        prop_assert_eq!(&after.recent, &before.recent);
+                        // Beyond what the rescue queued, the workspace is as it was.
+                        let mut back = after.clone();
+                        for w in &mut back.windows {
+                            w.incoming.retain(|i| {
+                                before.windows.iter().flat_map(|b| &b.incoming).any(|b| b.id == i.id)
+                            });
+                        }
+                        prop_assert_eq!(&back, &before, "{:?} failed but changed the workspace", op);
+                        // A handed link is open where it was raised, or waits under Incoming.
+                        match &handed {
+                            Some(Handed::Queued(id) | Handed::AlreadyQueued(id)) => {
+                                prop_assert!(now.contains(id), "{:?} reported {} queued", op, id);
+                            }
+                            Some(
+                                Handed::Raised(id)
+                                | Handed::Grouped(id)
+                                | Handed::Joined(id)
+                                | Handed::Unsorted(id),
+                            ) => {
+                                prop_assert!(after.find(id).is_some(), "{:?} lost its link", op);
+                            }
+                            None => {}
+                        }
+                    }
+                    let mut echoed = after.clone();
+                    echoed.rebase(load(&path));
+                    prop_assert_eq!(&echoed, &after, "the reload after {:?} changed the workspace", op);
+                }
+            }
+        }
+    }
 }
