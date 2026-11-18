@@ -29,7 +29,7 @@ chrome-core, shell-core and config-core are pinned by `rev` in `src-tauri/Cargo.
 
 ## Commands
 
-`just run` (an agent runs `SHELL_CORE_UNFOCUSED=1 just run`, which never takes the operator's focus), `just test`, `just gate` (the check; there is no CI), `just build`, `just install`, `just icon` (regenerates `src-tauri/icons` from `icon.svg` through plate), `just release`.
+`just run` (an agent runs `SHELL_CORE_UNFOCUSED=1 just run`, which never takes the operator's focus), `just test`, `just gate` (the check; there is no CI), `just mutants` / `just mutants-diff` (occasional, not in the gate), `just build`, `just install`, `just icon` (regenerates `src-tauri/icons` from `icon.svg` through plate), `just release`.
 
 ## Releases
 
