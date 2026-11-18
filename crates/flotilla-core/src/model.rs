@@ -2929,6 +2929,51 @@ mod tests {
     }
 
     #[test]
+    fn a_hand_edit_removing_the_active_member_activates_its_own_groups_head() {
+        let mut w = ws();
+        let h1 = head_of(&mut w, 1);
+        let h2 = head_of(&mut w, 2);
+        let m = id(w.open_from(&h2, &doc(1)).unwrap());
+        assert_eq!(active(&w), Some(m.clone()));
+        let mut cfg = cfg_of(&w);
+        cfg[0].groups[1].tabs.clear();
+        w.rebase(Workspace::from_config(&cfg));
+        assert_eq!(active(&w), Some(h2));
+        assert_ne!(active(&w), Some(h1));
+    }
+
+    #[test]
+    fn active_queries_name_the_shown_tab_and_its_group() {
+        let mut w = ws();
+        let h1 = head_of(&mut w, 1);
+        let h2 = head_of(&mut w, 2);
+        assert!(w.is_active(&h2) && !w.is_active(&h1));
+        assert_eq!(w.active_group(W).map(|g| g.head.id.clone()), Some(h2));
+        w.activate(&h1);
+        assert_eq!(w.active_group(W).map(|g| g.head.id.clone()), Some(h1));
+    }
+
+    #[test]
+    fn unname_lets_the_page_title_lead_again() {
+        let mut w = ws();
+        let h = head_of(&mut w, 1);
+        w.rename(&h, "Mine");
+        w.unname(&h);
+        assert!(!w.find(&h).unwrap().2.named);
+    }
+
+    #[test]
+    fn forgetting_a_recent_entry_past_the_end_does_nothing() {
+        let mut w = ws();
+        let h = head_of(&mut w, 1);
+        w.close_group(&h, &HashSet::new());
+        w.forget_recent(1);
+        assert_eq!(w.recent.len(), 1);
+        w.forget_recent(0);
+        assert!(w.recent.is_empty());
+    }
+
+    #[test]
     fn opening_a_queued_link_by_any_route_takes_its_row() {
         let mut w = Workspace::from_config(&cfg());
         let Some(Opened::Added(h)) = w.new_group(W, &folder(1)) else {
