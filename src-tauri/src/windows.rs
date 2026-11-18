@@ -55,6 +55,7 @@ fn build(app: &AppHandle, slot: &Slot) -> tauri::Result<WebviewWindow> {
             .hidden_title(true)
             .title_bar_style(TitleBarStyle::Overlay)
             .theme(dark.then_some(tauri::Theme::Dark))
+            .focused(shell_core::focus::focused())
             .build()?;
     crate::menu::follow_focus(app, &window.as_ref().window());
     let later = app.clone();

@@ -194,8 +194,7 @@ fn redock(app: &AppHandle, id: &TabId) {
 /// Brings tab `id`'s detached window to the front.
 pub fn raise(app: &AppHandle, id: &TabId) {
     if let Some(w) = app.get_window(&window_label(id)) {
-        let _ = w.unminimize();
-        let _ = w.set_focus();
+        shell_core::focus::bring_forward(&w);
     }
 }
 
