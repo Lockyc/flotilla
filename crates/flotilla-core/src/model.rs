@@ -83,7 +83,8 @@ pub struct WindowWs {
     /// The tab the window shows. Never a detached tab: activating one leaves this as it is and
     /// asks for its window instead ([`Workspace::take_raise`]).
     pub active: Option<TabId>,
-    /// Links handed to this window, waiting to be placed, oldest first. Run state: the session
+    /// Links handed to this window, waiting to be placed, oldest first; none is open in the
+    /// window's store ([`Workspace::unqueue_open`]). Run state: the session
     /// keeps it, and a config reload carries it over ([`Workspace::rebase`]).
     pub incoming: Vec<Incoming>,
 }
@@ -406,7 +407,7 @@ impl Workspace {
     /// under the window of that title, then those whose window is gone, and the `stray` ones
     /// before them, appended to the first window's. With no window at all they wait in `stray`,
     /// so a link is never dropped. Every id is re-derived from its link, and an item whose id is
-    /// queued already is left out.
+    /// queued already, or whose link is open in its window's store, is left out.
     fn adopt_incoming(&mut self, queues: impl IntoIterator<Item = (String, Vec<Incoming>)>) {
         let (homed, gone): (Vec<_>, Vec<_>) = queues
             .into_iter()
@@ -427,10 +428,10 @@ impl Workspace {
     }
 
     /// Queues `item`, re-keyed, under window `wi`, else in `stray` under `title`, unless its id
-    /// is queued already.
+    /// is queued already or window `wi` would raise it.
     fn adopt_item(&mut self, wi: Option<usize>, title: &str, mut item: Incoming) {
         item.id = incoming_id(&item.link);
-        if self.queued(&item.id) {
+        if self.queued(&item.id) || wi.is_some_and(|wi| self.opens_in(wi, &item.link)) {
             return;
         }
         match wi {
@@ -587,6 +588,7 @@ impl Workspace {
             store: store.to_string(),
             session,
         });
+        self.unqueue_open();
         self.activate(&id);
         Some(Opened::Added(id))
     }
@@ -610,6 +612,7 @@ impl Workspace {
             Some(gi) => w.groups[gi].members.push(t),
             None => w.unsorted.push(t),
         }
+        self.unqueue_open();
         self.activate(&id);
         Some(Opened::Added(id))
     }
@@ -625,6 +628,7 @@ impl Workspace {
         let t = tab(url, url.as_str(), &store, false);
         let id = t.id.clone();
         self.windows[wi].unsorted.push(t);
+        self.unqueue_open();
         self.activate(&id);
         Some(Opened::Added(id))
     }
@@ -729,6 +733,7 @@ impl Workspace {
             let entry = self.recent.remove(index);
             let members = self.restorable(entry.members, &[entry.head.key]);
             self.windows[wi].groups[gi].members.extend(members);
+            self.unqueue_open();
             self.raise(occupant.clone());
             return Some(occupant);
         }
@@ -737,6 +742,7 @@ impl Workspace {
         group.head.detached = false;
         let id = group.head.id.clone();
         self.windows[wi].groups.push(group);
+        self.unqueue_open();
         self.activate(&id);
         Some(id)
     }
@@ -870,6 +876,7 @@ impl Workspace {
             Some(tg) => w.groups[tg].members.push(moved),
             None => w.unsorted.push(moved),
         }
+        self.unqueue_open();
         if was_active {
             if fw != tw {
                 self.windows[fw].active = None;
@@ -956,6 +963,27 @@ impl Workspace {
     /// Whether an item with id `id` is queued in any window, or in `stray`.
     fn queued(&self, id: &str) -> bool {
         self.incoming_at(id).is_some() || self.stray.values().flatten().any(|i| i.id == id)
+    }
+
+    /// Whether handing `link` to window `wi` would raise a tab: it is open in the window's store.
+    fn opens_in(&self, wi: usize, link: &str) -> bool {
+        Url::parse(link.trim()).is_ok_and(|u| {
+            self.open_doc(&identity(&self.windows[wi].store, &u))
+                .is_some()
+        })
+    }
+
+    /// Takes off every window's Incoming the links now open in that window's store: an open
+    /// document's row has nothing left to place, however it was opened.
+    fn unqueue_open(&mut self) {
+        for wi in 0..self.windows.len() {
+            let incoming = std::mem::take(&mut self.windows[wi].incoming);
+            let kept = incoming
+                .into_iter()
+                .filter(|i| !self.opens_in(wi, &i.link))
+                .collect();
+            self.windows[wi].incoming = kept;
+        }
     }
 
     /// The window index and queue position of the Incoming item `id`.
@@ -1066,7 +1094,7 @@ impl Workspace {
         let (wi, ii) = self.incoming_at(id)?;
         let url = parse_group_url(&self.windows[wi].incoming[ii].link).ok()?;
         let opened = self.open_from(head, &url)?;
-        self.windows[wi].incoming.remove(ii);
+        self.dismiss_incoming(id);
         Some(opened)
     }
 
@@ -1078,7 +1106,7 @@ impl Workspace {
         let url = parse_group_url(&self.windows[wi].incoming[ii].link).ok()?;
         let window = self.windows[wi].title.clone();
         let opened = self.new_group(&window, &url)?;
-        self.windows[wi].incoming.remove(ii);
+        self.dismiss_incoming(id);
         Some(opened)
     }
 
@@ -1162,6 +1190,7 @@ impl Workspace {
         if w.active.as_ref() == Some(id) {
             w.active = Some(fresh.id.clone());
         }
+        self.unqueue_open();
         Ok(fresh.id)
     }
 }
@@ -2869,5 +2898,77 @@ mod tests {
         let g = w.group_of(&b).unwrap();
         assert_eq!((g.store.as_str(), g.session.as_deref()), ("me", Some("me")));
         assert_eq!(g.head.session, None);
+    }
+
+    fn cfg() -> Vec<ConfigWindow> {
+        vec![window(W)]
+    }
+
+    fn links(w: &Workspace) -> Vec<&str> {
+        w.windows[0]
+            .incoming
+            .iter()
+            .map(|i| i.link.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn a_link_handed_while_the_config_was_broken_is_not_queued_beside_its_open_tab() {
+        let mut w = Workspace::from_config(&cfg());
+        let Some(Opened::Added(h)) = w.new_group(W, &folder(1)) else {
+            panic!("no group");
+        };
+        w.open_from(&h, &doc(1)).unwrap();
+        let config = cfg_of(&w);
+        w.rebase(Workspace::from_config(&[]));
+        let other = doc(2).to_string();
+        w.receive("W", None, doc(1).as_str()).unwrap();
+        w.receive("W", None, &other).unwrap();
+        w.rebase(Workspace::from_config(&config));
+        assert_eq!(links(&w), [other.as_str()]);
+    }
+
+    #[test]
+    fn opening_a_queued_link_by_any_route_takes_its_row() {
+        let mut w = Workspace::from_config(&cfg());
+        let Some(Opened::Added(h)) = w.new_group(W, &folder(1)) else {
+            panic!("no group");
+        };
+        w.queue("W", doc(1).as_str(), None).unwrap();
+        w.queue("W", doc(2).as_str(), None).unwrap();
+        w.open_from(&h, &doc(1)).unwrap();
+        assert_eq!(links(&w), [doc(2).as_str()]);
+        // The row's own action still takes its row, and only it.
+        let id = w.windows[0].incoming[0].id.clone();
+        w.queue("W", doc(3).as_str(), None).unwrap();
+        w.add_incoming(&id, &h).unwrap();
+        assert_eq!(links(&w), [doc(3).as_str()]);
+    }
+
+    /// The config `w`'s windows write.
+    fn cfg_of(w: &Workspace) -> Vec<ConfigWindow> {
+        let tab = |t: &Tab| ConfigTab {
+            title: t.title.clone(),
+            url: t.home_url.clone(),
+            ..Default::default()
+        };
+        w.windows
+            .iter()
+            .map(|win| ConfigWindow {
+                title: win.title.clone(),
+                store: win.store.clone(),
+                unsorted: win.unsorted.iter().map(tab).collect(),
+                groups: win
+                    .groups
+                    .iter()
+                    .map(|g| ConfigGroup {
+                        name: g.head.title.clone(),
+                        url: g.head.home_url.clone(),
+                        tabs: g.members.iter().map(tab).collect(),
+                        ..Default::default()
+                    })
+                    .collect(),
+            })
+            .collect()
     }
 }

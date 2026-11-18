@@ -459,6 +459,15 @@ impl StateMachineTest for WorkspaceMachine {
             "an Incoming item queued twice: {ids:?}"
         );
 
+        // (d) A row under a window's Incoming is a link not open in its store: opening it, by any
+        // route, takes it off the queue.
+        for w in &ws.windows {
+            for q in &w.incoming {
+                let open = Url::parse(&q.link).is_ok_and(|u| is_open(ws, &w.store, &u));
+                assert!(!open, "{} waits under {} but is open", q.link, w.title);
+            }
+        }
+
         // (c) A window shows a docked tab of its own, never a detached one.
         for w in &ws.windows {
             if let Some(a) = &w.active {
