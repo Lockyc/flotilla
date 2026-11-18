@@ -14,6 +14,9 @@ docs/superpowers/
 /scripts/launch-app.sh
 /scripts/core-patch.sh
 
+# cargo-mutants reports (`just mutants`)
+/mutants.out*/
+
 # macOS
 .DS_Store
 

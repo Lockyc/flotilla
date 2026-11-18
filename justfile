@@ -46,6 +46,22 @@ gate:
     @{{ just_executable() }} _core-patch guard # after clippy, whose build.rs generates core-patch.sh on a fresh clone
     cargo test --workspace
 
+# Occasional, not in `gate`: survivors are branches the tests run without asserting. Report in mutants.out/.
+# Mutation-test flotilla-core (`file` narrows it to one source, e.g. crates/flotilla-core/src/model.rs)
+[group("check")]
+mutants file="":
+    cargo mutants -p flotilla-core {{ if file == "" { "" } else { "-f " + file } }}
+
+# Mutation-test only the lines changed since origin/dev
+[group("check")]
+mutants-diff:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    diff=$(mktemp)
+    trap 'rm -f "$diff"' EXIT
+    git diff origin/dev > "$diff"
+    cargo mutants --in-diff "$diff"
+
 # ── shared-core dev loops (require the sibling ../<core> ghq checkout) ──
 # Every <core>-dev / <core>-pin wraps shell-core's scripts/core-patch.sh; the cores and the manifest
 # each one is pinned in are scripts/tooling.env's CORES.
