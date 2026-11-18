@@ -763,11 +763,17 @@ mod tests {
                 prop_assert_eq!(head_container(&open_link("drive.google.com", &id, usp)), want);
             }
 
-            /// A home is a fixed point, and the same page as the address it was kept from.
+            /// A home is the address less what the page added on load (its tab and heading), a
+            /// fixed point, and the same page as the address it was kept from.
             #[test]
             fn a_home_is_its_own_home(id in file_id(), e in editor(), d in decor()) {
-                for u in [d.doc(e, &id, "edit"), d.folder(&id)] {
+                let kept = Decor { tab: None, heading: false, ..d.clone() };
+                for (u, want) in [
+                    (d.doc(e, &id, "edit"), kept.doc(e, &id, "edit")),
+                    (d.folder(&id), kept.folder(&id)),
+                ] {
                     let home = home_url(&u);
+                    prop_assert_eq!(&home, &want);
                     prop_assert_eq!(home_url(&home), home.clone());
                     prop_assert_eq!(head_key(&home), head_key(&u));
                 }
