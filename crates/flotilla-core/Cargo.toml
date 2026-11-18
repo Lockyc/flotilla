@@ -12,4 +12,6 @@ shell-core = { git = "https://github.com/Lockyc/shell-core", rev = "57205825bec1
 config-core = { git = "https://github.com/Lockyc/config-core", rev = "22feffa59ab66525ea061b5053beeea30d6f27eb" }
 
 [dev-dependencies]
+proptest = "=1.12.0"
+proptest-state-machine = "=0.9.0"
 tempfile = "3"
