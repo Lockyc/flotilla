@@ -8,10 +8,9 @@
 ![Tauri](https://img.shields.io/badge/Tauri%20v2-24C8DB?logo=tauri&logoColor=white)
 [![License](https://img.shields.io/github/license/lockyc/flotilla)](LICENSE)
 
-A macOS workspace for work that spreads across many documents. Each piece of work is a
-**group**: a head tab, usually a Google Drive folder, with the documents opened from it listed
-beneath. Every document is open in exactly one place, so you stop losing track of which folder is
-open and which docs already are.
+Stop losing track of which Drive folder is open and which of its docs already are. flotilla gives
+each piece of work a **group**: a head tab, usually a Google Drive folder, with the documents
+opened from it listed beneath, and every document open in exactly one place. macOS.
 
 ## Install
 
