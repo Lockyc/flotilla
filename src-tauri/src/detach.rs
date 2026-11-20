@@ -71,20 +71,11 @@ pub fn plan(ws: &Workspace, open: &HashSet<TabId>) -> WindowPlan {
     let out = |id: &TabId| ws.find(id).is_some_and(|(_, _, t)| t.detached);
     let mut close: Vec<TabId> = open.iter().filter(|id| !out(id)).cloned().collect();
     close.sort();
+    // Every tab, Unsorted included, each under its own store (`Target::of`), as when docked.
     let open = ws
-        .windows
-        .iter()
-        .flat_map(|w| w.groups.iter())
-        .flat_map(|g| {
-            std::iter::once(&g.head)
-                .chain(g.members.iter())
-                .filter(|t| t.detached && !open.contains(&t.id))
-                .map(|t| Target {
-                    id: t.id.clone(),
-                    home_url: t.home_url.clone(),
-                    store: g.store.clone(),
-                })
-        })
+        .tabs()
+        .filter(|t| t.detached && !open.contains(&t.id))
+        .filter_map(|t| Target::of(ws, &t.id))
         .collect();
     WindowPlan { open, close }
 }
@@ -368,5 +359,27 @@ mod tests {
         close.sort();
         assert_eq!(p.close, close);
         assert!(p.open.is_empty());
+    }
+
+    #[test]
+    fn a_popped_out_unsorted_document_gets_a_window() {
+        let (mut ws, _, a, _) = ws();
+        let t = ws.windows[0].groups[0].members.remove(0);
+        ws.windows[0].unsorted.push(t);
+        ws.set_detached(&a, true);
+        let p = plan(&ws, &HashSet::new());
+        assert_eq!(p.open.iter().map(|t| &t.id).collect::<Vec<_>>(), [&a]);
+    }
+
+    #[test]
+    fn a_popped_out_member_keeps_its_own_session() {
+        let (mut ws, _, a, _) = ws();
+        ws.windows[0].groups[0].members[0].key.store = "work".to_string();
+        ws.set_detached(&a, true);
+        let p = plan(&ws, &HashSet::new());
+        assert_eq!(
+            p.open[0].store, "work",
+            "the tab's store, as docked, not the group's"
+        );
     }
 }

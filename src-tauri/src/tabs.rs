@@ -41,8 +41,20 @@ pub fn tab_of(label: &str) -> Option<(&str, TabId)> {
 pub struct Target {
     pub id: TabId,
     pub home_url: String,
-    /// The group's login store: the webview's session seed.
+    /// The tab's own login store (`Workspace::store_of`): the webview's session seed.
     pub store: String,
+}
+
+impl Target {
+    /// The webview to build for tab `id`, docked or popped out alike, or `None` when it is gone.
+    pub fn of(ws: &Workspace, id: &TabId) -> Option<Target> {
+        let (_, _, t) = ws.find(id)?;
+        Some(Target {
+            id: t.id.clone(),
+            home_url: t.home_url.clone(),
+            store: ws.store_of(id)?.to_string(),
+        })
+    }
 }
 
 /// What [`sync`] does to bring one window's webviews in line with the workspace.
@@ -112,14 +124,7 @@ pub fn plan(
         .as_ref()
         .filter(|id| !created.contains(*id) && !failed.contains(*id));
     let wait = wanted.is_some_and(|id| closing.contains(id));
-    let target = |id: &TabId| {
-        let (_, _, t) = ws.find(id)?;
-        Some(Target {
-            id: t.id.clone(),
-            home_url: t.home_url.clone(),
-            store: ws.store_of(id)?.to_string(),
-        })
-    };
+    let target = |id: &TabId| Target::of(ws, id);
     let create = wanted.filter(|_| !wait).and_then(target);
     let warm: Vec<Target> = window(ws, title)
         .into_iter()
