@@ -876,10 +876,17 @@ pub(crate) fn through_with<R>(
             Ok(())
         } else {
             crate::config::create_starter(path).and_then(|_| {
-                writes
-                    .iter()
-                    .try_for_each(|w| apply(path, w))
-                    .map_err(|e| e.to_string())
+                // Each edit saves on its own, so a failure after the first leaves the file half
+                // written, and the reload would rebase on it (Make Own Group's Remove landing
+                // without its AddGroup drops the document). Put back what was there first. A plain
+                // write: it follows a symlinked config and keeps its mode; this is the rare path.
+                let original = std::fs::read(path).ok();
+                writes.iter().try_for_each(|w| apply(path, w)).map_err(|e| {
+                    if let Some(bytes) = &original {
+                        let _ = std::fs::write(path, bytes);
+                    }
+                    e.to_string()
+                })
             })
         };
         let failed = written.is_err();
@@ -1437,6 +1444,42 @@ mod tests {
             || panic!("no view work after a landed commit"),
         );
         assert!(!gate.held_here());
+    }
+
+    #[test]
+    fn a_commit_failing_after_its_first_edit_leaves_the_file_as_it_was() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, source()).unwrap();
+        let gate = Gate::default();
+        let ws = std::sync::Mutex::new(load(&path));
+        let lands = Write::RemoveGroup {
+            window: "A".into(),
+            group: "Two".into(),
+        };
+        // On its own, the first edit does change the file.
+        let probe = dir.path().join("probe.toml");
+        std::fs::write(&probe, source()).unwrap();
+        apply(&probe, &lands).unwrap();
+        assert_ne!(std::fs::read_to_string(&probe).unwrap(), source());
+        let failed = std::cell::Cell::new(false);
+        through_with(
+            &gate,
+            &ws,
+            &path,
+            |_| {
+                let fails = Write::RemoveGroup {
+                    window: "Nowhere".into(),
+                    group: "X".into(),
+                };
+                ((), vec![lands, fails])
+            },
+            |_| failed.set(true),
+            |_, _| {},
+            || {},
+        );
+        assert!(failed.get(), "the second edit fails");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), source());
     }
 
     #[test]
