@@ -14,7 +14,7 @@ use tauri::Url;
 /// gate) held across a `WindowSet` call that reaches the host (`materialize`, `apply`,
 /// `open_or_focus`, `rename`, `delete`): the host takes them.
 ///
-/// Lock order: `gate`, then `ws`, then `created`, then `unsorted_reason`, then `warm`, then `hole`,
+/// Lock order: `gate`, then `ws`, then `config`, then `created`, then `unsorted_reason`, then `warm`, then `hole`,
 /// then `failed`; and `Persist`'s writer lock before `ws` (the session snapshot is taken inside
 /// it). `menu`, `notice`, `chrome_queue`, `shown`, `lookups` and `page_titles` are each taken alone.
 pub struct AppState {

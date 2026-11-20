@@ -13,7 +13,7 @@ use url::Url;
 
 use super::accounts::Keychain;
 use super::http::Transport;
-use super::Client;
+use super::{json, Client};
 
 const AUTH: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 pub const TOKEN: &str = "https://oauth2.googleapis.com/token";
@@ -294,11 +294,6 @@ fn redeem(
 /// one, is ignored, since the account is forgotten locally either way. Blocks.
 pub fn revoke(http: &dyn Transport, refresh: &str) {
     let _ = http.post_form(REVOKE, &[("token", refresh)]);
-}
-
-/// The body as JSON, or `null` when it isn't, so a missing field reads the same either way.
-fn json(body: &str) -> serde_json::Value {
-    serde_json::from_str(body).unwrap_or_default()
 }
 
 #[cfg(test)]

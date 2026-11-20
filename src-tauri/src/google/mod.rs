@@ -34,6 +34,11 @@ fn client_from(id: &'static str, secret: &'static str) -> Option<Client> {
     (!id.is_empty() && !secret.is_empty()).then_some(Client { id, secret })
 }
 
+/// The body as JSON, or `null` when it isn't, so a missing field reads the same either way.
+pub(crate) fn json(body: &str) -> serde_json::Value {
+    serde_json::from_str(body).unwrap_or_default()
+}
+
 /// The first `reason` of a Google API error body (`accessNotConfigured`,
 /// `insufficientFilePermissions`, …); `None` when the body carries none.
 pub(crate) fn reason(body: &str) -> Option<String> {
@@ -46,7 +51,7 @@ pub(crate) fn reason(body: &str) -> Option<String> {
 /// `"<what> failed (<status>)"`, carrying Google's reason and message when the body has them, so
 /// a misconfigured project or a refused account says why. Error bodies hold no credentials.
 pub(crate) fn failed(what: &str, status: u16, body: &str) -> String {
-    let json: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
+    let json = json(body);
     let message = json["error"]["message"].as_str();
     let detail = match (reason(body), message) {
         (Some(r), Some(m)) => format!(" {r}: {m}"),

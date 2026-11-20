@@ -10,7 +10,7 @@ use flotilla_core::identity::valid_file_id;
 use super::accounts::Keychain;
 use super::http::Transport;
 use super::oauth::TOKEN;
-use super::{failed, reason, Client};
+use super::{failed, json, reason, Client};
 
 const FILES: &str = "https://www.googleapis.com/drive/v3/files";
 
@@ -229,11 +229,6 @@ enum Lookup {
     /// 403 (the project's Drive API off, the account's scopes, a domain policy, a quota) is a
     /// failure, since it hides every file alike.
     Hidden,
-}
-
-/// The body as JSON, or `null` when it isn't.
-fn json(body: &str) -> serde_json::Value {
-    serde_json::from_str(body).unwrap_or_default()
 }
 
 #[cfg(test)]
