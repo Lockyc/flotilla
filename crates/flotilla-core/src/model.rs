@@ -501,6 +501,11 @@ impl Workspace {
         })
     }
 
+    /// Whether tab `id` is in some window's Unsorted.
+    pub fn is_unsorted(&self, id: &TabId) -> bool {
+        matches!(self.locate(id), Some((_, None)))
+    }
+
     /// The login store tab `id` is open in.
     pub fn store_of(&self, id: &TabId) -> Option<&str> {
         self.find(id).map(|(_, _, t)| t.key.store.as_str())
@@ -811,11 +816,7 @@ impl Workspace {
     /// Unsorted (a drag already placed it), `head` no longer heads a group, or [`Self::move_tab`]
     /// refuses (the re-keyed document is open in that store).
     pub fn sort_into(&mut self, doc: &TabId, head: &TabId, live: &HashSet<TabId>) -> Option<TabId> {
-        if !self
-            .windows
-            .iter()
-            .any(|w| w.unsorted.iter().any(|t| &t.id == doc))
-        {
+        if !self.is_unsorted(doc) {
             return None;
         }
         if !self
@@ -826,7 +827,7 @@ impl Workspace {
             return None;
         }
         self.move_tab(doc, Dest::Group(head), live);
-        if matches!(self.locate(doc), Some((_, None))) {
+        if self.is_unsorted(doc) {
             return None;
         }
         // A move appends: the document is its group's last member.

@@ -74,11 +74,7 @@ fn reason(located: &Located) -> Option<String> {
 
 /// Drops the reasons of documents no longer in any window's Unsorted.
 pub fn prune(ws: &Workspace, reasons: &mut HashMap<TabId, String>) {
-    reasons.retain(|id, _| {
-        ws.windows
-            .iter()
-            .any(|w| w.unsorted.iter().any(|t| &t.id == id))
-    });
+    reasons.retain(|id, _| ws.is_unsorted(id));
 }
 
 /// The connected Google accounts the Group menu lists; none in a build without the OAuth client.
