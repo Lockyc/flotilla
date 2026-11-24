@@ -15,8 +15,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub const SESSION_VERSION: u32 = 2;
 
 /// What a session file keeps: each window's active tab and non-empty Incoming queue by window
-/// title (the workspace's `stray` queues among them), Recent, and the tabs that were loaded (had
-/// a webview), which relaunch loads again.
+/// title (the workspace's `stray` queues among them), Recent, the tabs that were loaded (had
+/// a webview), which relaunch loads again, and the Unsorted documents a Drive lookup left
+/// waiting, with the reason their row shows, which relaunch and Connect look up again.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Session {
     pub active: BTreeMap<String, TabId>,
@@ -25,6 +26,14 @@ pub struct Session {
     pub incoming: BTreeMap<String, Vec<Incoming>>,
     #[serde(default)]
     pub loaded: BTreeSet<TabId>,
+    #[serde(default)]
+    pub waiting: BTreeMap<TabId, String>,
+}
+
+/// Whether document `id` may keep its waiting reason in `ws`: it is in an Unsorted, or `ws` has no
+/// windows (a config that didn't parse), which keeps every reason as it keeps the loaded tabs.
+pub fn still_waiting(ws: &Workspace, id: &TabId) -> bool {
+    ws.windows.is_empty() || ws.is_unsorted(id)
 }
 
 impl Session {
@@ -45,18 +54,28 @@ impl Session {
                 .chain(ws.stray.clone())
                 .collect(),
             loaded: BTreeSet::new(),
+            waiting: BTreeMap::new(),
         }
     }
 
-    /// `ws`'s session with `loaded`, those of them still open in it. A workspace with no windows
-    /// (a config that didn't parse) keeps them all, as its `stray` queues are kept, so they load
-    /// again once the config is good.
-    pub fn with_loaded<'a>(ws: &Workspace, loaded: impl IntoIterator<Item = &'a TabId>) -> Session {
+    /// `ws`'s session with `loaded`, those of them still open in it, and `waiting`, those of them
+    /// [`still_waiting`]. A workspace with no windows (a config that didn't parse) keeps them all,
+    /// as its `stray` queues are kept, so they apply again once the config is good.
+    pub fn with_shell<'a>(
+        ws: &Workspace,
+        loaded: impl IntoIterator<Item = &'a TabId>,
+        waiting: impl IntoIterator<Item = (&'a TabId, &'a String)>,
+    ) -> Session {
         Session {
             loaded: loaded
                 .into_iter()
                 .filter(|id| ws.windows.is_empty() || ws.find(id).is_some())
                 .cloned()
+                .collect(),
+            waiting: waiting
+                .into_iter()
+                .filter(|(id, _)| still_waiting(ws, id))
+                .map(|(id, why)| (id.clone(), why.clone()))
                 .collect(),
             ..Session::of(ws)
         }
@@ -141,13 +160,15 @@ fn quarantine(path: &Path, reason: String) -> Loaded {
     }
 }
 
-/// Writes `ws`'s [`Session`] with the `loaded` tabs ([`Session::with_loaded`], [`save_session`]).
+/// Writes `ws`'s [`Session`] with the `loaded` tabs and `waiting` documents
+/// ([`Session::with_shell`], [`save_session`]).
 pub fn save<'a>(
     path: &Path,
     ws: &Workspace,
     loaded: impl IntoIterator<Item = &'a TabId>,
+    waiting: impl IntoIterator<Item = (&'a TabId, &'a String)>,
 ) -> std::io::Result<()> {
-    save_session(path, &Session::with_loaded(ws, loaded))
+    save_session(path, &Session::with_shell(ws, loaded, waiting))
 }
 
 /// Writes `session` to `path` ([`write_atomic`]).
@@ -259,19 +280,46 @@ mod tests {
         assert!(!ids.is_empty());
         let none = Workspace::from_config(&[]);
         assert_eq!(
-            Session::with_loaded(&none, &ids).loaded,
+            Session::with_shell(&none, &ids, []).loaded,
             ids.iter().cloned().collect()
         );
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("session.json");
-        save(&p, &none, &ids).unwrap();
+        save(&p, &none, &ids, []).unwrap();
         let Loaded::Restored(s) = load(&p) else {
             panic!()
         };
         assert_eq!(s.loaded, ids.iter().cloned().collect());
         // With windows, a tab no longer open is still dropped.
-        let gone = Session::with_loaded(&sample(), &[TabId::default()]);
+        let gone = Session::with_shell(&sample(), &[TabId::default()], []);
         assert!(gone.loaded.is_empty());
+    }
+
+    /// An Unsorted document a lookup left waiting keeps its reason across a relaunch; one no
+    /// longer in Unsorted does not.
+    #[test]
+    fn waiting_documents_keep_their_reason() {
+        let mut w = sample();
+        let Some(crate::model::Handed::Unsorted(d)) = w.receive(
+            "A",
+            None,
+            "https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrSt02/edit",
+        ) else {
+            panic!()
+        };
+        let member = w.windows[0].groups[0].members[0].id.clone();
+        let why = "Connect a Google account".to_string();
+        let reasons = BTreeMap::from([(d.clone(), why.clone()), (member, why.clone())]);
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("session.json");
+        save(&p, &w, [], &reasons).unwrap();
+        let Loaded::Restored(s) = load(&p) else {
+            panic!()
+        };
+        assert_eq!(s.waiting, BTreeMap::from([(d.clone(), why.clone())]));
+        // A config that didn't parse keeps every reason.
+        let none = Workspace::from_config(&[]);
+        assert_eq!(Session::with_shell(&none, [], &reasons).waiting, reasons);
     }
 
     #[test]
@@ -279,7 +327,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("session.json");
         let w = sample();
-        save(&p, &w, []).unwrap();
+        save(&p, &w, [], []).unwrap();
         let Loaded::Restored(s) = load(&p) else {
             panic!()
         };
@@ -308,7 +356,7 @@ mod tests {
         let w = sample();
         let open: Vec<TabId> = w.tabs().map(|t| t.id.clone()).collect();
         let gone = "0000000000000000".to_string();
-        save(&p, &w, [&open[0], &gone]).unwrap();
+        save(&p, &w, [&open[0], &gone], []).unwrap();
         let Loaded::Restored(s) = load(&p) else {
             panic!()
         };
@@ -332,7 +380,7 @@ mod tests {
         let doc = "https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrSt02/edit";
         w.queue("B", doc, None).unwrap();
         w.receive("B", None, "mailto:x").unwrap();
-        save(&p, &w, []).unwrap();
+        save(&p, &w, [], []).unwrap();
         let Loaded::Restored(s) = load(&p) else {
             panic!()
         };
@@ -443,7 +491,7 @@ mod tests {
     fn newer_version_is_quarantined() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("session.json");
-        save(&p, &sample(), []).unwrap();
+        save(&p, &sample(), [], []).unwrap();
         let v3 = fs::read_to_string(&p)
             .unwrap()
             .replacen("\"version\": 2", "\"version\": 3", 1);
@@ -459,11 +507,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("session.json");
         let w = sample();
-        save(&p, &w, []).unwrap();
+        save(&p, &w, [], []).unwrap();
         assert!(!dir.path().join("session.json.tmp").exists());
         let before = fs::read_to_string(&p).unwrap();
         fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o555)).unwrap();
-        let r = save(&p, &Workspace::default(), []);
+        let r = save(&p, &Workspace::default(), [], []);
         fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
         assert!(r.is_err());
         assert_eq!(fs::read_to_string(&p).unwrap(), before);
@@ -505,7 +553,7 @@ mod tests {
     fn save_creates_a_missing_parent() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("a/b/session.json");
-        save(&p, &sample(), []).unwrap();
+        save(&p, &sample(), [], []).unwrap();
         assert!(matches!(load(&p), Loaded::Restored(_)));
     }
 

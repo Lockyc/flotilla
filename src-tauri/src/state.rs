@@ -33,8 +33,8 @@ pub struct AppState {
     /// next selected, or sent Home while active.
     pub failed: Mutex<HashSet<TabId>>,
     /// Why each Unsorted document was not sorted into its folder's group (`crate::locate`), shown
-    /// on its row. In memory only; an entry goes when its document leaves Unsorted or is looked up
-    /// again.
+    /// on its row, and saved as the session's `waiting`; an entry goes when its document leaves
+    /// Unsorted or is looked up again.
     pub unsorted_reason: Mutex<HashMap<TabId, String>>,
     /// The Drive lookups in flight, so only each document's latest answer settles it.
     pub lookups: Mutex<crate::locate::Lookups>,

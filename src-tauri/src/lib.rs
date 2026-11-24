@@ -1,7 +1,7 @@
 //! flotilla's Tauri shell: one OS window per config `[[window]]` (shell-core's `WindowSet`), each
 //! with a sidebar listing that window's groups and a content hole showing its active tab's webview.
-//! The workspace is built from the config and written back to it; the session (each window's
-//! active tab and Incoming queue, and Recent) is loaded at setup and saved as it changes.
+//! The workspace is built from the config and written back to it; the session
+//! (`flotilla_core::session::Session`) is loaded at setup and saved as it changes.
 
 mod commands;
 mod config;
@@ -209,9 +209,11 @@ fn load_state(
     let persist = persist::Persist::for_load(path, &loaded);
     let mut ws = flotilla_core::model::Workspace::from_config(&config.workspace_windows());
     let mut warm = std::collections::HashSet::new();
+    let mut waiting = std::collections::HashMap::new();
     if let Loaded::Restored(s) = loaded {
         ws.restore(s.active, s.recent, s.incoming);
         warm.extend(s.loaded);
+        waiting.extend(s.waiting);
     }
     state::AppState {
         gate: Default::default(),
@@ -220,7 +222,7 @@ fn load_state(
         created: Default::default(),
         warm: std::sync::Mutex::new(warm),
         failed: Default::default(),
-        unsorted_reason: Default::default(),
+        unsorted_reason: std::sync::Mutex::new(waiting),
         lookups: Default::default(),
         shown: Default::default(),
         menu: Default::default(),
@@ -392,6 +394,9 @@ pub fn run() {
             tabs::sync(handle);
             detach::reconcile(handle);
             commands::open_early_links(handle);
+            // The documents a lookup left waiting last run: their account or network may answer
+            // now.
+            locate::retry_unsorted(handle);
             // `windows.json` reflects the config in force from launch, not from the first change.
             persist::mark_dirty(handle);
 

@@ -3,7 +3,7 @@
 
 use flotilla_core::model::{TabId, Workspace};
 use flotilla_core::session::{self, Loaded};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -50,14 +50,15 @@ impl Persist {
         self.generation.load(Ordering::SeqCst) == ticket
     }
 
-    /// Writes the session of the workspace and loaded tabs `snapshot` returns, then `windows.json`
+    /// Writes the session of the workspace, loaded tabs and waiting reasons `snapshot` returns
+    /// ([`session::save`]), then `windows.json`
     /// beside it from that workspace and the config's window accents
     /// ([`session::windows_manifest`]), both taken inside the writer lock. A no-op (and no
     /// snapshot) when this run does not persist. The error is the error bar's text, naming which
     /// file failed.
     pub fn save<C: Fn(&str) -> Option<String>>(
         &self,
-        snapshot: impl FnOnce() -> (Workspace, HashSet<TabId>, C),
+        snapshot: impl FnOnce() -> (Workspace, HashSet<TabId>, HashMap<TabId, String>, C),
     ) -> Result<(), String> {
         let Some(path) = &self.path else {
             return Ok(());
@@ -65,8 +66,9 @@ impl Persist {
         // Snapshot under the writer lock: a writer that waited here then writes the state as of
         // now, never one older than what the writer before it wrote.
         let _w = self.writing.lock().unwrap();
-        let (ws, loaded, colour_of) = snapshot();
-        session::save(path, &ws, &loaded).map_err(|e| format!("Couldn't save the session: {e}"))?;
+        let (ws, loaded, waiting, colour_of) = snapshot();
+        session::save(path, &ws, &loaded, &waiting)
+            .map_err(|e| format!("Couldn't save the session: {e}"))?;
         let manifest = session::windows_manifest(&ws, colour_of);
         session::write_atomic(&manifest_path(path), manifest.as_bytes())
             .map_err(|e| format!("Couldn't publish the window list: {e}"))
@@ -132,8 +134,9 @@ pub fn save_now(app: &AppHandle) {
             .cloned()
             .collect();
         loaded.extend(state.warm.lock().unwrap().iter().cloned());
+        let waiting = state.unsorted_reason.lock().unwrap().clone();
         let cfg = state.config.lock().unwrap().clone();
-        (ws, loaded, move |title: &str| cfg.colour_of(title))
+        (ws, loaded, waiting, move |title: &str| cfg.colour_of(title))
     };
     if let Err(msg) = state.persist.save(snapshot) {
         crate::tabs::notice(app, msg);
@@ -176,10 +179,11 @@ mod tests {
         let p = Persist::new(Some(path.clone()));
         let ws = sample();
         let loaded: HashSet<TabId> = ws.tabs().map(|t| t.id.clone()).collect();
-        p.save(|| (ws.clone(), loaded.clone(), neutral)).unwrap();
+        p.save(|| (ws.clone(), loaded.clone(), HashMap::new(), neutral))
+            .unwrap();
         assert_eq!(
             session::load(&path),
-            Loaded::Restored(Session::with_loaded(&ws, &loaded))
+            Loaded::Restored(Session::with_shell(&ws, &loaded, []))
         );
     }
 
@@ -189,7 +193,8 @@ mod tests {
         let p = Persist::new(Some(dir.path().join("session.json")));
         let ws = sample();
         let blue = |_: &str| Some("#17458f".to_string());
-        p.save(|| (ws.clone(), HashSet::new(), blue)).unwrap();
+        p.save(|| (ws.clone(), HashSet::new(), HashMap::new(), blue))
+            .unwrap();
         let written = std::fs::read_to_string(dir.path().join("windows.json")).unwrap();
         assert_eq!(written, session::windows_manifest(&ws, blue));
     }
@@ -200,11 +205,15 @@ mod tests {
         // A directory where windows.json goes: the session saves, the manifest can't.
         std::fs::create_dir(dir.path().join("windows.json")).unwrap();
         let p = Persist::new(Some(dir.path().join("session.json")));
-        let e = p.save(|| (sample(), HashSet::new(), neutral)).unwrap_err();
+        let e = p
+            .save(|| (sample(), HashSet::new(), HashMap::new(), neutral))
+            .unwrap_err();
         assert!(e.starts_with("Couldn't publish the window list: "), "{e}");
         let p = Persist::new(Some(dir.path().join("windows.json/x/session.json")));
         std::fs::write(dir.path().join("windows.json/x"), "").unwrap();
-        let e = p.save(|| (sample(), HashSet::new(), neutral)).unwrap_err();
+        let e = p
+            .save(|| (sample(), HashSet::new(), HashMap::new(), neutral))
+            .unwrap_err();
         assert!(e.starts_with("Couldn't save the session: "), "{e}");
     }
 
@@ -216,7 +225,7 @@ mod tests {
         let p = Persist::new(Some(dir.path().join("session.json")));
         p.save(|| {
             assert!(p.writing.try_lock().is_err());
-            (sample(), HashSet::new(), neutral)
+            (sample(), HashSet::new(), HashMap::new(), neutral)
         })
         .unwrap();
     }

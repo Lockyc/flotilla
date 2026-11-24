@@ -2,7 +2,8 @@
 //! are asked of Drive (`google::drive::Locator`) on a thread of its own, since the HTTP client
 //! blocks, and the answer comes back to the main thread to move it out of Unsorted
 //! (`Workspace::sort_into`). A document that can't be sorted keeps the reason on its row
-//! (`AppState::unsorted_reason`). Also the Group menu's Connect and Disconnect Google Account.
+//! (`AppState::unsorted_reason`, saved in the session), and is looked up again at launch and on
+//! Connect. Also the Group menu's Connect and Disconnect Google Account.
 
 use crate::commands::handed_front;
 use crate::google::drive::{Located, Locator};
@@ -72,9 +73,10 @@ fn reason(located: &Located) -> Option<String> {
     }
 }
 
-/// Drops the reasons of documents no longer in any window's Unsorted.
+/// Drops the reasons of documents no longer in any window's Unsorted
+/// ([`flotilla_core::session::still_waiting`]).
 pub fn prune(ws: &Workspace, reasons: &mut HashMap<TabId, String>) {
-    reasons.retain(|id, _| ws.is_unsorted(id));
+    reasons.retain(|id, _| flotilla_core::session::still_waiting(ws, id));
 }
 
 /// The connected Google accounts the Group menu lists; none in a build without the OAuth client.
@@ -247,6 +249,7 @@ fn settle(app: &AppHandle, answers: Vec<Answer>) {
         tabs::changed(app);
     } else if changed {
         tabs::push_dto(app);
+        crate::persist::mark_dirty(app);
     }
     if answers.iter().any(|a| !a.dropped.is_empty()) {
         crate::menu::refresh(app);
@@ -302,8 +305,9 @@ fn retry(ws: &Workspace, reasons: &HashMap<TabId, String>) -> Vec<TabId> {
 }
 
 /// The Unsorted documents left with a reason ([`retry`]) looked up again, one after another on
-/// one thread: a newly connected account may see documents no account could before.
-fn retry_unsorted(app: &AppHandle) {
+/// one thread: a newly connected account, or the network back at launch, may answer what it
+/// couldn't before.
+pub fn retry_unsorted(app: &AppHandle) {
     let Some(client) = crate::google::client() else {
         return;
     };
