@@ -34,7 +34,7 @@ fmt:
 # Lint with clippy (warnings as errors)
 [group("check")]
 clippy:
-    cargo clippy --workspace -- -D warnings
+    cargo clippy --workspace --all-targets -- -D warnings
 
 # The active-[patch] guard also runs via .githooks/pre-commit (opt-in per clone via core.hooksPath);
 # fmt/clippy/tests have no hook/CI, so run this manually before committing/merging.
@@ -42,7 +42,7 @@ clippy:
 [group("check")]
 gate:
     cargo fmt --all --check
-    cargo clippy --workspace -- -D warnings
+    @{{ just_executable() }} clippy
     @{{ just_executable() }} _core-patch guard # after clippy, whose build.rs generates core-patch.sh on a fresh clone
     cargo test --workspace
 
