@@ -9,8 +9,19 @@ use url::Url;
 /// `ancestors` (nearest first, possibly ending in the alias `"root"`) for `provider`. The nearest
 /// ancestor with a group decides, so a nested folder's own group beats its parent's.
 pub fn route(ws: &Workspace, provider: &str, ancestors: &[String]) -> Option<TabId> {
-    let heads: Vec<(TabId, String)> = ws
-        .windows
+    let heads = containers(ws, provider);
+    ancestors.iter().find_map(|a| {
+        heads
+            .iter()
+            .find(|(_, container)| container == a)
+            .map(|(id, _)| id.clone())
+    })
+}
+
+/// Every group head, in any window, whose home shows a `provider` container, with that
+/// container: the folders a document can be routed to, so also where a walk up its folders stops.
+pub fn containers(ws: &Workspace, provider: &str) -> Vec<(TabId, String)> {
+    ws.windows
         .iter()
         .flat_map(|w| &w.groups)
         .filter_map(|g| {
@@ -18,13 +29,7 @@ pub fn route(ws: &Workspace, provider: &str, ancestors: &[String]) -> Option<Tab
             let (p, container) = head_container(&url)?;
             (p == provider).then(|| (g.head.id.clone(), container))
         })
-        .collect();
-    ancestors.iter().find_map(|a| {
-        heads
-            .iter()
-            .find(|(_, container)| container == a)
-            .map(|(id, _)| id.clone())
-    })
+        .collect()
 }
 
 #[cfg(test)]

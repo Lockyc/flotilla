@@ -10,7 +10,7 @@ use crate::google::http::Http;
 use crate::google::{accounts, oauth, Client};
 use crate::state::AppState;
 use crate::tabs::{self, Forward};
-use flotilla_core::identity::{doc_key, head_container};
+use flotilla_core::identity::doc_key;
 use flotilla_core::model::{Handed, TabId, Workspace};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -51,12 +51,8 @@ fn lookup(ws: &Workspace, doc: &TabId) -> Option<Lookup> {
         .flat_map(|w| &w.unsorted)
         .find(|t| &t.id == doc)?;
     let key = doc_key(&tab.key.store, &Url::parse(&tab.home_url).ok()?)?;
-    let containers = ws
-        .windows
-        .iter()
-        .flat_map(|w| &w.groups)
-        .filter_map(|g| head_container(&Url::parse(&g.head.home_url).ok()?))
-        .filter(|(p, _)| *p == key.provider)
+    let containers = flotilla_core::route::containers(ws, &key.provider)
+        .into_iter()
         .map(|(_, c)| c)
         .collect();
     Some(Lookup {
