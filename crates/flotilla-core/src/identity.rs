@@ -197,6 +197,13 @@ pub fn identity(store: &str, url: &Url) -> DocKey {
     })
 }
 
+/// What one document list (a group's members, or a window's Unsorted) holds at most once: the
+/// [`identity`] of `key` whatever its store. A config edit finds a list's entry by its `url`
+/// alone, so two copies of one document in one list, in two stores, could not be told apart.
+pub fn listed(key: &DocKey) -> (&str, &str) {
+    (&key.provider, &key.id)
+}
+
 /// 64-bit FNV-1a. Spelled out rather than `DefaultHasher`, whose output may change between Rust
 /// releases: tab ids built from it persist in the session file.
 pub fn fnv1a(bytes: &[u8]) -> u64 {

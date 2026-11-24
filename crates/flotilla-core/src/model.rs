@@ -9,7 +9,8 @@
 //! its window's Unsorted ([`WindowWs::unsorted`]). A document is open at most once across
 //! every window, detached tabs included; opening it again raises the existing tab in its own
 //! window. The registry is not a separate index: it is derived by scanning the tabs, so it cannot
-//! drift from them.
+//! drift from them. One document list (a group's members, or an Unsorted) holds a document once,
+//! whatever its store ([`crate::identity::listed`]).
 //!
 //! Every tab opens in a login store, resolved through config-core's session cascade: the tab's
 //! own `session`, else its group's, else its window's (which already folds in the app-wide one,
@@ -18,7 +19,7 @@
 //! [`Group::store`]. A tab or group moved to another level re-resolves, and so takes its new
 //! place's store unless it sets its own.
 
-use crate::identity::{doc_key, fnv1a, head_key, identity, tab_id, DocKey};
+use crate::identity::{doc_key, fnv1a, head_key, identity, listed, tab_id, DocKey};
 use crate::nav::parse_group_url;
 use config_core::session::resolve;
 use serde::{Deserialize, Serialize};
@@ -501,6 +502,26 @@ impl Workspace {
         })
     }
 
+    /// The tab other than `except` in window `wi`'s document list (`gi`: that group's members,
+    /// `None`: the window's Unsorted) holding `key`'s document in any store: a list holds each
+    /// document once ([`listed`]).
+    fn listed_in(
+        &self,
+        wi: usize,
+        gi: Option<usize>,
+        key: &DocKey,
+        except: Option<&TabId>,
+    ) -> Option<TabId> {
+        let w = &self.windows[wi];
+        let list = match gi {
+            Some(gi) => &w.groups[gi].members,
+            None => &w.unsorted,
+        };
+        list.iter()
+            .find(|t| Some(&t.id) != except && listed(&t.key) == listed(key))
+            .map(|t| t.id.clone())
+    }
+
     /// Whether tab `id` is in some window's Unsorted.
     pub fn is_unsorted(&self, id: &TabId) -> bool {
         matches!(self.locate(id), Some((_, None)))
@@ -600,13 +621,17 @@ impl Workspace {
 
     /// Opens document `url` from tab `from`, joining `from`'s group (or, from Unsorted, its
     /// window's Unsorted) at the end. `None` when `url` is not a document or `from` is not open.
-    /// An already-open document is raised wherever it is, in whichever window. It opens in
-    /// `from`'s store, the login its link was followed in.
+    /// An already-open document is raised wherever it is, in whichever window, as is a copy of it
+    /// in another store that list holds already. It opens in `from`'s store, the login its link
+    /// was followed in.
     pub fn open_from(&mut self, from: &TabId, url: &Url) -> Option<Opened> {
         let (wi, gi) = self.locate(from)?;
         let store = self.store_of(from)?.to_string();
         let key = doc_key(&store, url)?;
-        if let Some(id) = self.open_doc(&key) {
+        if let Some(id) = self
+            .open_doc(&key)
+            .or_else(|| self.listed_in(wi, gi, &key, None))
+        {
             return Some(self.raise(id));
         }
         let mut t = tab(url, url.as_str(), &store, false);
@@ -622,12 +647,16 @@ impl Workspace {
         Some(Opened::Added(id))
     }
 
-    /// Opens document `url` at the end of window `wi`'s Unsorted, or raises it where it is open.
-    /// `None` when `url` is not a document.
+    /// Opens document `url` at the end of window `wi`'s Unsorted, or raises it where it is open
+    /// or the copy of it in another store that Unsorted holds. `None` when `url` is not a
+    /// document.
     fn open_unsorted(&mut self, wi: usize, url: &Url) -> Option<Opened> {
         let store = self.windows[wi].store.clone();
         let key = doc_key(&store, url)?;
-        if let Some(id) = self.open_doc(&key) {
+        if let Some(id) = self
+            .open_doc(&key)
+            .or_else(|| self.listed_in(wi, None, &key, None))
+        {
             return Some(self.raise(id));
         }
         let t = tab(url, url.as_str(), &store, false);
@@ -722,8 +751,9 @@ impl Workspace {
     /// is no such entry or window.
     ///
     /// If the head's identity is now open elsewhere, nothing is duplicated and that tab is raised
-    /// and returned: when it is a head, the entry's other members join its group and the entry
-    /// leaves Recent; when it is a member, the entry stays in Recent.
+    /// and returned: when it is a head, the entry's other members join its group, but for those
+    /// it holds in another store, and the entry leaves Recent; when it is a member, the entry
+    /// stays in Recent.
     pub fn reopen_recent(&mut self, window: &str, index: usize) -> Option<TabId> {
         let wi = self.window_index(window)?;
         let store = self.windows[wi].store.clone();
@@ -736,7 +766,11 @@ impl Workspace {
                 return Some(occupant);
             };
             let entry = self.recent.remove(index);
-            let members = self.restorable(entry.members, &[entry.head.key]);
+            let members: Vec<Tab> = self
+                .restorable(entry.members, &[entry.head.key])
+                .into_iter()
+                .filter(|m| self.listed_in(wi, Some(gi), &m.key, None).is_none())
+                .collect();
             self.windows[wi].groups[gi].members.extend(members);
             self.unqueue_open();
             self.raise(occupant.clone());
@@ -836,7 +870,8 @@ impl Workspace {
 
     /// Moves a member or Unsorted document to the end of `dest`, in whichever window. A move onto
     /// another store re-keys the document to that store (and so gives it that key's id), and is
-    /// refused if it is already open there. An active document stays active, in its new window;
+    /// refused if it is already open there; a move is refused too where `dest` holds the document
+    /// in another store ([`listed`]). An active document stays active, in its new window;
     /// the window it left shows its [`Self::successor`] among `live`.
     pub fn move_tab(&mut self, member: &TabId, dest: Dest, live: &HashSet<TabId>) {
         let Some((fw, fg)) = self.locate(member) else {
@@ -862,6 +897,9 @@ impl Workspace {
         let mut moved = list[at].clone();
         reseat(&mut moved, &inherited);
         if &moved.id != member && self.open_doc(&moved.key).is_some() {
+            return;
+        }
+        if self.listed_in(tw, tg, &moved.key, None).is_some() {
             return;
         }
         let was_active = self.windows[fw].active.as_ref() == Some(member);
@@ -1141,7 +1179,8 @@ pub enum SetHomeBlock {
     AtHome,
     /// The page is not an http(s) page.
     NotWeb,
-    /// The page is a document open in another tab: making it home would open it twice.
+    /// The page is a document open in another tab: making it home would open it twice, or list
+    /// it twice in one list ([`listed`]).
     OpenElsewhere,
 }
 
@@ -1164,8 +1203,12 @@ impl Workspace {
         if !matches!(current.scheme(), "http" | "https") {
             return Some(SetHomeBlock::NotWeb);
         }
-        self.open_doc(&identity(store, current))
+        let key = identity(store, current);
+        let (wi, gi) = self.locate(id)?;
+        let head = gi.is_some_and(|gi| &self.windows[wi].groups[gi].head.id == id);
+        self.open_doc(&key)
             .filter(|other| other != id)
+            .or_else(|| (!head).then(|| self.listed_in(wi, gi, &key, Some(id)))?)
             .map(|_| SetHomeBlock::OpenElsewhere)
     }
 
@@ -1770,6 +1813,86 @@ mod tests {
         let (mut w, _, d) = with_unsorted();
         let e = id(w.open_from(&d, &doc(2)).unwrap());
         assert_eq!(unsorted_ids(&w, W), vec![d, e]);
+    }
+
+    /// Window `W`: Unsorted holding doc 3 in the work store, and group "One" (folder 1) holding
+    /// Budget (doc 1) in the default store and Draft (doc 2) in the work store. Answers the ids of
+    /// One's head, Budget, Draft and the Unsorted doc 3.
+    fn mixed_sessions() -> (Workspace, TabId, TabId, TabId, TabId) {
+        let mut one = cgroup("One", &folder(1), DEFAULT_STORE, &[("Budget", &doc(1))]);
+        one.tabs.push(ctab("Draft", &doc(2), Some("work")));
+        let w = Workspace::from_config(&[ConfigWindow {
+            unsorted: vec![ctab("Loose", &doc(3), Some("work"))],
+            groups: vec![one],
+            ..window(W)
+        }]);
+        let g = &w.windows[0].groups[0];
+        let (h, budget, draft) = (
+            g.head.id.clone(),
+            g.members[0].id.clone(),
+            g.members[1].id.clone(),
+        );
+        let loose = w.windows[0].unsorted[0].id.clone();
+        (w, h, budget, draft, loose)
+    }
+
+    /// A document list holds a document once, whatever store each copy opens in: following a
+    /// link to it from a tab in another store raises the copy already there.
+    #[test]
+    fn a_list_holds_a_document_once_whatever_its_store() {
+        let (mut w, h, budget, draft, loose) = mixed_sessions();
+        assert_eq!(
+            w.open_from(&draft, &doc(1)),
+            Some(Opened::Raised(budget.clone()))
+        );
+        assert_eq!(member_ids(&w, &h), vec![budget.clone(), draft.clone()]);
+        // Handed to the window (default store), doc 3 raises the work copy in Unsorted.
+        assert_eq!(
+            w.receive(W, None, doc(3).as_str()),
+            Some(Handed::Raised(loose.clone()))
+        );
+        assert_eq!(unsorted_ids(&w, W), vec![loose]);
+        // Draft can't make Budget its home: One would list it twice.
+        assert_eq!(
+            w.set_home_blocked(&draft, Some(&doc(1))),
+            Some(SetHomeBlock::OpenElsewhere)
+        );
+    }
+
+    /// A move into a list that holds the document already, in another store, is refused.
+    #[test]
+    fn a_move_never_lists_a_document_twice() {
+        // Unsorted holds doc 1 in the work store; One holds it in the default store.
+        let mut w = Workspace::from_config(&[ConfigWindow {
+            unsorted: vec![ctab("Loose", &doc(1), Some("work"))],
+            groups: vec![cgroup(
+                "One",
+                &folder(1),
+                DEFAULT_STORE,
+                &[("Budget", &doc(1))],
+            )],
+            ..window(W)
+        }]);
+        let h = w.windows[0].groups[0].head.id.clone();
+        let loose = w.windows[0].unsorted[0].id.clone();
+        let before = w.clone();
+        assert_eq!(w.sort_into(&loose, &h, &Default::default()), None);
+        w.move_tab(&loose, Dest::Group(&h), &Default::default());
+        assert_eq!(w, before);
+    }
+
+    /// Reopening a group into the open copy of its head leaves out a member that group already
+    /// lists in another store.
+    #[test]
+    fn reopen_recent_never_lists_a_document_twice() {
+        let mut w = ws();
+        let h = head_of(&mut w, 1);
+        w.open_from(&h, &doc(2)).unwrap();
+        w.close_group(&h, &Default::default());
+        let (fresh, h, budget, draft, _) = mixed_sessions();
+        w.rebase(fresh);
+        assert_eq!(w.reopen_recent(W, 0), Some(h.clone()));
+        assert_eq!(member_ids(&w, &h), vec![budget, draft]);
     }
 
     #[test]

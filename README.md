@@ -93,7 +93,8 @@ its own.
 
 A document is open once per session across every window: two heads or tabs naming the same
 document in the same session are a config error, and the same document can be open in two
-sessions at once.
+sessions at once, in two places: a group, or a window's Unsorted, lists a document once in any
+session.
 
 **Global**
 

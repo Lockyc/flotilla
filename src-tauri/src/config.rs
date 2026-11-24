@@ -3,7 +3,7 @@
 
 use config_core::session::resolve;
 use config_core::{Colour, Density, TabDigitKeys};
-use flotilla_core::identity::{identity, DocKey};
+use flotilla_core::identity::{identity, listed, DocKey};
 use flotilla_core::model::{ConfigGroup, ConfigTab, ConfigWindow};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -209,7 +209,8 @@ fn config_tab(t: &DocTab) -> ConfigTab {
 
 /// Parses config source; the message is what the sidebar shows. Beyond config-core's shared
 /// window checks, every `url` is an http(s) address and a document is open once: no two heads or
-/// tabs, in any window, share an identity (`flotilla_core::identity::identity`).
+/// tabs, in any window, share an identity (`flotilla_core::identity::identity`), and a list of
+/// tabs holds a document once in any session (`flotilla_core::identity::listed`).
 pub fn parse(src: &str) -> Result<Config, String> {
     let mut cfg: Config = toml::from_str(src).map_err(|e| format!("config: {}", e.message()))?;
     config_core::validate_windows(&cfg.windows).map_err(|e| format!("config: {e}"))?;
@@ -219,34 +220,54 @@ pub fn parse(src: &str) -> Result<Config, String> {
         }
     }
     let mut seen: HashMap<DocKey, String> = HashMap::new();
-    let mut claim = |at: String, store: &str, url: &str| -> Result<(), String> {
+    let mut claim = |at: String, store: &str, url: &str| -> Result<(DocKey, String), String> {
         let parsed = Url::parse(url)
             .ok()
             .filter(|u| matches!(u.scheme(), "http" | "https"))
             .ok_or_else(|| format!("config: {at}: `{url}` is not an http(s) address"))?;
-        match seen.insert(identity(store, &parsed), at.clone()) {
+        let key = identity(store, &parsed);
+        match seen.insert(key.clone(), at.clone()) {
             Some(first) => Err(format!(
                 "config: {first} and {at} are the same document, which opens once"
             )),
-            None => Ok(()),
+            None => Ok((key, at)),
         }
+    };
+    let once_listed = |list: &[(DocKey, String)]| -> Result<(), String> {
+        for (i, (key, at)) in list.iter().enumerate() {
+            if let Some((_, first)) = list[..i].iter().find(|(k, _)| listed(k) == listed(key)) {
+                return Err(format!(
+                    "config: {first} and {at} are the same document, which a list holds once"
+                ));
+            }
+        }
+        Ok(())
     };
     for w in &cfg.windows {
         let window = w.title.trim();
         let window_store = cfg.window_store(w);
         let under = |own: &Option<String>, place: &str| resolve([own.as_deref(), Some(place)]);
-        for t in &w.extra.unsorted {
-            let at = format!("`{}` (window `{window}`)", t.title.trim());
-            claim(at, &under(&t.session, &window_store), &t.url)?;
-        }
+        let unsorted = w
+            .extra
+            .unsorted
+            .iter()
+            .map(|t| {
+                let at = format!("`{}` (window `{window}`)", t.title.trim());
+                claim(at, &under(&t.session, &window_store), &t.url)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        once_listed(&unsorted)?;
         for g in &w.groups {
             let group = g.name.trim();
             let at = |name: &str| format!("`{name}` (window `{window}`, group `{group}`)");
             let group_store = under(&g.extra.session, &window_store);
             claim(at(group), &group_store, &g.extra.url)?;
-            for t in &g.tabs {
-                claim(at(t.title.trim()), &under(&t.session, &group_store), &t.url)?;
-            }
+            let members = g
+                .tabs
+                .iter()
+                .map(|t| claim(at(t.title.trim()), &under(&t.session, &group_store), &t.url))
+                .collect::<Result<Vec<_>, _>>()?;
+            once_listed(&members)?;
         }
     }
     Ok(cfg)
@@ -510,6 +531,30 @@ mod tests {
         ))
         .unwrap_err();
         assert!(err.contains("`Budget`") && err.contains("`B`"), "{err}");
+    }
+
+    #[test]
+    fn a_list_holds_a_document_once_in_any_session() {
+        let list = |place: &str, tab: &str| {
+            parse(&format!(
+                "[[window]]\ntitle = \"Club\"\n{place}\
+                 {tab}\ntitle = \"Budget\"\nurl = \"{SHEET}\"\n\
+                 {tab}\ntitle = \"Mine\"\nurl = \"{SHEET}\"\nsession = \"me\"\n"
+            ))
+        };
+        let group = format!("[[window.group]]\nname = \"A\"\nurl = \"{FOLDER}\"\n");
+        let err = list(&group, "[[window.group.tab]]").unwrap_err();
+        assert!(err.contains("`Budget`") && err.contains("`Mine`"), "{err}");
+        let err = list("", "[[window.tab]]").unwrap_err();
+        assert!(err.contains("`Budget`") && err.contains("`Mine`"), "{err}");
+        // In two lists, each session's copy is its own.
+        assert!(parse(&format!(
+            "[[window]]\ntitle = \"Club\"\n\
+             [[window.tab]]\ntitle = \"Mine\"\nurl = \"{SHEET}\"\nsession = \"me\"\n\
+             [[window.group]]\nname = \"A\"\nurl = \"{FOLDER}\"\n\
+             [[window.group.tab]]\ntitle = \"Budget\"\nurl = \"{SHEET}\"\n"
+        ))
+        .is_ok());
     }
 
     #[test]

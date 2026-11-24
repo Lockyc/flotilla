@@ -1034,6 +1034,35 @@ mod tests {
         assert_eq!(ws.find(&id_of(&ws, D3)).unwrap().2.key.store, "me");
     }
 
+    /// [`source`] with "One" also holding Draft (D5) in session work: one group, mixed sessions.
+    fn mixed_source() -> String {
+        source().replace(
+            &format!("title = \"Minutes\"\nurl = \"{D2}\"\n"),
+            &format!(
+                "title = \"Minutes\"\nurl = \"{D2}\"\n\
+                 [[window.group.tab]]\ntitle = \"Draft\"\nurl = \"{D5}\"\nsession = \"work\"\n"
+            ),
+        )
+    }
+
+    /// Following a Budget link in Draft raises Budget rather than listing D1 again in work, so
+    /// closing a tab of One removes its own entry and no other.
+    #[test]
+    fn a_group_in_mixed_sessions_writes_each_document_by_its_own_entry() {
+        let (ws, w) = run_on(&mixed_source(), |ws| {
+            let d = id_of(ws, D5);
+            change(ws, |ws| ws.open_from(&d, &url(D1)).map(|_| ())).1
+        });
+        assert_eq!(w, []);
+        assert_eq!(ws.tabs().filter(|t| t.home_url == D1).count(), 1);
+        let (ws, w) = run_on(&mixed_source(), |ws| {
+            let d = id_of(ws, D5);
+            change(ws, |ws| ws.close_tab(&d, &Default::default())).1
+        });
+        assert!(matches!(&w[..], [Write::RemoveDoc { url, .. }] if url == D5));
+        assert!(ws.tabs().any(|t| t.home_url == D1));
+    }
+
     #[test]
     fn set_home_rewrites_the_group_url_and_keeps_members() {
         let sub = "https://drive.google.com/drive/folders/sub";
@@ -1724,7 +1753,7 @@ mod tests {
             ) {
                 let dir = tempfile::tempdir().unwrap();
                 let path = dir.path().join("config.toml");
-                std::fs::write(&path, source()).unwrap();
+                std::fs::write(&path, mixed_source()).unwrap();
                 let gate = Gate::default();
                 let ws = std::sync::Mutex::new(load(&path));
                 for (op, fail) in &ops {
