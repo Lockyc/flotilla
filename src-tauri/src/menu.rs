@@ -799,7 +799,7 @@ mod tests {
         assert_eq!(group_loaded(&ws, &both, &m), [h.clone(), m.clone()]);
         // A popped-out member stays in its window.
         ws.set_detached(&m, true);
-        assert_eq!(group_loaded(&ws, &both, &h), [h.clone()]);
+        assert_eq!(group_loaded(&ws, &both, &h), std::slice::from_ref(&h));
         assert_eq!(
             menu_state_for(&ws, &live(&[&m]), None, Some(&h)).unload_group,
             off("Unload Group — Nothing loaded")
