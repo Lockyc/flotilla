@@ -8,6 +8,7 @@ use config_core::{add_window, edit_window, remove, At};
 use flotilla_core::model::{TabId, Workspace};
 use shell_core::compositing::HoleRect;
 use shell_core::windows::plan::{Slot, WindowDecl};
+use shell_core::spaces::ShellWindow as _;
 use shell_core::windows::{WindowHost, WindowSet, WindowWrite};
 use std::collections::{HashMap, HashSet};
 use tauri::{AppHandle, Emitter, Manager, TitleBarStyle, WebviewUrl, WebviewWindow};
@@ -55,7 +56,7 @@ fn build(app: &AppHandle, slot: &Slot) -> tauri::Result<WebviewWindow> {
             .hidden_title(true)
             .title_bar_style(TitleBarStyle::Overlay)
             .theme(dark.then_some(tauri::Theme::Dark))
-            .focused(shell_core::focus::focused())
+            .shell_window()
             .build()?;
     crate::menu::follow_focus(app, &window.as_ref().window());
     let later = app.clone();
